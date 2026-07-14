@@ -15,7 +15,7 @@
 ./scripts/build.sh all
 ```
 
-`quasar-diagnostics` is the browser layer. `quasar-steam` adds Steam, RPM Fusion, 32-bit graphics libraries, Gamescope, and a GOW-derived Bubblewrap compatibility workaround. It launches Steam in Gamepad UI through nested Gamescope by default. It deliberately excludes Decky, host input mounts, and service daemons because Quasar owns those policies.
+`quasar-diagnostics` is the browser layer. `quasar-steam` adds Steam, RPM Fusion, 32-bit graphics libraries, Gamescope, and a GOW-derived Bubblewrap compatibility workaround. It launches Steam in a game-console experience through nested Gamescope by default (legacy Big Picture, the games-on-whales-validated game-foreground path; a modern gamepadui Deck-session mode is opt-in). See `images/quasar-steam/README.md` for the focus mechanism and the host `--shm-size`, 32-bit driver, audio, and PUID/PGID requirements. It deliberately excludes Decky, host input mounts, and service daemons because Quasar owns those policies.
 
 ## Published images
 
