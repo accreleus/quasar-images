@@ -11,10 +11,18 @@ fail() { log "ERROR: $*"; exit 64; }
 
 if [[ "$(id -u)" == "0" ]]; then
   if ! getent group "$PGID" >/dev/null; then
-    groupadd --gid "$PGID" "$UNAME"
+    group_name="$UNAME"
+    if getent group "$group_name" >/dev/null; then
+      group_name="${UNAME}-${PGID}"
+    fi
+    groupadd --gid "$PGID" "$group_name"
   fi
   if ! getent passwd "$PUID" >/dev/null; then
-    useradd --no-log-init --uid "$PUID" --gid "$PGID" --home-dir "$HOME" --create-home --shell /bin/bash "$UNAME"
+    user_name="$UNAME"
+    if getent passwd "$user_name" >/dev/null; then
+      user_name="${UNAME}-${PUID}"
+    fi
+    useradd --no-log-init --uid "$PUID" --gid "$PGID" --home-dir "$HOME" --create-home --shell /bin/bash "$user_name"
   fi
 
   export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"

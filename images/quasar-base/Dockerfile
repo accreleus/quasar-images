@@ -14,6 +14,8 @@ LABEL org.opencontainers.image.title="Quasar common Fedora base" \
 RUN dnf --setopt=install_weak_deps=False -y install \
       bash ca-certificates coreutils curl findutils glibc-langpack-en jq procps-ng shadow-utils \
       tini tzdata util-linux \
+    && groupadd --gid 1000 quasar \
+    && useradd --no-log-init --uid 1000 --gid 1000 --home-dir /home/quasar --create-home --shell /bin/bash quasar \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
