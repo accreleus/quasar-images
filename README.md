@@ -7,4 +7,14 @@
 ./scripts/verify.sh
 ```
 
-The next layers build on `quasar-base`: first graphics, then browser, game, diagnostics, and reference workloads.
+## Image hierarchy
+
+`quasar-app` builds on `quasar-base` and adds the shared Vulkan/EGL/OpenGL, Mesa, GLVND, GBM, Wayland, audio, NVIDIA-runtime initialization, and GPU-probe runtime. `quasar-diagnostics`, `quasar-test-vulkan`, and `quasar-test-egl` build on `quasar-app`.
+
+```sh
+./scripts/build.sh all
+```
+
+`quasar-diagnostics` is the browser layer; a generic browser base and a game layer are deliberately deferred until a second browser application or a real game workload needs them.
+
+Accelerated launches provide `QUASAR_GPU_VULKAN_DEVICE_UUID`; `quasar-app` fails closed unless Vulkan selects that exact hardware UUID. PCI-BDF validation is added when Quasar's companion GPU-assignment transport exposes the mapping.

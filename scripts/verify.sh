@@ -6,7 +6,7 @@ cd "$root"
 
 grep -q '^FROM registry.fedoraproject.org/fedora@sha256:' images/quasar-base/Dockerfile
 ! grep -Eq 'gcc|gcc-c\+\+|make|cmake|clang|rust|golang' images/quasar-base/Dockerfile
-./scripts/build.sh
+./scripts/build.sh quasar-base
 labels="$(docker image inspect quasar-base:dev --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "optional"' <<<"$labels" >/dev/null
 

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() { printf '%s quasar-gpu-init: %s\n' "$(date -Iseconds)" "$*" >&2; }
+
+if [[ -d /usr/local/nvidia/lib64 || -d /usr/local/nvidia/lib || -e /usr/lib64/libnvidia-allocator.so.1 ]]; then
+  log "NVIDIA runtime userspace detected; refreshing linker cache"
+  ldconfig
+fi

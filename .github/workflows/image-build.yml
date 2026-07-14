@@ -1,0 +1,26 @@
+name: Image build
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the non-accelerated base lifecycle
+        run: ./scripts/verify.sh
+
+      - name: Build the complete image hierarchy
+        run: ./scripts/build.sh all
+
+      # Accelerated images intentionally are not started here. Their entrypoint
+      # requires an assigned Vulkan UUID and is validated on Tower and Hermes.

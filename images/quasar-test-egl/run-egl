@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+/usr/lib64/mesa/eglinfo -s surfaceless >&2
+exec /usr/lib64/mesa/eglgears_wayland

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+vulkaninfo --summary >&2
+exec vkcube --c "${QUASAR_TEST_CUBE_COUNT:-500}"

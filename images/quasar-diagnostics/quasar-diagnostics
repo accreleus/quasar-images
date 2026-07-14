@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec chromium \
+  --ozone-platform=wayland \
+  --enable-features=UseOzonePlatform,VaapiVideoDecoder \
+  --enable-gpu-rasterization \
+  --disable-software-rasterizer \
+  "${QUASAR_DIAGNOSTICS_URL:-about:blank}"

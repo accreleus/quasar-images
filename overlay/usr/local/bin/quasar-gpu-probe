@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() { printf '{"contract_version":1,"result":"fail","reason":"%s"}\n' "$1"; exit 1; }
+
+expected_uuid="${QUASAR_GPU_VULKAN_DEVICE_UUID:-}"
+[[ -n "$expected_uuid" ]] || fail "missing expected Vulkan device UUID"
+summary="$(vulkaninfo --summary 2>&1)" || fail "Vulkan loader failed"
+
+# Select the first non-software physical device. Vulkan loaders may enumerate a
+# llvmpipe fallback alongside the assigned hardware GPU, which is not itself a
+# failure as long as the selected UUID is the expected hardware one.
+device="$(awk '
+  /^GPU[0-9]+:/ { if (name != "" && name !~ /[Ll]avapipe|[Ll]lvmpipe|[Ss]oftpipe|[Ss]wift[Ss]hader/) { print name "|" uuid; exit } ; name=""; uuid="" }
+  /deviceName/ { sub(/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*/, ""); name=$0 }
+  /deviceUUID/ { sub(/^[[:space:]]*deviceUUID[[:space:]]*=[[:space:]]*/, ""); uuid=$0 }
+  END { if (name != "" && name !~ /[Ll]avapipe|[Ll]lvmpipe|[Ss]oftpipe|[Ss]wift[Ss]hader/) print name "|" uuid }
+' <<<"$summary" | head -1)"
+[[ -n "$device" && "$device" == *'|'* ]] || fail "software Vulkan renderer detected"
+name="${device%%|*}"
+uuid="${device#*|}"
+[[ -n "$uuid" ]] || fail "Vulkan hardware device UUID unavailable"
+[[ "${uuid,,}" == "${expected_uuid,,}" ]] || fail "Vulkan device UUID does not match Quasar assignment"
+printf '{"contract_version":1,"expected_hardware_key":"uuid-%s","detected":{"vulkan_device_uuid":"%s","vulkan_device_name":"%s"},"software_renderer":false,"result":"pass"}\n' "$expected_uuid" "$uuid" "$name"

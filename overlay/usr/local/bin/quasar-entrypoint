@@ -31,6 +31,13 @@ if [[ "$(id -u)" == "0" ]]; then
     "$hook"
   done
 
+  if [[ -x /usr/local/bin/quasar-gpu-init ]]; then
+    /usr/local/bin/quasar-gpu-init
+  fi
+  if [[ -x /usr/local/bin/quasar-gpu-probe && "${QUASAR_GPU_PROBE_ON_STARTUP:-1}" == "1" ]]; then
+    /usr/local/bin/quasar-gpu-probe
+  fi
+
   printf '{"event":"quasar-base.ready","uid":%s,"gid":%s,"home":"%s"}\n' "$PUID" "$PGID" "$HOME" >&2
   exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups --inh-caps=-all -- "$@"
 fi
