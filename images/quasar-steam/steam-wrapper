@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+steam_dir="$HOME/.local/share/Steam"
+legacy_dir="$HOME/.steam/steam"
+
+if [[ ! -f "$steam_dir/steam.sh" ]]; then
+  mkdir -p "$steam_dir"
+  tar xJf /usr/lib/steam/bootstraplinux_ubuntu12_32.tar.xz -C "$steam_dir"
+fi
+
+mkdir -p "$(dirname "$legacy_dir")"
+if [[ -L "$legacy_dir" || ! -e "$legacy_dir" ]]; then
+  ln -sfn "$steam_dir" "$legacy_dir"
+elif [[ -d "$legacy_dir" && -z "$(ls -A "$legacy_dir")" ]]; then
+  rmdir "$legacy_dir"
+  ln -s "$steam_dir" "$legacy_dir"
+else
+  printf '%s\n' "quasar-steam: refusing to replace non-empty $legacy_dir" >&2
+fi
+
+cd "$steam_dir"
+read -r -a steam_args <<< "${STEAM_STARTUP_FLAGS:--gamepadui}"
+exec ./steam.sh "${steam_args[@]}" "$@"

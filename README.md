@@ -9,13 +9,13 @@
 
 ## Image hierarchy
 
-`quasar-app` builds on `quasar-base` and adds the shared Vulkan/EGL/OpenGL, Mesa, GLVND, GBM, Wayland, audio, NVIDIA-runtime initialization, and GPU-probe runtime. `quasar-diagnostics`, `quasar-test-vulkan`, and `quasar-test-egl` build on `quasar-app`.
+`quasar-app` builds on `quasar-base` and adds the shared Vulkan/EGL/OpenGL, Mesa, GLVND, GBM, Wayland, audio, NVIDIA-runtime initialization, and GPU-probe runtime. `quasar-diagnostics`, `quasar-test-vulkan`, `quasar-test-egl`, and `quasar-steam` build on `quasar-app`.
 
 ```sh
 ./scripts/build.sh all
 ```
 
-`quasar-diagnostics` is the browser layer; a generic browser base and a game layer are deliberately deferred until a second browser application or a real game workload needs them.
+`quasar-diagnostics` is the browser layer. `quasar-steam` adds Steam, RPM Fusion, 32-bit graphics libraries, Gamescope, and a GOW-derived Bubblewrap compatibility workaround. It launches Steam in Gamepad UI through nested Gamescope by default. It deliberately excludes Decky, host input mounts, and service daemons because Quasar owns those policies.
 
 ## Published images
 

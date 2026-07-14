@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export STEAM_COMPAT_DATA_PATH="${STEAM_COMPAT_DATA_PATH:-$HOME/.local/share/quasar-steam/pfx}"
+export WINEPREFIX="${WINEPREFIX:-$STEAM_COMPAT_DATA_PATH}"
+export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS="${SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS:-0}"
+
+client=(dbus-run-session -- /usr/local/bin/quasar-steam-client "$@")
+if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" == "1" ]]; then
+  exec gamescope -e \
+    -W "${GAMESCOPE_WIDTH:-1920}" \
+    -H "${GAMESCOPE_HEIGHT:-1080}" \
+    -r "${GAMESCOPE_REFRESH:-60}" \
+    -- "${client[@]}"
+fi
+
+exec "${client[@]}"
