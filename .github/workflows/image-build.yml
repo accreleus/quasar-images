@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   build:
@@ -21,6 +22,36 @@ jobs:
 
       - name: Build the complete image hierarchy
         run: ./scripts/build.sh all
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'workflow_dispatch' || github.ref_name == 'main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish immutable and channel tags
+        if: github.event_name == 'workflow_dispatch' || github.ref_name == 'main'
+        env:
+          REGISTRY: ghcr.io
+          OWNER: ${{ github.repository_owner }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          case "$REF_NAME" in
+            develop) channel_tag=develop ;;
+            main) channel_tag=latest ;;
+            *) echo "Publishing is limited to develop and main; got $REF_NAME" >&2; exit 64 ;;
+          esac
+          sha_tag="sha-${SHA:0:12}"
+          for image in quasar-base quasar-app quasar-diagnostics quasar-test-vulkan quasar-test-egl; do
+            remote="$REGISTRY/$OWNER/$image"
+            docker tag "$image:dev" "$remote:$channel_tag"
+            docker tag "$image:dev" "$remote:$sha_tag"
+            docker push "$remote:$channel_tag"
+            docker push "$remote:$sha_tag"
+          done
 
       # Accelerated images intentionally are not started here. Their entrypoint
       # requires an assigned Vulkan UUID and is validated on Tower and Hermes.
