@@ -1,0 +1,1 @@
+Executable `.sh` files in this directory run in lexical order as root before the container drops to the configured application user. Use hooks only for image-local initialization; application processes belong in the container command.

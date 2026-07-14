@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() { printf '%s quasar-base: %s\n' "$(date -Iseconds)" "$*" >&2; }
+fail() { log "ERROR: $*"; exit 64; }
+
+: "${PUID:=1000}" "${PGID:=1000}" "${UNAME:=quasar}" "${HOME:=/home/quasar}" "${UMASK:=022}"
+[[ "$PUID" =~ ^[0-9]+$ && "$PGID" =~ ^[0-9]+$ ]] || fail "PUID and PGID must be numeric"
+[[ "$UNAME" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || fail "UNAME is not a valid Linux user name"
+[[ "$UMASK" =~ ^0?[0-7]{3}$ ]] || fail "UMASK must be an octal value such as 022"
+
+if [[ "$(id -u)" == "0" ]]; then
+  if ! getent group "$PGID" >/dev/null; then
+    groupadd --gid "$PGID" "$UNAME"
+  fi
+  if ! getent passwd "$PUID" >/dev/null; then
+    useradd --no-log-init --uid "$PUID" --gid "$PGID" --home-dir "$HOME" --create-home --shell /bin/bash "$UNAME"
+  fi
+
+  export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+  export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+  export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/quasar-runtime-$PUID}"
+  install -d -o "$PUID" -g "$PGID" -m 0750 "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+  install -d -o "$PUID" -g "$PGID" -m 0700 "$XDG_RUNTIME_DIR"
+  umask "$UMASK"
+
+  for hook in /etc/quasar/init.d/*.sh; do
+    [[ -x "$hook" ]] || continue
+    log "running init hook $(basename "$hook")"
+    "$hook"
+  done
+
+  printf '{"event":"quasar-base.ready","uid":%s,"gid":%s,"home":"%s"}\n' "$PUID" "$PGID" "$HOME" >&2
+  exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups --inh-caps=-all -- "$@"
+fi
+
+exec "$@"
