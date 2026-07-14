@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() { printf '%s quasar-entrypoint: %s\n' "$(date -Iseconds)" "$*" >&2; }
+fail() { log "ERROR: $*"; exit 64; }
+
+: "${PUID:=1000}" "${PGID:=1000}" "${UNAME:=quasar}" "${HOME:=/config}" "${UMASK:=022}"
+[[ "$PUID" =~ ^[0-9]+$ && "$PGID" =~ ^[0-9]+$ ]] || fail "PUID and PGID must be numeric"
+
+if ! getent group "$PGID" >/dev/null; then groupadd --gid "$PGID" "$UNAME"; fi
+if ! getent passwd "$PUID" >/dev/null; then useradd --uid "$PUID" --gid "$PGID" --home-dir "$HOME" --create-home --shell /bin/bash "$UNAME"; fi
+
+mkdir -p "$HOME" /tmp/quasar-runtime
+chown "$PUID:$PGID" "$HOME" /tmp/quasar-runtime
+chmod "$UMASK" "$HOME"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/quasar-runtime}"
+mkdir -p "$XDG_RUNTIME_DIR"
+chown "$PUID:$PGID" "$XDG_RUNTIME_DIR"
+chmod 0700 "$XDG_RUNTIME_DIR"
+
+for hook in /etc/quasar/init.d/*; do
+  [[ -x "$hook" ]] || continue
+  log "running init hook $(basename "$hook")"
+  "$hook"
+done
+
+if [[ -x /usr/local/bin/quasar-gpu-init ]]; then /usr/local/bin/quasar-gpu-init; fi
+if [[ "${QUASAR_GPU_PROBE_ON_STARTUP:-1}" == "1" && -x /usr/local/bin/quasar-gpu-probe ]]; then
+  /usr/local/bin/quasar-gpu-probe
+fi
+
+log "executing as uid=$PUID gid=$PGID: $*"
+exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups --inh-caps=-all -- "$@"
+

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+  printf '{"contract_version":1,"result":"fail","reason":"%s"}\n' "$1"
+  exit 1
+}
+
+[[ -n "${QUASAR_GPU_HARDWARE_KEY:-}${QUASAR_GPU_PCI_BDF:-}" ]] || fail "missing expected GPU identity"
+command -v vulkaninfo >/dev/null || fail "vulkaninfo unavailable"
+
+summary="$(vulkaninfo --summary 2>&1)" || fail "Vulkan loader failed"
+if grep -Eqi 'lavapipe|llvmpipe|softpipe|swiftshader' <<<"$summary"; then fail "software Vulkan renderer detected"; fi
+
+# Exact PCI/UUID matching is completed with the Quasar identity transport in
+# milestone 2. Keep this implementation fail-closed until it is available.
+fail "exact GPU identity verification is not implemented"
+

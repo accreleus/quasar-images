@@ -1,0 +1,35 @@
+name: Image build
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Fedora 43 image hierarchy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and verify base and graphics layers
+        run: ./scripts/verify.sh
+
+      - name: Build derived layers
+        run: |
+          ./scripts/build.sh game-fedora
+          ./scripts/build.sh browser-fedora
+          ./scripts/build.sh diagnostics
+          ./scripts/build.sh test-vulkan
+          ./scripts/build.sh test-egl
+
+      - name: Verify fail-closed behavior without a GPU
+        run: ./scripts/test-no-gpu.sh
