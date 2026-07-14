@@ -1,17 +1,86 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+log() { printf '%s quasar-steam: %s\n' "$(date -Iseconds)" "$*" >&2; }
+
 export STEAM_COMPAT_DATA_PATH="${STEAM_COMPAT_DATA_PATH:-$HOME/.local/share/quasar-steam/pfx}"
 export WINEPREFIX="${WINEPREFIX:-$STEAM_COMPAT_DATA_PATH}"
 export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS="${SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS:-0}"
 
-client=(dbus-run-session -- /usr/local/bin/quasar-steam-client "$@")
-if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" == "1" ]]; then
-  exec gamescope -e \
-    -W "${GAMESCOPE_WIDTH:-1920}" \
-    -H "${GAMESCOPE_HEIGHT:-1080}" \
-    -r "${GAMESCOPE_REFRESH:-60}" \
-    -- "${client[@]}"
+# --- Steam UI mode & the game-foreground handoff -----------------------------
+# In nested Gamescope, pressing "Play" only brings the game to the foreground if
+# Gamescope can focus the game's window. Gamescope's Steam-integration focus is
+# X11-atom driven (STEAM_GAME per-window appID + GAMESCOPECTRL_BASELAYER_APPID on
+# the root window), and is independent of whether Steam is a child of Gamescope
+# (games-on-whales and Valve's own gamescope-session both launch Steam as a
+# sibling X client). Two validated configurations exist:
+#
+#   bigpicture  (default) - legacy Big Picture, `-bigpicture`. Steam does NOT pin
+#               GAMESCOPECTRL_BASELAYER_APPID, so Gamescope's default focus raises
+#               the newest STEAM_GAME-tagged window (the launched game). This is
+#               the games-on-whales-validated path and the robust default here.
+#   gamepadui   - modern Deck UI. Requires Steam to run in a full SteamOS session
+#               (`-gamepadui -steamos3 -steampal -steamdeck` + STEAM_MULTIPLE_XWAYLANDS=1)
+#               so Steam tags game windows and manages the baselayer handoff.
+#               A PARTIAL gamepadui config (e.g. `-gamepadui` alone) pins focus to
+#               the Steam UI forever and never releases it to launched games -
+#               this is the defect this image fixes, so the flags ship as a
+#               validated unit, never partially.
+#
+# STEAM_STARTUP_FLAGS overrides the computed flags verbatim (advanced use).
+ui_mode="${QUASAR_STEAM_UI_MODE:-bigpicture}"
+case "$ui_mode" in
+  bigpicture)
+    default_flags="-bigpicture"
+    multi_xwayland_default=0
+    ;;
+  gamepadui)
+    default_flags="-gamepadui -steamos3 -steampal -steamdeck"
+    multi_xwayland_default=1
+    ;;
+  *)
+    log "unknown QUASAR_STEAM_UI_MODE='$ui_mode'; falling back to bigpicture"
+    default_flags="-bigpicture"
+    multi_xwayland_default=0
+    ;;
+esac
+export STEAM_STARTUP_FLAGS="${STEAM_STARTUP_FLAGS:-$default_flags}"
+
+# Per-game Xwayland isolation is part of the validated gamepadui unit and stays
+# off for bigpicture. Gamescope composites every Xwayland into one output, so the
+# node-agent's compositor capture is unaffected either way.
+if [[ "${QUASAR_STEAM_MULTIPLE_XWAYLANDS:-$multi_xwayland_default}" == "1" ]]; then
+  export STEAM_MULTIPLE_XWAYLANDS=1
 fi
 
-exec "${client[@]}"
+# --- Launch requirement diagnostics (non-fatal) ------------------------------
+# Steam's Chromium command buffers need a large /dev/shm; Docker's 64 MB default
+# yields a black/flashing UI. The image cannot raise this - the launcher must be
+# run with `--shm-size=1g` (or equivalent). Warn loudly if it looks too small.
+shm_kb="$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2{print $2}' || true)"
+if [[ "$shm_kb" =~ ^[0-9]+$ && "$shm_kb" -lt 262144 ]]; then
+  log "WARNING: /dev/shm is only $((shm_kb / 1024)) MiB; Steam needs >=1 GiB (run with --shm-size=1g)."
+fi
+
+# 32-bit Steam and games need 32-bit GL/Vulkan userspace. The image deliberately
+# does not bake NVIDIA driver libs (they are driver-version coupled); the host's
+# container runtime must inject the 32-bit driver libs (NVIDIA_DRIVER_CAPABILITIES
+# including graphics+compat32). Warn if NVIDIA 64-bit GL is present but 32-bit is not.
+if [[ -e /usr/lib64/libGLX_nvidia.so.0 ]] \
+   && ! { ldconfig -p 2>/dev/null | grep -F 'libGLX_nvidia.so.0 (libc6)' | grep -qv 'x86-64'; }; then
+  log "WARNING: 64-bit NVIDIA GL present but 32-bit libGLX_nvidia.so.0 was not injected;"
+  log "         32-bit Steam/games will fail. See images/quasar-steam/README.md (host requirements)."
+fi
+
+client=(dbus-run-session -- /usr/local/bin/quasar-steam-client "$@")
+
+if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
+  exec "${client[@]}"
+fi
+
+log "starting Gamescope (mode=$ui_mode flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0})"
+exec gamescope -e \
+  -W "${GAMESCOPE_WIDTH:-1920}" \
+  -H "${GAMESCOPE_HEIGHT:-1080}" \
+  -r "${GAMESCOPE_REFRESH:-60}" \
+  -- "${client[@]}"
