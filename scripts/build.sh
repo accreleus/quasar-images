@@ -17,4 +17,4 @@ case "$target" in
   *) echo "usage: $0 {base-fedora|graphics-fedora|browser-fedora|game-fedora|diagnostics|test-vulkan|test-egl}" >&2; exit 64 ;;
 esac
 
-docker buildx build --load --progress=plain -f "$dockerfile" -t "quasar/${target}:${tag}" --build-arg "VERSION=$version" "${args[@]+"${args[@]}"}" "$context"
+DOCKER_BUILDKIT=1 docker build --progress=plain -f "$dockerfile" -t "quasar/${target}:${tag}" --build-arg "VERSION=$version" "${args[@]+"${args[@]}"}" "$context"

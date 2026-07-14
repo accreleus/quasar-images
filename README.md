@@ -6,7 +6,7 @@ This repository owns application-side graphics runtime, lifecycle, diagnostics a
 
 ## Quick start
 
-Docker and Docker Buildx are the only required host tools.
+Docker is the only required host tool.
 
 ```sh
 ./scripts/build.sh base-fedora
@@ -17,4 +17,3 @@ Docker and Docker Buildx are the only required host tools.
 `graphics-fedora`, `browser-fedora`, `game-fedora`, `diagnostics`, `test-vulkan`, and `test-egl` are build targets. The browser, diagnostic and reference-workload layers are intentionally small initial scaffolds; vendor validation and accelerated workloads land in the next implementation milestone.
 
 See [the image contract](docs/image-contract.md), [driver model](docs/driver-model.md), and [adding an image](docs/adding-an-image.md).
-
