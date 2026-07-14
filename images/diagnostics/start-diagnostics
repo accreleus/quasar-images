@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-exec quasar-chromium "${QUASAR_DIAGNOSTICS_URL:-about:blank}"
-
