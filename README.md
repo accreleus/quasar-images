@@ -21,4 +21,4 @@
 
 Use manual workflow dispatch on `develop` to build and publish each image to `ghcr.io/salty2011/<image>:develop` and an immutable `sha-<commit>` tag. Pushes to `main` build and publish `:latest` and the same immutable SHA tag automatically. Pull requests build only; ordinary `develop` pushes do not trigger a workflow.
 
-Accelerated launches provide `QUASAR_GPU_VULKAN_DEVICE_UUID`; `quasar-app` fails closed unless Vulkan selects that exact hardware UUID. PCI-BDF validation is added when Quasar's companion GPU-assignment transport exposes the mapping.
+When a launch provides `QUASAR_GPU_VULKAN_DEVICE_UUID`, `quasar-app` fails closed unless Vulkan selects that exact hardware UUID. Without it (the Quasar agent does not ship GPU-UUID assignment yet — quasar#273) the probe still rejects software renderers but accepts whichever hardware device the runtime injected. PCI-BDF validation is added when Quasar's companion GPU-assignment transport exposes the mapping.

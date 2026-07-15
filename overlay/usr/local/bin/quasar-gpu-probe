@@ -3,8 +3,12 @@ set -euo pipefail
 
 fail() { printf '{"contract_version":1,"result":"fail","reason":"%s"}\n' "$1"; exit 1; }
 
+# Strict-when-assigned: with QUASAR_GPU_VULKAN_DEVICE_UUID set the probe fails
+# closed unless Vulkan selects exactly that hardware. Without it (the Quasar
+# agent does not ship GPU-UUID assignment yet — quasar#273) the probe still
+# rejects software renderers but accepts whichever hardware device the runtime
+# injected, so unassigned launches work instead of never starting.
 expected_uuid="${QUASAR_GPU_VULKAN_DEVICE_UUID:-}"
-[[ -n "$expected_uuid" ]] || fail "missing expected Vulkan device UUID"
 summary="$(vulkaninfo --summary 2>&1)" || fail "Vulkan loader failed"
 
 # Select the first non-software physical device. Vulkan loaders may enumerate a
@@ -20,5 +24,10 @@ device="$(awk '
 name="${device%%|*}"
 uuid="${device#*|}"
 [[ -n "$uuid" ]] || fail "Vulkan hardware device UUID unavailable"
-[[ "${uuid,,}" == "${expected_uuid,,}" ]] || fail "Vulkan device UUID does not match Quasar assignment"
-printf '{"contract_version":1,"expected_hardware_key":"uuid-%s","detected":{"vulkan_device_uuid":"%s","vulkan_device_name":"%s"},"software_renderer":false,"result":"pass"}\n' "$expected_uuid" "$uuid" "$name"
+if [[ -n "$expected_uuid" ]]; then
+  [[ "${uuid,,}" == "${expected_uuid,,}" ]] || fail "Vulkan device UUID does not match Quasar assignment"
+  expected_key="uuid-$expected_uuid"
+else
+  expected_key="unassigned"
+fi
+printf '{"contract_version":1,"expected_hardware_key":"%s","detected":{"vulkan_device_uuid":"%s","vulkan_device_name":"%s"},"software_renderer":false,"result":"pass"}\n' "$expected_key" "$uuid" "$name"
