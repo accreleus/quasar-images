@@ -33,7 +33,8 @@ RUN dnf --setopt=install_weak_deps=False -y install \
       "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
       "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
     && dnf --setopt=install_weak_deps=False -y install \
-      dbus-daemon file gamescope lsb-release pciutils steam \
+      dbus-daemon file gamescope ibus lsb-release pciutils steam \
+      mesa-libGLU mesa-libGLU.i686 \
       libglvnd-egl.i686 libglvnd-gles.i686 libglvnd-glx.i686 \
       mesa-dri-drivers.i686 mesa-libEGL.i686 mesa-libGL.i686 mesa-libgbm.i686 \
       mesa-vulkan-drivers.i686 vulkan-loader.i686 \

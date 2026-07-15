@@ -5,7 +5,19 @@ log() { printf '%s quasar-steam: %s\n' "$(date -Iseconds)" "$*" >&2; }
 
 export STEAM_COMPAT_DATA_PATH="${STEAM_COMPAT_DATA_PATH:-$HOME/.local/share/quasar-steam/pfx}"
 export WINEPREFIX="${WINEPREFIX:-$STEAM_COMPAT_DATA_PATH}"
+
+# Steam/Gamescope environment, mirrored from the games-on-whales steam app
+# (apps/steam/build-fedora/scripts/startup.sh) — the validated reference:
+#   - keep games running when the nested Gamescope window loses focus
+#   - let Steam drive Gamescope's fancy (integer/FSR) scaling
+#   - route Qt/GTK input methods through Steam's on-screen keyboard
+#   - expose VRAM to Proton titles (dxgi from Wine, not the builtin)
 export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS="${SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS:-0}"
+export STEAM_GAMESCOPE_FANCY_SCALING_SUPPORT="${STEAM_GAMESCOPE_FANCY_SCALING_SUPPORT:-1}"
+export STEAM_GAMESCOPE_HDR_SUPPORTED="${STEAM_GAMESCOPE_HDR_SUPPORTED:-0}"
+export QT_IM_MODULE="${QT_IM_MODULE:-steam}"
+export GTK_IM_MODULE="${GTK_IM_MODULE:-Steam}"
+export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-dxgi=n}"
 
 # --- Steam UI mode & the game-foreground handoff -----------------------------
 # In nested Gamescope, pressing "Play" only brings the game to the foreground if

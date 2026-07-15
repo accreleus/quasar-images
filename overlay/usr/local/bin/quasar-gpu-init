@@ -3,7 +3,66 @@ set -euo pipefail
 
 log() { printf '%s quasar-gpu-init: %s\n' "$(date -Iseconds)" "$*" >&2; }
 
-if [[ -d /usr/local/nvidia/lib64 || -d /usr/local/nvidia/lib || -e /usr/lib64/libnvidia-allocator.so.1 ]]; then
-  log "NVIDIA runtime userspace detected; refreshing linker cache"
+# Register the NVIDIA userspace the host's container runtime injects at launch,
+# so the image never bakes (driver-version-coupled) driver libraries. Mirrors
+# games-on-whales images/base/build-fedora/overlay/etc/cont-init.d/30-nvidia.sh.
+#
+# Two injection shapes are supported:
+#   1. A mounted driver volume at /usr/nvidia (Wolf-style): copy its ICD/EGL/gbm
+#      descriptors into the system search paths.
+#   2. The nvidia-container-toolkit (detected by libnvidia-allocator.so.1): the
+#      libraries land on the linker path already; we only (re)create the JSON
+#      loader descriptors and the gbm backend symlink if the toolkit did not.
+#
+# Either way `ldconfig` must run so freshly-injected libs — including the 32-bit
+# (compat32) set Steam/Proton need — resolve. The toolkit must be configured to
+# inject 32-bit libs (NVIDIA_DRIVER_CAPABILITIES incl. graphics+compat32); this
+# script registers whatever it injected but cannot conjure a missing arch.
+
+nvidia_volume() {
+  [[ -d /usr/nvidia ]] || return 1
+  log "NVIDIA driver volume detected at /usr/nvidia"
   ldconfig
-fi
+  local src dst
+  for pair in \
+    "/usr/nvidia/share/vulkan/icd.d:/usr/share/vulkan/icd.d" \
+    "/usr/nvidia/share/egl/egl_external_platform.d:/usr/share/egl/egl_external_platform.d" \
+    "/usr/nvidia/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d"; do
+    src="${pair%%:*}"; dst="${pair##*:}"
+    if [[ -d "$src" ]]; then
+      mkdir -p "$dst" && cp -f "$src"/* "$dst"/ 2>/dev/null || true
+    fi
+  done
+  if [[ -d /usr/nvidia/lib/gbm ]]; then
+    mkdir -p /usr/lib64/gbm && cp -f /usr/nvidia/lib/gbm/* /usr/lib64/gbm/ 2>/dev/null || true
+  fi
+}
+
+nvidia_toolkit() {
+  [[ -e /usr/lib64/libnvidia-allocator.so.1 || -d /usr/local/nvidia/lib64 || -d /usr/local/nvidia/lib ]] || return 1
+  log "NVIDIA container-toolkit userspace detected; registering loaders"
+  ldconfig
+
+  if [[ ! -e /usr/lib64/gbm/nvidia-drm_gbm.so && -e /usr/lib64/libnvidia-allocator.so.1 ]]; then
+    mkdir -p /usr/lib64/gbm
+    ln -sf ../libnvidia-allocator.so.1 /usr/lib64/gbm/nvidia-drm_gbm.so
+  fi
+
+  if [[ ! -f /usr/share/glvnd/egl_vendor.d/10_nvidia.json ]]; then
+    mkdir -p /usr/share/glvnd/egl_vendor.d
+    printf '{\n  "file_format_version": "1.0.0",\n  "ICD": { "library_path": "libEGL_nvidia.so.0" }\n}\n' \
+      > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+  fi
+  if [[ ! -f /usr/share/vulkan/icd.d/nvidia_icd.json ]]; then
+    mkdir -p /usr/share/vulkan/icd.d
+    printf '{\n  "file_format_version": "1.0.0",\n  "ICD": { "library_path": "libGLX_nvidia.so.0", "api_version": "1.3.242" }\n}\n' \
+      > /usr/share/vulkan/icd.d/nvidia_icd.json
+  fi
+  if [[ ! -f /usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json ]]; then
+    mkdir -p /usr/share/egl/egl_external_platform.d
+    printf '{\n  "file_format_version": "1.0.0",\n  "ICD": { "library_path": "libnvidia-egl-wayland.so.1" }\n}\n' \
+      > /usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json
+  fi
+}
+
+nvidia_volume || nvidia_toolkit || true
