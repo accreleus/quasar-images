@@ -87,7 +87,9 @@ nvidia_toolkit() {
 nvidia_32bit_volume() {
   local dir=/usr/nvidia/lib
   local count
-  count=$(find "$dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
+  # find exits 1 when $dir is absent; under `set -o pipefail` that fails the
+  # whole assignment and errexit kills the script — default to 0 instead.
+  count=$(find "$dir" -maxdepth 1 -type f 2>/dev/null | wc -l) || count=0
   if [[ "$count" -gt 0 ]]; then
     ldconfig
     log "32-bit NVIDIA driver volume detected at $dir ($count libs), ldconfig refreshed"
