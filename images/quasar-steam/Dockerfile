@@ -18,6 +18,30 @@ RUN git clone https://github.com/containers/bubblewrap.git \
     && meson setup build --buildtype=release \
     && meson compile -C build
 
+# Gamescope with the nested-pointer-warp patch: upstream 3.16.23 (matching the
+# Fedora 43 package) routes the parent compositor's absolute pointer into the
+# touch path; Steam Big Picture asserts STEAM_TOUCH_CLICK_MODE=4 (Passthrough),
+# which emits only wl_touch events that gamescope's Xwayland (started with
+# -noTouchPointerEmulation) discards — mouse (and Steam's input latch) dead in
+# BPM until a game launch. The one-argument patch makes Passthrough also warp
+# the real cursor (wlserver_mousewarp), so nested pointer input works from
+# session start.
+FROM ${APP_IMAGE} AS gamescope-builder
+
+RUN dnf --setopt=install_weak_deps=False -y install \
+      git meson ninja-build gcc gcc-c++ \
+    && (dnf -y install dnf5-plugins || dnf -y install dnf-plugins-core) \
+    && (dnf builddep -y gamescope || dnf builddep -y --enablerepo="*source*" gamescope) \
+    && dnf clean all && rm -rf /var/cache/dnf
+
+WORKDIR /build
+COPY images/quasar-steam/gamescope-nested-pointer-warp.patch /build/
+RUN git clone --branch 3.16.23 --depth 1 --recurse-submodules https://github.com/ValveSoftware/gamescope.git \
+    && cd gamescope \
+    && git apply /build/gamescope-nested-pointer-warp.patch \
+    && meson setup build --buildtype=release -Denable_openvr_support=false \
+    && ninja -C build
+
 FROM ${APP_IMAGE}
 
 ARG VERSION=0.1.0-dev
@@ -42,6 +66,7 @@ RUN dnf --setopt=install_weak_deps=False -y install \
     && rm -rf /var/cache/dnf
 
 COPY --from=bwrap-builder /build/bubblewrap/build/bwrap /usr/bin/bwrap
+COPY --from=gamescope-builder /build/gamescope/build/src/gamescope /usr/bin/gamescope
 COPY images/quasar-steam/quasar-steam /usr/local/bin/quasar-steam
 COPY images/quasar-steam/steam-wrapper /usr/local/bin/quasar-steam-client
 RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client /usr/bin/bwrap
