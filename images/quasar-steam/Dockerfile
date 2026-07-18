@@ -30,6 +30,7 @@ FROM ${APP_IMAGE} AS gamescope-builder
 
 RUN dnf --setopt=install_weak_deps=False -y install \
       git meson ninja-build gcc gcc-c++ \
+      xorg-x11-server-Xwayland-devel \
     && (dnf -y install dnf5-plugins || dnf -y install dnf-plugins-core) \
     && (dnf builddep -y gamescope || dnf builddep -y --enablerepo="*source*" gamescope) \
     && dnf clean all && rm -rf /var/cache/dnf
