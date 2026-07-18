@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# [exp/steam-input-bisect] `unset WAYLAND_DISPLAY` (from 47d4494) forced Steam
-# onto Gamescope's Xwayland to get the X11 game-foreground atoms — but that
-# X11-input path is dead in this nested-inside-gst-wayland-display setup (motion
-# reaches gamescope, buttons/keys never reach the focused Steam X window).
-# Before 47d4494 Steam ran as a native Wayland client and input worked. Keeping
-# WAYLAND_DISPLAY set restores that path; game-foregrounding gets re-solved on
-# the Wayland path separately if this confirms the cause.
-# unset WAYLAND_DISPLAY
+# Display wiring (DISPLAY export + outer-WAYLAND_DISPLAY unset) is owned by the
+# quasar-steam launcher via the gamescope ready-socket handshake (GOW pattern) —
+# by the time this wrapper runs, the environment is already correct.
 
 steam_dir="$HOME/.local/share/Steam"
 legacy_dir="$HOME/.steam/steam"

@@ -15,10 +15,8 @@ export WINEPREFIX="${WINEPREFIX:-$STEAM_COMPAT_DATA_PATH}"
 export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS="${SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS:-0}"
 export STEAM_GAMESCOPE_FANCY_SCALING_SUPPORT="${STEAM_GAMESCOPE_FANCY_SCALING_SUPPORT:-1}"
 export STEAM_GAMESCOPE_HDR_SUPPORTED="${STEAM_GAMESCOPE_HDR_SUPPORTED:-0}"
-# [exp/steam-input-bisect] IM-module routing disabled — suspected keyboard
-# swallow in the nested setup (no ibus/Steam IME wired). Restore if unrelated.
-# export QT_IM_MODULE="${QT_IM_MODULE:-steam}"
-# export GTK_IM_MODULE="${GTK_IM_MODULE:-Steam}"
+export QT_IM_MODULE="${QT_IM_MODULE:-steam}"
+export GTK_IM_MODULE="${GTK_IM_MODULE:-Steam}"
 export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-dxgi=n}"
 
 # --- Steam UI mode & the game-foreground handoff -----------------------------
@@ -92,15 +90,42 @@ if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
   exec "${client[@]}"
 fi
 
-# [exp/steam-input-bisect] Restored `exec gamescope` (was setsid+TERM-trap
-# graceful shutdown from 6551fe8). The setsid approach put gamescope in its own
-# process group, which broke tini -g signal forwarding at teardown
-# ([FATAL tini (1)] Unexpected error when forwarding signal: 'Operation not
-# permitted' → container exit code 1) and is a suspect in the dead-input
-# regression. Graceful Steam shutdown needs a redesign compatible with tini -g.
+# --- Gamescope launch: GOW-pattern ready-socket handshake --------------------
+# Mirrors games-on-whales apps/steam startup.sh (the validated-working input
+# path). Key structural points, each load-bearing:
+#   1. Gamescope runs WITHOUT a client argument; Steam is started as a SIBLING
+#      afterwards. Passing Steam as gamescope''s child arg left it mis-wired
+#      (no DISPLAY / outer WAYLAND_DISPLAY) and input never reached it.
+#   2. `-R socket`: gamescope reports its actual X display + nested Wayland
+#      socket through the ready socket; we export exactly what it reports
+#      instead of guessing ":0".
+#   3. ibus-daemon is started (QT_IM_MODULE=steam needs it; without the daemon
+#      the Steam IME can eat keyboard input).
+export STEAM_DISABLE_MANGOAPP_ATOM_WORKAROUND=1
+gs_tmpdir=$(mktemp -p "${XDG_RUNTIME_DIR:-/tmp}" -d -t gamescope.XXXXXXX)
+gs_socket="$gs_tmpdir/startup.socket"
+gs_stats="$gs_tmpdir/stats.pipe"
+mkfifo -- "$gs_stats"
+mkfifo -- "$gs_socket"
+
 log "starting Gamescope (mode=$ui_mode flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0})"
-exec gamescope -e \
+gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
   -W "${GAMESCOPE_WIDTH:-1920}" \
   -H "${GAMESCOPE_HEIGHT:-1080}" \
-  -r "${GAMESCOPE_REFRESH:-60}" \
-  -- "${client[@]}"
+  -r "${GAMESCOPE_REFRESH:-60}" &
+
+if read -r -t 5 gs_x_display gs_wl_display <> "$gs_socket"; then
+  export DISPLAY="$gs_x_display"
+  export GAMESCOPE_WAYLAND_DISPLAY="$gs_wl_display"
+  unset WAYLAND_DISPLAY
+  log "gamescope ready: DISPLAY=$DISPLAY nested_wayland=$gs_wl_display"
+else
+  log "FATAL: gamescope did not report ready within 5s"
+  exit 1
+fi
+
+if command -v ibus-daemon >/dev/null 2>&1; then
+  ibus-daemon -d -r --panel=disable --emoji-extension=disable || log "WARN: ibus-daemon failed to start"
+fi
+
+exec "${client[@]}"
