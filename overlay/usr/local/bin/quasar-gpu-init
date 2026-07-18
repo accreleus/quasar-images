@@ -22,7 +22,7 @@ log() { printf '%s quasar-gpu-init: %s\n' "$(date -Iseconds)" "$*" >&2; }
 # Separately (issue #375), on hosts where the toolkit's CDI spec has no 32-bit
 # refs at all (verified on unraid/nvidia-driver.plg), the node-agent additively
 # bind-mounts just the host's 32-bit NVIDIA userspace read-only at
-# /usr/nvidia/lib so native (non-Proton) 32-bit titles can resolve
+# /opt/quasar/nvidia-lib32 so native (non-Proton) 32-bit titles can resolve
 # libGLX_nvidia.so.0 etc. The image ships an /etc/ld.so.conf.d entry pointing
 # at that path (never bakes the libs); nvidia_32bit_volume() below re-runs
 # ldconfig and logs when the mount is present. This runs independently of, and
@@ -30,11 +30,11 @@ log() { printf '%s quasar-gpu-init: %s\n' "$(date -Iseconds)" "$*" >&2; }
 # doesn't fight the 64-bit toolkit injection into the standard system paths.
 
 nvidia_volume() {
-  # Require the share/ subtree, not just a bare /usr/nvidia dir: a Docker bind
-  # mount of only /usr/nvidia/lib (the issue #375 32-bit-only volume) still
-  # auto-creates the /usr/nvidia mountpoint, which would otherwise false-match
-  # here and wrongly take the full-driver-volume path instead of the additive
-  # 32-bit one below.
+  # Require the share/ subtree, not just a bare /usr/nvidia dir, so only a
+  # real full GOW driver volume matches here. (The issue #375 32-bit-only
+  # mount now lives at /opt/quasar/nvidia-lib32 and never touches /usr/nvidia
+  # — it used to bind at /usr/nvidia/lib, which also broke upstream GOW
+  # images whose cont-init treats a present /usr/nvidia as a full volume.)
   [[ -d /usr/nvidia/share ]] || return 1
   log "NVIDIA driver volume detected at /usr/nvidia"
   ldconfig
@@ -85,7 +85,7 @@ nvidia_toolkit() {
 # 32-bit-only search path here never shadows the 64-bit libs the toolkit or
 # the full driver-volume path just registered.
 nvidia_32bit_volume() {
-  local dir=/usr/nvidia/lib
+  local dir=/opt/quasar/nvidia-lib32
   local count
   # find exits 1 when $dir is absent; under `set -o pipefail` that fails the
   # whole assignment and errexit kills the script — default to 0 instead.
