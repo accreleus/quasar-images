@@ -13,8 +13,10 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   steam=/usr/local/bin/quasar-steam
   client=/usr/local/bin/quasar-steam-client
 
-  # Launcher wiring.
-  grep -q "exec gamescope" "$steam"
+  # Launcher wiring: Gamescope runs in its own process group (shielded from the
+  # group TERM) with a trap that asks Steam to shut down cleanly first.
+  grep -q "setsid gamescope" "$steam"
+  grep -q "trap request_shutdown TERM INT" "$steam"
   grep -q "QUASAR_STEAM_GAMESCOPE:-1" "$steam"
 
   # Default UI mode is the games-on-whales-validated bigpicture path.
