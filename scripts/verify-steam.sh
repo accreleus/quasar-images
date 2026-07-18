@@ -37,6 +37,13 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
 
   # 32-bit graphics userspace is present (NVIDIA driver libs are injected at runtime).
   test -e /usr/lib/libGL.so.1
+
+  # 32-bit NVIDIA driver volume (issue #375): ldconfig must be told where to
+  # look at /usr/nvidia/lib, additive to the toolkit'"'"'s 64-bit injection into
+  # the standard system paths — no driver libs are baked into the image.
+  test -f /etc/ld.so.conf.d/90-quasar-nvidia-volume.conf
+  grep -q "^/usr/nvidia/lib$" /etc/ld.so.conf.d/90-quasar-nvidia-volume.conf
+  grep -q "nvidia_32bit_volume" /usr/local/bin/quasar-gpu-init
 '
 
 labels="$(docker image inspect quasar-steam:dev --format '{{json .Config.Labels}}')"

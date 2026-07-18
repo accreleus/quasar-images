@@ -24,6 +24,12 @@ RUN dnf --setopt=install_weak_deps=False -y install \
 COPY overlay/etc/asound.conf /etc/asound.conf
 RUN chmod 0644 /etc/asound.conf
 
+# Additive search path for the 32-bit NVIDIA driver volume the node-agent
+# mounts at /usr/nvidia/lib on NVIDIA hosts (issue #375) — never bakes
+# driver libs into the image, only where ldconfig should look for them.
+COPY overlay/etc/ld.so.conf.d/90-quasar-nvidia-volume.conf /etc/ld.so.conf.d/90-quasar-nvidia-volume.conf
+RUN chmod 0644 /etc/ld.so.conf.d/90-quasar-nvidia-volume.conf
+
 COPY overlay/usr/local/bin/quasar-gpu-init /usr/local/bin/quasar-gpu-init
 COPY overlay/usr/local/bin/quasar-gpu-probe /usr/local/bin/quasar-gpu-probe
 RUN chmod 0755 /usr/local/bin/quasar-gpu-init /usr/local/bin/quasar-gpu-probe

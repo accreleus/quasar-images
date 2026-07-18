@@ -18,9 +18,24 @@ log() { printf '%s quasar-gpu-init: %s\n' "$(date -Iseconds)" "$*" >&2; }
 # (compat32) set Steam/Proton need — resolve. The toolkit must be configured to
 # inject 32-bit libs (NVIDIA_DRIVER_CAPABILITIES incl. graphics+compat32); this
 # script registers whatever it injected but cannot conjure a missing arch.
+#
+# Separately (issue #375), on hosts where the toolkit's CDI spec has no 32-bit
+# refs at all (verified on unraid/nvidia-driver.plg), the node-agent additively
+# bind-mounts just the host's 32-bit NVIDIA userspace read-only at
+# /usr/nvidia/lib so native (non-Proton) 32-bit titles can resolve
+# libGLX_nvidia.so.0 etc. The image ships an /etc/ld.so.conf.d entry pointing
+# at that path (never bakes the libs); nvidia_32bit_volume() below re-runs
+# ldconfig and logs when the mount is present. This runs independently of, and
+# after, whichever of nvidia_volume/nvidia_toolkit matched below, so it
+# doesn't fight the 64-bit toolkit injection into the standard system paths.
 
 nvidia_volume() {
-  [[ -d /usr/nvidia ]] || return 1
+  # Require the share/ subtree, not just a bare /usr/nvidia dir: a Docker bind
+  # mount of only /usr/nvidia/lib (the issue #375 32-bit-only volume) still
+  # auto-creates the /usr/nvidia mountpoint, which would otherwise false-match
+  # here and wrongly take the full-driver-volume path instead of the additive
+  # 32-bit one below.
+  [[ -d /usr/nvidia/share ]] || return 1
   log "NVIDIA driver volume detected at /usr/nvidia"
   ldconfig
   local src dst
@@ -65,4 +80,21 @@ nvidia_toolkit() {
   fi
 }
 
+# 32-bit-only additive driver volume (issue #375): independent of, and safe to
+# run alongside, either branch above — ldconfig's class-based matching means a
+# 32-bit-only search path here never shadows the 64-bit libs the toolkit or
+# the full driver-volume path just registered.
+nvidia_32bit_volume() {
+  local dir=/usr/nvidia/lib
+  local count
+  count=$(find "$dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
+  if [[ "$count" -gt 0 ]]; then
+    ldconfig
+    log "32-bit NVIDIA driver volume detected at $dir ($count libs), ldconfig refreshed"
+  fi
+  # Absence is the normal AMD/no-32-bit-support case, not an error — stay silent.
+  return 0
+}
+
 nvidia_volume || nvidia_toolkit || true
+nvidia_32bit_volume
