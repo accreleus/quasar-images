@@ -29,6 +29,18 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
     echo "FAIL: setsid present in $steam" >&2
     exit 1
   fi
+  if grep -q "setpgid" "$steam"; then
+    echo "FAIL: setpgid present in $steam" >&2
+    exit 1
+  fi
+  # Same EPERM-FATAL class as setsid/-g: a negative-pid kill (group-kill) or
+  # a signal-named group-kill (kill -TERM -$pid) targets the whole process
+  # group, which is EPERM under --cap-drop ALL/no CAP_KILL against a
+  # reshaped group -- must never be reintroduced.
+  if grep -qE 'kill[^|]* -- -|kill -[A-Z]+ -[0-9$]' "$steam"; then
+    echo "FAIL: group-kill (negative-pid kill) present in $steam" >&2
+    exit 1
+  fi
   if grep -q -- "-shutdown" "$steam"; then
     echo "FAIL: steam.sh -shutdown present in $steam (proven ineffective -- forwarded to the running instance and ignored)" >&2
     exit 1

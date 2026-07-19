@@ -110,9 +110,26 @@ client=(dbus-run-session -- /usr/local/bin/quasar-steam-client "$@")
 # to kill and no way to reproduce the 6551fe8 FATAL (EPERM from a group-kill
 # against a reshaped process group under --cap-drop ALL/no CAP_KILL).
 shutdown_timeout="${QUASAR_STEAM_SHUTDOWN_TIMEOUT:-8}"
+# A non-numeric override must not silently collapse the budget to a
+# zero-wait escalation -- fall back to the documented default instead.
+[[ "$shutdown_timeout" =~ ^[0-9]+$ ]] || shutdown_timeout=8
 client_pid=""
 gs_pid=""
 shutting_down=0
+
+# A pid only counts as "the steam process" if it is numeric, alive, AND
+# /proc confirms its comm is exactly "steam". kill -0 alone is not enough:
+# steam.pid persists on the (mounted) home directory across container
+# restarts, while a fresh container's pids are low and predictable, so a
+# stale steam.pid colliding with an unrelated live process is the likeliest
+# failure mode -- especially during the 60-150s bootstrap window before
+# Steam itself is up. A comm mismatch falls through to the pgrep fallback.
+pid_is_steam() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ "$(cat "/proc/$pid/comm" 2>/dev/null || true)" == "steam" ]]
+}
 
 # Resolves the live steam ELF process pid (not steam.sh, not the launcher).
 # Steam writes its own pid to $HOME/.steam/steam.pid; `pgrep -x steam` is the
@@ -124,10 +141,10 @@ resolve_steam_pid() {
   if [[ -f "$HOME/.steam/steam.pid" ]]; then
     pid="$(cat "$HOME/.steam/steam.pid" 2>/dev/null || true)"
   fi
-  if [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+  if ! pid_is_steam "$pid"; then
     pid="$(pgrep -x steam 2>/dev/null | head -n1 || true)"
   fi
-  if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+  if pid_is_steam "$pid"; then
     printf '%s' "$pid"
   fi
 }
@@ -142,8 +159,12 @@ on_term() {
   shutting_down=1
   log "shutdown requested; relaying to launched processes"
 
+  # Declared here (not inside the client_pid branch below) so it is always
+  # in scope for the gamescope-TERM gate further down, even on the startup
+  # paths where client_pid is never set and that branch is skipped entirely.
+  local steam_pid=""
+
   if [[ -n "$client_pid" ]] && kill -0 "$client_pid" 2>/dev/null; then
-    local steam_pid
     steam_pid="$(resolve_steam_pid)"
 
     if [[ -n "$steam_pid" ]]; then
@@ -168,7 +189,7 @@ on_term() {
           log "steam still running after ${shutdown_timeout}s; escalating to TERM"
           break
         fi
-        sleep 0.25
+        sleep 0.25 || true
         waited=$((waited + 1))
       done
     else
@@ -182,7 +203,14 @@ on_term() {
     fi
   fi
 
-  if [[ -n "$gs_pid" ]] && kill -0 "$gs_pid" 2>/dev/null; then
+  # Gated on steam being confirmed gone: TERM'ing gamescope while steam is
+  # still alive is proven unclean (gamescope's death races steam's own
+  # exit). If the budget above expired with steam still running, this is
+  # deliberately a no-op -- docker's SIGKILL-after-timeout backstop reaps
+  # gamescope instead of us risking the unclean race. When steam_pid was
+  # never resolved (empty, startup-path fallback), `kill -0 ""` fails, the
+  # negation is true, and gamescope's TERM still fires as before.
+  if [[ -n "$gs_pid" ]] && ! kill -0 "$steam_pid" 2>/dev/null && kill -0 "$gs_pid" 2>/dev/null; then
     log "terminating gamescope (pid $gs_pid)"
     kill -TERM "$gs_pid" 2>/dev/null || true
   fi
@@ -263,6 +291,14 @@ if read -r -t 5 gs_x_display gs_wl_display <> "$gs_socket"; then
   export GAMESCOPE_WAYLAND_DISPLAY="$gs_wl_display"
   unset WAYLAND_DISPLAY
   log "gamescope ready: DISPLAY=$DISPLAY nested_wayland=$gs_wl_display"
+elif [[ "$shutting_down" == "1" ]]; then
+  # A TERM/INT landed while waiting on the ready socket -- on_term already
+  # TERM'd gamescope (steam_pid is empty at this point in startup, so the
+  # gate above still fires), so the read timing/failing out is expected,
+  # not a real gamescope fault. Exit the documented shutdown-during-startup
+  # way instead of the misleading FATAL below.
+  log "shutdown requested during startup; exiting without launching Steam"
+  exit 143
 else
   log "FATAL: gamescope did not report ready within 5s"
   exit 1
