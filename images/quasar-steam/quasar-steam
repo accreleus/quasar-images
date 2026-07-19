@@ -109,16 +109,33 @@ client=(dbus-run-session -- /usr/local/bin/quasar-steam-client "$@")
 # every process stays in tini's direct descendant tree, so there is no group
 # to kill and no way to reproduce the 6551fe8 FATAL (EPERM from a group-kill
 # against a reshaped process group under --cap-drop ALL/no CAP_KILL).
-steam_shutdown_sh="$HOME/.local/share/Steam/steam.sh"
-shutdown_timeout="${QUASAR_STEAM_SHUTDOWN_TIMEOUT:-6}"
+shutdown_timeout="${QUASAR_STEAM_SHUTDOWN_TIMEOUT:-8}"
 client_pid=""
 gs_pid=""
 shutting_down=0
 
+# Resolves the live steam ELF process pid (not steam.sh, not the launcher).
+# Steam writes its own pid to $HOME/.steam/steam.pid; `pgrep -x steam` is the
+# fallback (comm "steam" is unique at steady state -- srt-bwrap/steamwebhelper
+# have different comms). Prints nothing if no live pid can be resolved (first
+# boot / bootstrap incomplete).
+resolve_steam_pid() {
+  local pid=""
+  if [[ -f "$HOME/.steam/steam.pid" ]]; then
+    pid="$(cat "$HOME/.steam/steam.pid" 2>/dev/null || true)"
+  fi
+  if [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+    pid="$(pgrep -x steam 2>/dev/null | head -n1 || true)"
+  fi
+  if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    printf '%s' "$pid"
+  fi
+}
+
 on_term() {
   # Idempotent: a second TERM/INT while a relay is already in flight is a
-  # no-op -- the first invocation owns the steam.sh -shutdown -> TERM -> TERM
-  # gamescope sequence through to completion.
+  # no-op -- the first invocation owns the steam-TERM -> client TERM ->
+  # gamescope TERM sequence through to completion.
   if [[ "$shutting_down" == "1" ]]; then
     return
   fi
@@ -126,29 +143,38 @@ on_term() {
   log "shutdown requested; relaying to launched processes"
 
   if [[ -n "$client_pid" ]] && kill -0 "$client_pid" 2>/dev/null; then
-    if [[ -f "$steam_shutdown_sh" ]]; then
-      # Valve-sanctioned clean close (flushes config, clears the "unclean
-      # shutdown" marker that forces a next-boot checksum reverify) -- the
-      # single shutdown mechanism; deliberately NOT also raw-TERM'd in the
-      # same pass (would create signal-ordering/double-signal ambiguity).
-      log "issuing steam.sh -shutdown (budget ${shutdown_timeout}s)"
-      "$steam_shutdown_sh" -shutdown || log "WARN: steam.sh -shutdown returned non-zero"
+    local steam_pid
+    steam_pid="$(resolve_steam_pid)"
+
+    if [[ -n "$steam_pid" ]]; then
+      # Clean quit, live-tested 2026-07-20 (2x oracle-verified): a single
+      # SIGTERM to the steam ELF process itself is what makes Steam log
+      # "Shutdown" and unwind the whole chain (steam.sh -> dbus-run-session
+      # -> launcher) on its own -- container exits ~3.1-3.4s later, next boot
+      # is clean. `steam.sh -shutdown` was tried first and PROVEN INEFFECTIVE
+      # in this container: it is forwarded over Steam's client IPC to the
+      # already-running instance and silently ignored (nothing exits within
+      # 61s), so it is not used anywhere in this script. TERM'ing gamescope
+      # while steam is still alive is also PROVEN UNCLEAN (gamescope's death
+      # races steam's own exit), which is why gamescope's TERM below stays
+      # strictly after steam has exited (or the budget below expires).
+      log "sending SIGTERM to steam (pid $steam_pid, budget ${shutdown_timeout}s)"
+      kill -TERM "$steam_pid" 2>/dev/null || true
 
       local waited=0
       local max_waited=$(( shutdown_timeout * 4 ))  # 0.25s poll ticks
-      while kill -0 "$client_pid" 2>/dev/null; do
+      while kill -0 "$steam_pid" 2>/dev/null; do
         if (( waited >= max_waited )); then
-          log "steam client still running after ${shutdown_timeout}s; escalating to TERM"
+          log "steam still running after ${shutdown_timeout}s; escalating to TERM"
           break
         fi
         sleep 0.25
         waited=$((waited + 1))
       done
     else
-      # First boot, no bootstrap yet ($HOME/.local/share/Steam/steam.sh does
-      # not exist): nothing to ask for a clean close, so skip straight to the
-      # TERM relay below.
-      log "no steam.sh present yet; skipping -shutdown, relaying TERM directly"
+      # First boot, or steam hasn't finished bootstrapping yet: no live steam
+      # pid to resolve, so skip straight to the TERM relay below.
+      log "no live steam process resolved yet; skipping steam TERM, relaying TERM directly"
     fi
 
     if kill -0 "$client_pid" 2>/dev/null; then
@@ -197,7 +223,7 @@ if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
   fi
   "${client[@]}" &
   client_pid=$!
-  # A non-zero/signal exit here (e.g. 143) after an already-clean -shutdown
+  # A non-zero/signal exit here (e.g. 143) after an already-clean shutdown
   # relay is expected docker-stop signal-exit semantics, not a failure --
   # intentional, left as-is.
   if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi
@@ -267,7 +293,7 @@ fi
 
 "${client[@]}" &
 client_pid=$!
-# A non-zero/signal exit here (e.g. 143) after an already-clean -shutdown
+# A non-zero/signal exit here (e.g. 143) after an already-clean shutdown
 # relay is expected docker-stop signal-exit semantics, not a failure --
 # intentional, left as-is.
 if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi

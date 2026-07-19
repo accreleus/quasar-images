@@ -16,7 +16,11 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # Launcher-owned graceful shutdown (quasar-images#1): no setsid/setpgid
   # anywhere (everything stays in tini'"'"'s direct descendant tree -- the
   # 6551fe8 FATAL was EPERM from a group-kill against a setsid-reshaped
-  # group), and a trap that sequences steam.sh -shutdown before any TERM.
+  # group), and a trap that sends a single SIGTERM to the steam ELF process
+  # (resolved via $HOME/.steam/steam.pid, falling back to `pgrep -x steam`) --
+  # the PROVEN clean-quit mechanism (live-tested 2026-07-20). `steam.sh
+  # -shutdown` is forwarded to the running instance over Steam'"'"'s client IPC
+  # and silently ignored in this container, so it must never appear here.
   # NOTE: negative assertions must use explicit if/exit, not "! grep -q ...".
   # bash'"'"'s errexit (set -e) does not fire on a command whose exit status is
   # inverted by !, so "! grep -q ..." would silently PASS (never even print
@@ -25,8 +29,15 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
     echo "FAIL: setsid present in $steam" >&2
     exit 1
   fi
+  if grep -q -- "-shutdown" "$steam"; then
+    echo "FAIL: steam.sh -shutdown present in $steam (proven ineffective -- forwarded to the running instance and ignored)" >&2
+    exit 1
+  fi
   grep -q "trap on_term TERM INT" "$steam"
-  grep -q -- "-shutdown" "$steam"
+  grep -q "resolve_steam_pid" "$steam"
+  grep -q "steam.pid" "$steam"
+  grep -q "pgrep -x steam" "$steam"
+  grep -q "QUASAR_STEAM_SHUTDOWN_TIMEOUT:-8" "$steam"
   grep -q "QUASAR_STEAM_GAMESCOPE:-1" "$steam"
 
   # Default UI mode is the games-on-whales-validated bigpicture path.
