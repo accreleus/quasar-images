@@ -13,10 +13,13 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   steam=/usr/local/bin/quasar-steam
   client=/usr/local/bin/quasar-steam-client
 
-  # Launcher wiring: Gamescope runs in its own process group (shielded from the
-  # group TERM) with a trap that asks Steam to shut down cleanly first.
-  grep -q "setsid gamescope" "$steam"
-  grep -q "trap request_shutdown TERM INT" "$steam"
+  # Launcher-owned graceful shutdown (quasar-images#1): no setsid/setpgid
+  # anywhere (everything stays in tini'"'"'s direct descendant tree -- the
+  # 6551fe8 FATAL was EPERM from a group-kill against a setsid-reshaped
+  # group), and a trap that sequences steam.sh -shutdown before any TERM.
+  ! grep -q "setsid" "$steam"
+  grep -q "trap on_term TERM INT" "$steam"
+  grep -q -- "-shutdown" "$steam"
   grep -q "QUASAR_STEAM_GAMESCOPE:-1" "$steam"
 
   # Default UI mode is the games-on-whales-validated bigpicture path.
@@ -48,5 +51,14 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
 
 labels="$(docker image inspect quasar-steam:dev --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "required"' <<<"$labels" >/dev/null
+
+# Base ENTRYPOINT must not run tini with -g: with -g, tini forwards signals
+# via a group-kill that is EPERM-fatal against the unprivileged (no CAP_KILL)
+# reshaped process group -- the reconstructed 6551fe8 regression. Graceful
+# shutdown is the launcher's job now (on_term() above), not tini's group-kill.
+base_dockerfile="$root/images/quasar-base/Dockerfile"
+test -f "$base_dockerfile"
+! grep -q '^ENTRYPOINT \["/usr/bin/tini", "-g"' "$base_dockerfile"
+grep -q '^ENTRYPOINT \["/usr/bin/tini", "--", "/usr/local/bin/quasar-entrypoint"\]' "$base_dockerfile"
 
 echo "quasar-steam structural checks passed"

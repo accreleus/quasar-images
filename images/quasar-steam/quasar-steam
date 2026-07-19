@@ -101,8 +101,96 @@ fi
 
 client=(dbus-run-session -- /usr/local/bin/quasar-steam-client "$@")
 
+# --- Graceful shutdown: launcher-owned sequenced relay (quasar-images#1) -----
+# images/quasar-base/Dockerfile's tini no longer runs with -g, so `docker stop`
+# SIGTERMs only this launcher (tini's direct child) -- this script now owns
+# relaying that shutdown to gamescope/Steam itself, in order, instead of
+# `exec`ing the client chain away. No process-group tricks anywhere below:
+# every process stays in tini's direct descendant tree, so there is no group
+# to kill and no way to reproduce the 6551fe8 FATAL (EPERM from a group-kill
+# against a reshaped process group under --cap-drop ALL/no CAP_KILL).
+steam_shutdown_sh="$HOME/.local/share/Steam/steam.sh"
+shutdown_timeout="${QUASAR_STEAM_SHUTDOWN_TIMEOUT:-6}"
+client_pid=""
+gs_pid=""
+shutting_down=0
+
+on_term() {
+  # Idempotent: a second TERM/INT while a relay is already in flight is a
+  # no-op -- the first invocation owns the steam.sh -shutdown -> TERM -> TERM
+  # gamescope sequence through to completion.
+  if [[ "$shutting_down" == "1" ]]; then
+    return
+  fi
+  shutting_down=1
+  log "shutdown requested; relaying to launched processes"
+
+  if [[ -n "$client_pid" ]] && kill -0 "$client_pid" 2>/dev/null; then
+    if [[ -f "$steam_shutdown_sh" ]]; then
+      # Valve-sanctioned clean close (flushes config, clears the "unclean
+      # shutdown" marker that forces a next-boot checksum reverify) -- the
+      # single shutdown mechanism; deliberately NOT also raw-TERM'd in the
+      # same pass (would create signal-ordering/double-signal ambiguity).
+      log "issuing steam.sh -shutdown (budget ${shutdown_timeout}s)"
+      "$steam_shutdown_sh" -shutdown || log "WARN: steam.sh -shutdown returned non-zero"
+
+      local waited=0
+      local max_waited=$(( shutdown_timeout * 4 ))  # 0.25s poll ticks
+      while kill -0 "$client_pid" 2>/dev/null; do
+        if (( waited >= max_waited )); then
+          log "steam client still running after ${shutdown_timeout}s; escalating to TERM"
+          break
+        fi
+        sleep 0.25
+        waited=$((waited + 1))
+      done
+    else
+      # First boot, no bootstrap yet ($HOME/.local/share/Steam/steam.sh does
+      # not exist): nothing to ask for a clean close, so skip straight to the
+      # TERM relay below.
+      log "no steam.sh present yet; skipping -shutdown, relaying TERM directly"
+    fi
+
+    if kill -0 "$client_pid" 2>/dev/null; then
+      kill -TERM "$client_pid" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ -n "$gs_pid" ]] && kill -0 "$gs_pid" 2>/dev/null; then
+    log "terminating gamescope (pid $gs_pid)"
+    kill -TERM "$gs_pid" 2>/dev/null || true
+  fi
+}
+
+# Installed before anything below is backgrounded: no window where a TERM/INT
+# could arrive and find no handler wired up.
+trap on_term TERM INT
+
+# `wait PID` returns EARLY (status >128) the instant a trapped signal is
+# caught -- bash runs the trap synchronously, then hands control back to the
+# statement after wait, whether or not PID has actually exited yet. Re-wait
+# in a loop and only trust the exit status once `kill -0` confirms the pid is
+# actually gone (that final wait's status is the real one; earlier ones are
+# just signal-delivery artifacts). set -e is live, so every wait/kill here is
+# the condition of an if/while -- never a bare statement -- or its nonzero
+# would abort the script before we get to read $?.
+wait_for_exit() {
+  local pid="$1" rc=0
+  while :; do
+    if wait "$pid"; then rc=0; else rc=$?; fi
+    if kill -0 "$pid" 2>/dev/null; then
+      continue
+    fi
+    break
+  done
+  return "$rc"
+}
+
 if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
-  exec "${client[@]}"
+  "${client[@]}" &
+  client_pid=$!
+  if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi
+  exit "$rc"
 fi
 
 # --- Gamescope launch: GOW-pattern ready-socket handshake --------------------
@@ -115,7 +203,10 @@ fi
 #      socket through the ready socket; we export exactly what it reports
 #      instead of guessing ":0".
 #   3. ibus-daemon is started (QT_IM_MODULE=steam needs it; without the daemon
-#      the Steam IME can eat keyboard input).
+#      the Steam IME can eat keyboard input). It self-daemonizes (double-forks
+#      and reparents to tini, not to this launcher), so on_term() above never
+#      sends it a TERM -- that's fine, `docker stop`'s SIGKILL-after-timeout
+#      backstop reaps it like any other orphan under tini's subreaper.
 export STEAM_DISABLE_MANGOAPP_ATOM_WORKAROUND=1
 gs_tmpdir=$(mktemp -p "${XDG_RUNTIME_DIR:-/tmp}" -d -t gamescope.XXXXXXX)
 gs_socket="$gs_tmpdir/startup.socket"
@@ -128,6 +219,7 @@ gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
   -W "${GAMESCOPE_WIDTH:-1920}" \
   -H "${GAMESCOPE_HEIGHT:-1080}" \
   -r "${GAMESCOPE_REFRESH:-60}" &
+gs_pid=$!
 
 if read -r -t 5 gs_x_display gs_wl_display <> "$gs_socket"; then
   export DISPLAY="$gs_x_display"
@@ -143,4 +235,7 @@ if command -v ibus-daemon >/dev/null 2>&1; then
   ibus-daemon -d -r --panel=disable --emoji-extension=disable || log "WARN: ibus-daemon failed to start"
 fi
 
-exec "${client[@]}"
+"${client[@]}" &
+client_pid=$!
+if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi
+exit "$rc"
