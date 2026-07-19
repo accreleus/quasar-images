@@ -34,5 +34,15 @@ ENV HOME=/home/quasar \
     UMASK=022 \
     UNAME=quasar
 
-ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/quasar-entrypoint"]
+# Plain tini (no -g): tini tolerates only ESRCH from kill() and treats EPERM as
+# fatal, so a -g group-kill against an unprivileged (--cap-drop ALL, no CAP_KILL)
+# reshaped process group aborts the container outright (reconstructed 6551fe8
+# FATAL: "[FATAL tini (1)] Unexpected error when forwarding signal: 'Operation
+# not permitted'"). Dropping -g makes tini signal only its direct child, which
+# structurally can never hit that EPERM class. Graceful shutdown is instead the
+# launcher's job: it owns a sequenced TERM relay to its own children (see
+# images/quasar-steam/quasar-steam's on_term()). `docker stop`'s SIGKILL-after-
+# timeout remains the backstop for anything a launcher's relay misses; tini's
+# subreaper orphan-reaping is unaffected by dropping -g.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/quasar-entrypoint"]
 CMD ["/bin/bash"]

@@ -101,8 +101,161 @@ fi
 
 client=(dbus-run-session -- /usr/local/bin/quasar-steam-client "$@")
 
+# --- Graceful shutdown: launcher-owned sequenced relay (quasar-images#1) -----
+# images/quasar-base/Dockerfile's tini no longer runs with -g, so `docker stop`
+# SIGTERMs only this launcher (tini's direct child) -- this script now owns
+# relaying that shutdown to gamescope/Steam itself, in order, instead of
+# `exec`ing the client chain away. No process-group tricks anywhere below:
+# every process stays in tini's direct descendant tree, so there is no group
+# to kill and no way to reproduce the 6551fe8 FATAL (EPERM from a group-kill
+# against a reshaped process group under --cap-drop ALL/no CAP_KILL).
+shutdown_timeout="${QUASAR_STEAM_SHUTDOWN_TIMEOUT:-8}"
+# A non-numeric override must not silently collapse the budget to a
+# zero-wait escalation -- fall back to the documented default instead.
+[[ "$shutdown_timeout" =~ ^[0-9]+$ ]] || shutdown_timeout=8
+client_pid=""
+gs_pid=""
+shutting_down=0
+
+# A pid only counts as "the steam process" if it is numeric, alive, AND
+# /proc confirms its comm is exactly "steam". kill -0 alone is not enough:
+# steam.pid persists on the (mounted) home directory across container
+# restarts, while a fresh container's pids are low and predictable, so a
+# stale steam.pid colliding with an unrelated live process is the likeliest
+# failure mode -- especially during the 60-150s bootstrap window before
+# Steam itself is up. A comm mismatch falls through to the pgrep fallback.
+pid_is_steam() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ "$(cat "/proc/$pid/comm" 2>/dev/null || true)" == "steam" ]]
+}
+
+# Resolves the live steam ELF process pid (not steam.sh, not the launcher).
+# Steam writes its own pid to $HOME/.steam/steam.pid; `pgrep -x steam` is the
+# fallback (comm "steam" is unique at steady state -- srt-bwrap/steamwebhelper
+# have different comms). Prints nothing if no live pid can be resolved (first
+# boot / bootstrap incomplete).
+resolve_steam_pid() {
+  local pid=""
+  if [[ -f "$HOME/.steam/steam.pid" ]]; then
+    pid="$(cat "$HOME/.steam/steam.pid" 2>/dev/null || true)"
+  fi
+  if ! pid_is_steam "$pid"; then
+    pid="$(pgrep -x steam 2>/dev/null | head -n1 || true)"
+  fi
+  if pid_is_steam "$pid"; then
+    printf '%s' "$pid"
+  fi
+}
+
+on_term() {
+  # Idempotent: a second TERM/INT while a relay is already in flight is a
+  # no-op -- the first invocation owns the steam-TERM -> client TERM ->
+  # gamescope TERM sequence through to completion.
+  if [[ "$shutting_down" == "1" ]]; then
+    return
+  fi
+  shutting_down=1
+  log "shutdown requested; relaying to launched processes"
+
+  # Declared here (not inside the client_pid branch below) so it is always
+  # in scope for the gamescope-TERM gate further down, even on the startup
+  # paths where client_pid is never set and that branch is skipped entirely.
+  local steam_pid=""
+
+  if [[ -n "$client_pid" ]] && kill -0 "$client_pid" 2>/dev/null; then
+    steam_pid="$(resolve_steam_pid)"
+
+    if [[ -n "$steam_pid" ]]; then
+      # Clean quit, live-tested 2026-07-20 (2x oracle-verified): a single
+      # SIGTERM to the steam ELF process itself is what makes Steam log
+      # "Shutdown" and unwind the whole chain (steam.sh -> dbus-run-session
+      # -> launcher) on its own -- container exits ~3.1-3.4s later, next boot
+      # is clean. steam.sh's shutdown flag was tried first and PROVEN
+      # INEFFECTIVE in this container: it is forwarded over Steam's client
+      # IPC to the already-running instance and silently ignored (nothing
+      # exits within 61s), so it is not invoked anywhere in this script.
+      # TERM'ing gamescope while steam is still alive is also PROVEN UNCLEAN (gamescope's death
+      # races steam's own exit), which is why gamescope's TERM below stays
+      # strictly after steam has exited (or the budget below expires).
+      log "sending SIGTERM to steam (pid $steam_pid, budget ${shutdown_timeout}s)"
+      kill -TERM "$steam_pid" 2>/dev/null || true
+
+      local waited=0
+      local max_waited=$(( shutdown_timeout * 4 ))  # 0.25s poll ticks
+      while kill -0 "$steam_pid" 2>/dev/null; do
+        if (( waited >= max_waited )); then
+          log "steam still running after ${shutdown_timeout}s; escalating to TERM"
+          break
+        fi
+        sleep 0.25 || true
+        waited=$((waited + 1))
+      done
+    else
+      # First boot, or steam hasn't finished bootstrapping yet: no live steam
+      # pid to resolve, so skip straight to the TERM relay below.
+      log "no live steam process resolved yet; skipping steam TERM, relaying TERM directly"
+    fi
+
+    if kill -0 "$client_pid" 2>/dev/null; then
+      kill -TERM "$client_pid" 2>/dev/null || true
+    fi
+  fi
+
+  # Gated on steam being confirmed gone: TERM'ing gamescope while steam is
+  # still alive is proven unclean (gamescope's death races steam's own
+  # exit). If the budget above expired with steam still running, this is
+  # deliberately a no-op -- docker's SIGKILL-after-timeout backstop reaps
+  # gamescope instead of us risking the unclean race. When steam_pid was
+  # never resolved (empty, startup-path fallback), `kill -0 ""` fails, the
+  # negation is true, and gamescope's TERM still fires as before.
+  if [[ -n "$gs_pid" ]] && ! kill -0 "$steam_pid" 2>/dev/null && kill -0 "$gs_pid" 2>/dev/null; then
+    log "terminating gamescope (pid $gs_pid)"
+    kill -TERM "$gs_pid" 2>/dev/null || true
+  fi
+}
+
+# Installed before anything below is backgrounded: no window where a TERM/INT
+# could arrive and find no handler wired up.
+trap on_term TERM INT
+
+# `wait PID` returns EARLY (status >128) the instant a trapped signal is
+# caught -- bash runs the trap synchronously, then hands control back to the
+# statement after wait, whether or not PID has actually exited yet. Re-wait
+# in a loop and only trust the exit status once `kill -0` confirms the pid is
+# actually gone (that final wait's status is the real one; earlier ones are
+# just signal-delivery artifacts). set -e is live, so every wait/kill here is
+# the condition of an if/while -- never a bare statement -- or its nonzero
+# would abort the script before we get to read $?.
+wait_for_exit() {
+  local pid="$1" rc=0
+  while :; do
+    if wait "$pid"; then rc=0; else rc=$?; fi
+    if kill -0 "$pid" 2>/dev/null; then
+      continue
+    fi
+    break
+  done
+  return "$rc"
+}
+
 if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
-  exec "${client[@]}"
+  # Re-check right before backgrounding: a TERM/INT could have landed during
+  # the diagnostics above (on_term already ran -- shutting_down=1, nothing
+  # left to relay to since client_pid isn't set yet). Don't start Steam into
+  # a shutdown that's already in flight.
+  if [[ "$shutting_down" == "1" ]]; then
+    log "shutdown requested during startup; exiting without launching Steam"
+    exit 143
+  fi
+  "${client[@]}" &
+  client_pid=$!
+  # A non-zero/signal exit here (e.g. 143) after an already-clean shutdown
+  # relay is expected docker-stop signal-exit semantics, not a failure --
+  # intentional, left as-is.
+  if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi
+  exit "$rc"
 fi
 
 # --- Gamescope launch: GOW-pattern ready-socket handshake --------------------
@@ -115,7 +268,10 @@ fi
 #      socket through the ready socket; we export exactly what it reports
 #      instead of guessing ":0".
 #   3. ibus-daemon is started (QT_IM_MODULE=steam needs it; without the daemon
-#      the Steam IME can eat keyboard input).
+#      the Steam IME can eat keyboard input). It self-daemonizes (double-forks
+#      and reparents to tini, not to this launcher), so on_term() above never
+#      sends it a TERM -- that's fine, `docker stop`'s SIGKILL-after-timeout
+#      backstop reaps it like any other orphan under tini's subreaper.
 export STEAM_DISABLE_MANGOAPP_ATOM_WORKAROUND=1
 gs_tmpdir=$(mktemp -p "${XDG_RUNTIME_DIR:-/tmp}" -d -t gamescope.XXXXXXX)
 gs_socket="$gs_tmpdir/startup.socket"
@@ -128,19 +284,53 @@ gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
   -W "${GAMESCOPE_WIDTH:-1920}" \
   -H "${GAMESCOPE_HEIGHT:-1080}" \
   -r "${GAMESCOPE_REFRESH:-60}" &
+gs_pid=$!
 
 if read -r -t 5 gs_x_display gs_wl_display <> "$gs_socket"; then
   export DISPLAY="$gs_x_display"
   export GAMESCOPE_WAYLAND_DISPLAY="$gs_wl_display"
   unset WAYLAND_DISPLAY
   log "gamescope ready: DISPLAY=$DISPLAY nested_wayland=$gs_wl_display"
+elif [[ "$shutting_down" == "1" ]]; then
+  # A TERM/INT landed while waiting on the ready socket -- on_term already
+  # TERM'd gamescope (steam_pid is empty at this point in startup, so the
+  # gate above still fires), so the read timing/failing out is expected,
+  # not a real gamescope fault. Exit the documented shutdown-during-startup
+  # way instead of the misleading FATAL below.
+  log "shutdown requested during startup; exiting without launching Steam"
+  exit 143
 else
   log "FATAL: gamescope did not report ready within 5s"
   exit 1
+fi
+
+# Gate: a TERM/INT could have landed anywhere between gamescope becoming ready
+# and here (on_term already ran -- shutting_down=1, client_pid still unset so
+# on_term had nothing of Steam's to relay to, but it did TERM gamescope).
+# Without this check the flow below would start Steam into an already-dying
+# (or dead) gamescope, which begins writing state and then gets SIGKILLed by
+# the docker-stop backstop -- exactly the unclean shutdown this feature
+# exists to prevent.
+if [[ "$shutting_down" == "1" ]]; then
+  log "shutdown requested during startup; exiting without launching Steam"
+  exit 143
 fi
 
 if command -v ibus-daemon >/dev/null 2>&1; then
   ibus-daemon -d -r --panel=disable --emoji-extension=disable || log "WARN: ibus-daemon failed to start"
 fi
 
-exec "${client[@]}"
+# Re-check immediately before backgrounding: the ibus-daemon startup above is
+# another window where a signal could have landed.
+if [[ "$shutting_down" == "1" ]]; then
+  log "shutdown requested during startup; exiting without launching Steam"
+  exit 143
+fi
+
+"${client[@]}" &
+client_pid=$!
+# A non-zero/signal exit here (e.g. 143) after an already-clean shutdown
+# relay is expected docker-stop signal-exit semantics, not a failure --
+# intentional, left as-is.
+if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi
+exit "$rc"
