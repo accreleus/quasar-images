@@ -151,11 +151,11 @@ on_term() {
       # SIGTERM to the steam ELF process itself is what makes Steam log
       # "Shutdown" and unwind the whole chain (steam.sh -> dbus-run-session
       # -> launcher) on its own -- container exits ~3.1-3.4s later, next boot
-      # is clean. `steam.sh -shutdown` was tried first and PROVEN INEFFECTIVE
-      # in this container: it is forwarded over Steam's client IPC to the
-      # already-running instance and silently ignored (nothing exits within
-      # 61s), so it is not used anywhere in this script. TERM'ing gamescope
-      # while steam is still alive is also PROVEN UNCLEAN (gamescope's death
+      # is clean. steam.sh's shutdown flag was tried first and PROVEN
+      # INEFFECTIVE in this container: it is forwarded over Steam's client
+      # IPC to the already-running instance and silently ignored (nothing
+      # exits within 61s), so it is not invoked anywhere in this script.
+      # TERM'ing gamescope while steam is still alive is also PROVEN UNCLEAN (gamescope's death
       # races steam's own exit), which is why gamescope's TERM below stays
       # strictly after steam has exited (or the budget below expires).
       log "sending SIGTERM to steam (pid $steam_pid, budget ${shutdown_timeout}s)"
@@ -273,7 +273,7 @@ fi
 # on_term had nothing of Steam's to relay to, but it did TERM gamescope).
 # Without this check the flow below would start Steam into an already-dying
 # (or dead) gamescope, which begins writing state and then gets SIGKILLed by
-# the docker-stop backstop -- exactly the unclean-shutdown pain this feature
+# the docker-stop backstop -- exactly the unclean shutdown this feature
 # exists to prevent.
 if [[ "$shutting_down" == "1" ]]; then
   log "shutdown requested during startup; exiting without launching Steam"
