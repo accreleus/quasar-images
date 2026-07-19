@@ -90,55 +90,42 @@ if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
   exec "${client[@]}"
 fi
 
-# --- Graceful shutdown orchestration -----------------------------------------
-# The launcher (Quasar node-agent) stops the container with `docker stop`, which
-# tini -g translates into SIGTERM to the whole process group. If Gamescope took
-# that TERM directly it would tear the X server down before Steam saves state,
-# and Steam then marks the install unclean — forcing a full executable-checksum
-# re-verification (~9 s) on the NEXT launch. So: run Gamescope in its own
-# process group (setsid, shielded from the group TERM), trap TERM here, ask
-# Steam to shut down cleanly, wait for it, then stop Gamescope.
-# QUASAR_STEAM_SHUTDOWN_TIMEOUT bounds the wait (seconds; keep it below the
-# launcher's docker-stop grace window).
+# --- Gamescope launch: GOW-pattern ready-socket handshake --------------------
+# Mirrors games-on-whales apps/steam startup.sh (the validated-working input
+# path). Key structural points, each load-bearing:
+#   1. Gamescope runs WITHOUT a client argument; Steam is started as a SIBLING
+#      afterwards. Passing Steam as gamescope''s child arg left it mis-wired
+#      (no DISPLAY / outer WAYLAND_DISPLAY) and input never reached it.
+#   2. `-R socket`: gamescope reports its actual X display + nested Wayland
+#      socket through the ready socket; we export exactly what it reports
+#      instead of guessing ":0".
+#   3. ibus-daemon is started (QT_IM_MODULE=steam needs it; without the daemon
+#      the Steam IME can eat keyboard input).
+export STEAM_DISABLE_MANGOAPP_ATOM_WORKAROUND=1
+gs_tmpdir=$(mktemp -p "${XDG_RUNTIME_DIR:-/tmp}" -d -t gamescope.XXXXXXX)
+gs_socket="$gs_tmpdir/startup.socket"
+gs_stats="$gs_tmpdir/stats.pipe"
+mkfifo -- "$gs_stats"
+mkfifo -- "$gs_socket"
+
 log "starting Gamescope (mode=$ui_mode flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0})"
-setsid gamescope -e \
+gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
   -W "${GAMESCOPE_WIDTH:-1920}" \
   -H "${GAMESCOPE_HEIGHT:-1080}" \
-  -r "${GAMESCOPE_REFRESH:-60}" \
-  -- "${client[@]}" &
-gs_pid=$!
+  -r "${GAMESCOPE_REFRESH:-60}" &
 
-shutdown_requested=0
-request_shutdown() {
-  [[ "$shutdown_requested" == 1 ]] && return
-  shutdown_requested=1
-  log "TERM received: requesting clean Steam shutdown"
-  "$HOME/.local/share/Steam/steam.sh" -shutdown >/dev/null 2>&1 || true
-  local timeout="${QUASAR_STEAM_SHUTDOWN_TIMEOUT:-8}"
-  local i
-  for i in $(seq 1 "$timeout"); do
-    pgrep -x steam >/dev/null 2>&1 || break
-    sleep 1
-  done
-  if pgrep -x steam >/dev/null 2>&1; then
-    log "Steam did not exit within ${timeout}s; stopping Gamescope anyway"
-  else
-    log "Steam exited cleanly"
-  fi
-  kill -TERM -- "-$gs_pid" 2>/dev/null || kill -TERM "$gs_pid" 2>/dev/null || true
-}
-trap request_shutdown TERM INT
+if read -r -t 5 gs_x_display gs_wl_display <> "$gs_socket"; then
+  export DISPLAY="$gs_x_display"
+  export GAMESCOPE_WAYLAND_DISPLAY="$gs_wl_display"
+  unset WAYLAND_DISPLAY
+  log "gamescope ready: DISPLAY=$DISPLAY nested_wayland=$gs_wl_display"
+else
+  log "FATAL: gamescope did not report ready within 5s"
+  exit 1
+fi
 
-# Collect Gamescope's exit; `wait` returns early when the trap fires, so loop
-# until the process is actually gone.
-status=0
-while :; do
-  if wait "$gs_pid"; then
-    status=0
-    break
-  else
-    status=$?
-    kill -0 "$gs_pid" 2>/dev/null || break
-  fi
-done
-exit "$status"
+if command -v ibus-daemon >/dev/null 2>&1; then
+  ibus-daemon -d -r --panel=disable --emoji-extension=disable || log "WARN: ibus-daemon failed to start"
+fi
+
+exec "${client[@]}"

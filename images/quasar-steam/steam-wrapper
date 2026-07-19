@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Force Steam onto Gamescope's Xwayland (DISPLAY) rather than the nested Wayland
-# socket Gamescope may export to its children. The Steam-integration focus atoms
-# (STEAM_GAME / GAMESCOPECTRL_BASELAYER_APPID) live on the X server, so a Steam
-# that binds Wayland directly never participates in the game-foreground handoff.
-# Mirrors games-on-whales' startup.sh.
-unset WAYLAND_DISPLAY
+# Display wiring (DISPLAY export + outer-WAYLAND_DISPLAY unset) is owned by the
+# quasar-steam launcher via the gamescope ready-socket handshake (GOW pattern) —
+# by the time this wrapper runs, the environment is already correct.
 
 steam_dir="$HOME/.local/share/Steam"
 legacy_dir="$HOME/.steam/steam"
