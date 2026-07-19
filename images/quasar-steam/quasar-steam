@@ -187,8 +187,19 @@ wait_for_exit() {
 }
 
 if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
+  # Re-check right before backgrounding: a TERM/INT could have landed during
+  # the diagnostics above (on_term already ran -- shutting_down=1, nothing
+  # left to relay to since client_pid isn't set yet). Don't start Steam into
+  # a shutdown that's already in flight.
+  if [[ "$shutting_down" == "1" ]]; then
+    log "shutdown requested during startup; exiting without launching Steam"
+    exit 143
+  fi
   "${client[@]}" &
   client_pid=$!
+  # A non-zero/signal exit here (e.g. 143) after an already-clean -shutdown
+  # relay is expected docker-stop signal-exit semantics, not a failure --
+  # intentional, left as-is.
   if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi
   exit "$rc"
 fi
@@ -231,11 +242,33 @@ else
   exit 1
 fi
 
+# Gate: a TERM/INT could have landed anywhere between gamescope becoming ready
+# and here (on_term already ran -- shutting_down=1, client_pid still unset so
+# on_term had nothing of Steam's to relay to, but it did TERM gamescope).
+# Without this check the flow below would start Steam into an already-dying
+# (or dead) gamescope, which begins writing state and then gets SIGKILLed by
+# the docker-stop backstop -- exactly the unclean-shutdown pain this feature
+# exists to prevent.
+if [[ "$shutting_down" == "1" ]]; then
+  log "shutdown requested during startup; exiting without launching Steam"
+  exit 143
+fi
+
 if command -v ibus-daemon >/dev/null 2>&1; then
   ibus-daemon -d -r --panel=disable --emoji-extension=disable || log "WARN: ibus-daemon failed to start"
 fi
 
+# Re-check immediately before backgrounding: the ibus-daemon startup above is
+# another window where a signal could have landed.
+if [[ "$shutting_down" == "1" ]]; then
+  log "shutdown requested during startup; exiting without launching Steam"
+  exit 143
+fi
+
 "${client[@]}" &
 client_pid=$!
+# A non-zero/signal exit here (e.g. 143) after an already-clean -shutdown
+# relay is expected docker-stop signal-exit semantics, not a failure --
+# intentional, left as-is.
 if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi
 exit "$rc"

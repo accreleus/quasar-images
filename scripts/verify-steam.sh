@@ -17,7 +17,14 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # anywhere (everything stays in tini'"'"'s direct descendant tree -- the
   # 6551fe8 FATAL was EPERM from a group-kill against a setsid-reshaped
   # group), and a trap that sequences steam.sh -shutdown before any TERM.
-  ! grep -q "setsid" "$steam"
+  # NOTE: negative assertions must use explicit if/exit, not "! grep -q ...".
+  # bash'"'"'s errexit (set -e) does not fire on a command whose exit status is
+  # inverted by !, so "! grep -q ..." would silently PASS (never even print
+  # a failure) if setsid/-g were reintroduced -- caught in review.
+  if grep -q "setsid" "$steam"; then
+    echo "FAIL: setsid present in $steam" >&2
+    exit 1
+  fi
   grep -q "trap on_term TERM INT" "$steam"
   grep -q -- "-shutdown" "$steam"
   grep -q "QUASAR_STEAM_GAMESCOPE:-1" "$steam"
@@ -58,7 +65,12 @@ jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleratio
 # shutdown is the launcher's job now (on_term() above), not tini's group-kill.
 base_dockerfile="$root/images/quasar-base/Dockerfile"
 test -f "$base_dockerfile"
-! grep -q '^ENTRYPOINT \["/usr/bin/tini", "-g"' "$base_dockerfile"
+# Same explicit if/exit form as the setsid check above -- "!"-inverted grep is
+# inert under set -e and would silently pass if -g were reintroduced.
+if grep -q '^ENTRYPOINT \["/usr/bin/tini", "-g"' "$base_dockerfile"; then
+  echo "FAIL: tini -g present in $base_dockerfile" >&2
+  exit 1
+fi
 grep -q '^ENTRYPOINT \["/usr/bin/tini", "--", "/usr/local/bin/quasar-entrypoint"\]' "$base_dockerfile"
 
 echo "quasar-steam structural checks passed"
