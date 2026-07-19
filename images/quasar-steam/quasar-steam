@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- Wayland socket handoff (quasar#379) -------------------------------------
+# The node-agent provides XDG_RUNTIME_DIR + WAYLAND_DISPLAY for ITS compositor
+# socket (a file bind at $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY, e.g.
+# /run/quasar-wayland/wayland-3 -- the name varies per session). Gamescope
+# needs a private, user-owned XDG_RUNTIME_DIR for its own sockets, so this
+# launcher repoints it below -- but first the agent socket is resolved to an
+# ABSOLUTE path so the repoint cannot orphan it. (A hardcoded wayland-1
+# catalog env pin previously did this job and broke every non-first session
+# on the host.)
+if [[ -n "${WAYLAND_DISPLAY:-}" && "${WAYLAND_DISPLAY}" != /* ]]; then
+  export WAYLAND_DISPLAY="${XDG_RUNTIME_DIR:-/run/quasar-wayland}/${WAYLAND_DISPLAY}"
+fi
+export XDG_RUNTIME_DIR="${QUASAR_STEAM_RUNTIME_DIR:-$HOME/.runtime}"
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
+
 log() { printf '%s quasar-steam: %s\n' "$(date -Iseconds)" "$*" >&2; }
 
 export STEAM_COMPAT_DATA_PATH="${STEAM_COMPAT_DATA_PATH:-$HOME/.local/share/quasar-steam/pfx}"
