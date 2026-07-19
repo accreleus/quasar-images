@@ -37,7 +37,7 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # a signal-named group-kill (kill -TERM -$pid) targets the whole process
   # group, which is EPERM under --cap-drop ALL/no CAP_KILL against a
   # reshaped group -- must never be reintroduced.
-  if grep -qE 'kill[^|]* -- -|kill -[A-Z]+ -[0-9$]' "$steam"; then
+  if grep -qE '"'"'kill[^|]* -- -|kill -[A-Z]+ -[0-9$]'"'"' "$steam"; then
     echo "FAIL: group-kill (negative-pid kill) present in $steam" >&2
     exit 1
   fi
@@ -61,8 +61,14 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
     grep -q -- "-gamepadui -steamos3 -steampal -steamdeck" "$steam"
   fi
 
-  # Steam must bind Gamescope Xwayland, not the nested Wayland socket.
-  grep -q "unset WAYLAND_DISPLAY" "$client"
+  # Steam must bind Gamescope Xwayland, not the nested Wayland socket. Display
+  # wiring (DISPLAY export + outer-WAYLAND_DISPLAY unset) moved from the
+  # steam-wrapper client into the quasar-steam launcher itself (52b55e2, the
+  # GOW ready-socket handshake) -- this assertion was checking the wrong file
+  # and had gone stale (silently, since it is a bare assertion with no FAIL
+  # message: a failure here aborts the whole script under set -e with no
+  # diagnostic, discovered while proving the group-kill fix green end-to-end).
+  grep -q "unset WAYLAND_DISPLAY" "$steam"
 
   # ALSA-only clients route to the injected PulseAudio sink.
   test -f /etc/asound.conf
