@@ -279,11 +279,23 @@ gs_stats="$gs_tmpdir/stats.pipe"
 mkfifo -- "$gs_stats"
 mkfifo -- "$gs_socket"
 
-log "starting Gamescope (mode=$ui_mode flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0})"
+# Nested gamescope does not read the host compositor's wl_output mode -- it
+# sizes its virtual output from -W/-H/-r. So whatever it is given here is the
+# display Steam and every game it launches see. Quasar injects the session's
+# streamed mode as QUASAR_STREAM_WIDTH/HEIGHT/FPS (quasar#384); before that the
+# baked 1920x1080x60 defaults below applied to every session, so a 1440p120
+# session rendered 1080p60 and the compositor upscaled it. An explicit
+# GAMESCOPE_* still wins (per-app pin, and what Quasar's compatibility shim
+# sets); the literals are the last resort for a standalone `docker run`.
+gs_width="${GAMESCOPE_WIDTH:-${QUASAR_STREAM_WIDTH:-1920}}"
+gs_height="${GAMESCOPE_HEIGHT:-${QUASAR_STREAM_HEIGHT:-1080}}"
+gs_refresh="${GAMESCOPE_REFRESH:-${QUASAR_STREAM_FPS:-60}}"
+
+log "starting Gamescope (mode=$ui_mode ${gs_width}x${gs_height}@${gs_refresh} flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0})"
 gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
-  -W "${GAMESCOPE_WIDTH:-1920}" \
-  -H "${GAMESCOPE_HEIGHT:-1080}" \
-  -r "${GAMESCOPE_REFRESH:-60}" &
+  -W "$gs_width" \
+  -H "$gs_height" \
+  -r "$gs_refresh" &
 gs_pid=$!
 
 if read -r -t 5 gs_x_display gs_wl_display <> "$gs_socket"; then

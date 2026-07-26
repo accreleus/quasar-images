@@ -31,8 +31,13 @@ The launcher (`quasar-steam`) selects one of two **validated** configurations vi
 `QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0`/`1`) overrides the per-mode default.
 Set `QUASAR_STEAM_GAMESCOPE=0` to run Steam without nested Gamescope.
 
-Other knobs: `GAMESCOPE_WIDTH` (1920), `GAMESCOPE_HEIGHT` (1080),
-`GAMESCOPE_REFRESH` (60).
+Display mode: gamescope's nested output is sized from `QUASAR_STREAM_WIDTH` /
+`QUASAR_STREAM_HEIGHT` / `QUASAR_STREAM_FPS`, which Quasar injects per session
+from the launched stream profile (quasar#384). An explicit `GAMESCOPE_WIDTH` /
+`GAMESCOPE_HEIGHT` / `GAMESCOPE_REFRESH` overrides it (per-app pin); with
+neither set the image falls back to 1920x1080x60. This is what Steam and every
+game it launches see -- it is not derived from the host compositor's output,
+which nested gamescope does not read.
 
 ## Host / launch requirements
 

@@ -72,9 +72,11 @@ COPY images/quasar-steam/quasar-steam /usr/local/bin/quasar-steam
 COPY images/quasar-steam/steam-wrapper /usr/local/bin/quasar-steam-client
 RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client /usr/bin/bwrap
 
-ENV QUASAR_STEAM_GAMESCOPE=1 \
-    GAMESCOPE_WIDTH=1920 \
-    GAMESCOPE_HEIGHT=1080 \
-    GAMESCOPE_REFRESH=60
+# No baked GAMESCOPE_WIDTH/HEIGHT/REFRESH: a baked value is non-empty, so it
+# would shadow the session mode Quasar injects as QUASAR_STREAM_* and pin every
+# session to it (quasar#384 -- a 1440p120 session rendered 1080p60 and got
+# upscaled). quasar-steam falls back to 1920x1080x60 internally when neither is
+# set, so a standalone `docker run` is unchanged.
+ENV QUASAR_STEAM_GAMESCOPE=1
 
 CMD ["/usr/local/bin/quasar-steam"]
