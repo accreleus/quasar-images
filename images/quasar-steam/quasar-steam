@@ -298,7 +298,15 @@ gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
   -r "$gs_refresh" &
 gs_pid=$!
 
-if read -r -t 5 gs_x_display gs_wl_display <> "$gs_socket"; then
+# Readiness window. 5s was too tight: gamescope's own startup (Xwayland +
+# xkbcomp keysym compile + Vulkan/EGL init) measured 4.5-10.6s on Tower with the
+# time varying run to run and NOT with the requested mode (1440p120 came up in
+# 6.1s between two 1080p60 runs at 10.6s and 4.6s). Losing that race aborted the
+# whole container with "gamescope did not report ready", i.e. a dead session for
+# a healthy gamescope. The wait is bounded, not removed -- a genuinely wedged
+# gamescope still fails, just after a window it cannot lose by being slow.
+gs_ready_timeout="${QUASAR_GAMESCOPE_READY_TIMEOUT:-30}"
+if read -r -t "$gs_ready_timeout" gs_x_display gs_wl_display <> "$gs_socket"; then
   export DISPLAY="$gs_x_display"
   export GAMESCOPE_WAYLAND_DISPLAY="$gs_wl_display"
   unset WAYLAND_DISPLAY
@@ -312,7 +320,7 @@ elif [[ "$shutting_down" == "1" ]]; then
   log "shutdown requested during startup; exiting without launching Steam"
   exit 143
 else
-  log "FATAL: gamescope did not report ready within 5s"
+  log "FATAL: gamescope did not report ready within ${gs_ready_timeout}s"
   exit 1
 fi
 
