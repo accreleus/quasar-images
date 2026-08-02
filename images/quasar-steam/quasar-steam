@@ -467,7 +467,12 @@ game_exit_watcher() {
           write_app_state client_only
           continue
         fi
-        sleep 2
+        # 1s (not the waiting_for_start 2s): this poll's lag is the dominant
+        # term in how long Big Picture is visible after a quit before the
+        # client_only write re-masks the client's loader (live-measured ~2s of
+        # the ~3s glimpse, 2026-08-02). The /proc scan is cheap; the exit path
+        # deserves the tighter tick.
+        sleep 1
         ;;
       debounce)
         sleep 1
