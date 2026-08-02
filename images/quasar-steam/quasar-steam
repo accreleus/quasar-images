@@ -73,6 +73,29 @@ case "$ui_mode" in
 esac
 export STEAM_STARTUP_FLAGS="${STEAM_STARTUP_FLAGS:-$default_flags}"
 
+# --- Game-exit watcher: arming ------------------------------------------------
+# A derived (game) tile launches straight into a title via `-applaunch
+# <appid>` in STEAM_STARTUP_FLAGS; when that game exits the user should not
+# land back in Big Picture -- the session should end (Michael, 2026-08-02
+# game-exit-lifecycle spec, Phase A). A plain launcher-tile session (no
+# -applaunch) never arms the watcher: behaviour is unchanged.
+#
+# Parsed here (STEAM_STARTUP_FLAGS is already final) rather than at watcher
+# start, so a malformed/missing -applaunch pair degrades to today's
+# behaviour with no side effects -- watch_appid stays empty and none of the
+# watcher machinery below ever runs. QUASAR_STEAM_EXIT_ON_GAME_EXIT=0 is the
+# operator/debug escape hatch even when a valid pair is present.
+watch_appid=""
+if [[ "${QUASAR_STEAM_EXIT_ON_GAME_EXIT:-1}" == "1" ]]; then
+  read -r -a _flags <<< "${STEAM_STARTUP_FLAGS:-}"
+  for ((_i = 0; _i < ${#_flags[@]}; _i++)); do
+    if [[ "${_flags[$_i]}" == "-applaunch" && "${_flags[$((_i + 1))]:-}" =~ ^[1-9][0-9]{0,9}$ ]]; then
+      watch_appid="${_flags[$((_i + 1))]}"
+    fi
+  done
+  unset _flags _i
+fi
+
 # Per-game Xwayland isolation is part of the validated gamepadui unit and stays
 # off for bigpicture. Gamescope composites every Xwayland into one output, so the
 # node-agent's compositor capture is unaffected either way.
@@ -116,6 +139,9 @@ shutdown_timeout="${QUASAR_STEAM_SHUTDOWN_TIMEOUT:-8}"
 client_pid=""
 gs_pid=""
 shutting_down=0
+watcher_pid=""
+game_exit_confirmed=0
+launcher_pid=$$
 
 # A pid only counts as "the steam process" if it is numeric, alive, AND
 # /proc confirms its comm is exactly "steam". kill -0 alone is not enough:
@@ -147,6 +173,39 @@ resolve_steam_pid() {
   if pid_is_steam "$pid"; then
     printf '%s' "$pid"
   fi
+}
+
+# --- Game-exit watcher: detection --------------------------------------------
+# Primary signal: Steam wraps every launched title (native and Proton) in its
+# `reaper` process with the literal argument `AppId=<appid>`. Iterate
+# /proc/*/cmdline (NUL-separated, own-uid processes readable unprivileged)
+# and compare the token EXACTLY -- a substring/regex match here would let
+# "AppId=620" match a process actually running "AppId=6200" (or the reverse),
+# and `pgrep -f` carries its own well-known self-match/substring traps (on
+# record from resolve_steam_pid's history above). This is deliberately the
+# more verbose of the two documented detection options for that reason.
+game_running() {
+  local proc tok
+  for proc in /proc/[0-9]*/cmdline; do
+    [[ -r "$proc" ]] || continue
+    while IFS= read -r -d '' tok; do
+      if [[ "$tok" == "AppId=${watch_appid}" ]]; then
+        return 0
+      fi
+    done < "$proc" 2>/dev/null
+  done
+  return 1
+}
+
+# Corroborating signal: Steam's own registry carries "RunningAppID" "<appid>"
+# while a game runs and "0" after it exits. It lags process death by a beat
+# -- exactly what makes it a debounce witness, not a primary. Single
+# sed/grep, no VDF parser. Empty output means the file is missing/unreadable
+# (first boot) or carries no RunningAppID line.
+registry_running_appid() {
+  local registry_file="$HOME/.steam/registry.vdf"
+  [[ -r "$registry_file" ]] || return 0
+  sed -n 's/.*"RunningAppID"[[:space:]]*"\([0-9]*\)".*/\1/p' "$registry_file" | tail -n1
 }
 
 on_term() {
@@ -214,11 +273,112 @@ on_term() {
     log "terminating gamescope (pid $gs_pid)"
     kill -TERM "$gs_pid" 2>/dev/null || true
   fi
+
+  # Stop the game-exit watcher too, if one is running -- it has nothing left
+  # to watch for once shutdown is under way. Harmless if it already exited
+  # on its own (the confirmed-exit path returns after signaling us).
+  if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
+    kill -TERM "$watcher_pid" 2>/dev/null || true
+  fi
+}
+
+# --- Game-exit watcher: state machine ----------------------------------------
+# Runs as a backgrounded function (`&`) -- a forked subshell of this script,
+# so it stays in tini's direct descendant tree exactly like every other
+# process here (no process-group tricks, per quasar-images#1 SS2 -- see the
+# on_term()/pid_is_steam() header comments above for why). Traps are reset
+# at entry: the subshell otherwise inherits this script's TERM/INT/USR1
+# handlers, which would make a plain `kill -TERM "$watcher_pid"` re-enter
+# on_term() a second time (harmlessly, but pointlessly) instead of just
+# stopping the loop.
+#
+# The watcher does NOT call on_term() itself -- it runs in a forked
+# subshell, so any variable it set there (shutting_down, game_exit_confirmed)
+# would be a private copy of the fork and would never reach the main
+# script's process. Instead, on confirmed exit it signals the main process
+# (SIGUSR1) and lets THAT process's own trap run the real on_term(), which is
+# the one that actually owns client_pid/gs_pid/shutting_down. This is also
+# what makes a `docker stop` arriving while the watcher is already tearing
+# things down a clean no-op second entry: both the TERM/INT handler and the
+# USR1 handler funnel into the same on_term(), guarded by the same
+# shutting_down flag, in the same process -- no new idempotency logic
+# needed, the existing guard already covers it.
+game_exit_watcher() {
+  trap - TERM INT USR1
+
+  local state="waiting_for_start"
+  local debounce_window="${QUASAR_STEAM_GAME_EXIT_DEBOUNCE:-15}"
+  [[ "$debounce_window" =~ ^[0-9]+$ ]] || debounce_window=15
+  local debounce_elapsed=0
+  local extended=0
+  local running_appid=""
+
+  log "game-exit watcher armed for appid $watch_appid (debounce ${debounce_window}s)"
+
+  while :; do
+    case "$state" in
+      waiting_for_start)
+        # No timeout -- first-run EULAs, shader precompile, and Steam client
+        # updates legitimately precede launch by minutes. The stream is up
+        # and usable throughout; docker-level session stop still works.
+        if game_running; then
+          log "game $watch_appid detected running"
+          state="running"
+          continue
+        fi
+        sleep 2
+        ;;
+      running)
+        if ! game_running; then
+          log "game $watch_appid process no longer detected; entering debounce"
+          state="debounce"
+          debounce_elapsed=0
+          extended=0
+          continue
+        fi
+        sleep 2
+        ;;
+      debounce)
+        sleep 1
+        debounce_elapsed=$((debounce_elapsed + 1))
+        if game_running; then
+          log "game $watch_appid reappeared during debounce; resuming running state"
+          state="running"
+          continue
+        fi
+        if (( debounce_elapsed < debounce_window )); then
+          continue
+        fi
+        running_appid="$(registry_running_appid)"
+        if [[ "$running_appid" == "$watch_appid" && "$extended" == "0" ]]; then
+          # Registry lag: process signal already says gone, but the
+          # registry witness hasn't caught up yet. Extend once, then trust
+          # the process signal regardless of what the registry says next.
+          log "debounce expired but registry still reports appid $watch_appid running; extending once"
+          extended=1
+          debounce_elapsed=0
+          continue
+        fi
+        state="confirmed"
+        ;;
+      confirmed)
+        log "game $watch_appid exited; initiating clean shutdown"
+        kill -USR1 "$launcher_pid" 2>/dev/null || true
+        return 0
+        ;;
+    esac
+  done
 }
 
 # Installed before anything below is backgrounded: no window where a TERM/INT
 # could arrive and find no handler wired up.
 trap on_term TERM INT
+# See game_exit_watcher()'s header comment: the watcher signals confirmed
+# game exit via USR1 rather than calling on_term() itself, so that the
+# relay (and the shutting_down idempotency guard) always runs in this
+# process. game_exit_confirmed shapes the exit status below to 0 -- this is
+# the success path, not a failure/docker-stop-style signal exit.
+trap 'game_exit_confirmed=1; on_term' USR1
 
 # `wait PID` returns EARLY (status >128) the instant a trapped signal is
 # caught -- bash runs the trap synchronously, then hands control back to the
@@ -251,10 +411,21 @@ if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
   fi
   "${client[@]}" &
   client_pid=$!
+  if [[ -n "$watch_appid" ]]; then
+    game_exit_watcher &
+    watcher_pid=$!
+  fi
   # A non-zero/signal exit here (e.g. 143) after an already-clean shutdown
   # relay is expected docker-stop signal-exit semantics, not a failure --
   # intentional, left as-is.
   if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi
+  # Game-exit-initiated shutdown is the success path (the user quit the
+  # game, not a crash or an external stop) -- exit 0 regardless of the
+  # signal-shaped exit status client_pid actually returned.
+  if [[ "$game_exit_confirmed" == "1" ]]; then
+    log "clean shutdown after game exit; exiting 0"
+    rc=0
+  fi
   exit "$rc"
 fi
 
@@ -349,8 +520,19 @@ fi
 
 "${client[@]}" &
 client_pid=$!
+if [[ -n "$watch_appid" ]]; then
+  game_exit_watcher &
+  watcher_pid=$!
+fi
 # A non-zero/signal exit here (e.g. 143) after an already-clean shutdown
 # relay is expected docker-stop signal-exit semantics, not a failure --
 # intentional, left as-is.
 if wait_for_exit "$client_pid"; then rc=0; else rc=$?; fi
+# Game-exit-initiated shutdown is the success path (the user quit the game,
+# not a crash or an external stop) -- exit 0 regardless of the signal-shaped
+# exit status client_pid actually returned.
+if [[ "$game_exit_confirmed" == "1" ]]; then
+  log "clean shutdown after game exit; exiting 0"
+  rc=0
+fi
 exit "$rc"

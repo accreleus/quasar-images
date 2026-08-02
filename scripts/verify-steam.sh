@@ -55,6 +55,49 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # Default UI mode is the games-on-whales-validated bigpicture path.
   grep -q "QUASAR_STEAM_UI_MODE:-bigpicture" "$steam"
 
+  # Game-exit watcher (2026-08-02 game-exit-lifecycle spec, Phase A): armed
+  # from a valid -applaunch <appid> pair, default-on, escape-hatch knob, and
+  # a debounce knob. If any of these regress, a derived (game) tile session
+  # silently stops ending on game exit -- assert the shape loudly.
+  grep -q "QUASAR_STEAM_EXIT_ON_GAME_EXIT:-1" "$steam"
+  grep -q "QUASAR_STEAM_GAME_EXIT_DEBOUNCE:-15" "$steam"
+  grep -q "watch_appid" "$steam"
+  grep -q "game_exit_watcher" "$steam"
+  grep -q "game_running" "$steam"
+  grep -q "registry_running_appid" "$steam"
+  grep -q "RunningAppID" "$steam"
+
+  # Detection must be /proc/*/cmdline NUL-split + exact-token compare, not
+  # `pgrep -f` (self-match/substring traps on record -- AppId=620 must not
+  # match AppId=6200). If this regresses to a pgrep -f the whole guard is
+  # silently wrong, so assert both the exact form and the absence of the
+  # forbidden one.
+  grep -q "read -r -d .. tok" "$steam"
+  if grep -qE "pgrep -f .*AppId" "$steam"; then
+    echo "FAIL: pgrep -f AppId-style detection present in $steam (self-match/substring trap; use /proc/*/cmdline exact-token compare)" >&2
+    exit 1
+  fi
+
+  # No setsid/setpgid anywhere in the watcher either -- same EPERM-FATAL
+  # class as the launcher shutdown relay (checked above), so re-assert after
+  # the watcher addition rather than trusting the earlier checks placement
+  # in the file.
+  if grep -q "setsid" "$steam"; then
+    echo "FAIL: setsid present in $steam" >&2
+    exit 1
+  fi
+  if grep -q "setpgid" "$steam"; then
+    echo "FAIL: setpgid present in $steam" >&2
+    exit 1
+  fi
+
+  # The watcher signals confirmed game-exit via USR1 to the launcher own pid
+  # -- it must never call on_term() directly from its own forked subshell
+  # (that would mutate a private copy of shutting_down, breaking the
+  # docker-stop-mid-watcher-shutdown no-op-second-entry guarantee).
+  grep -q "trap .*on_term.* USR1" "$steam"
+  grep -q "game_exit_confirmed" "$steam"
+
   # Game-foreground invariant: -gamepadui must never appear without the full
   # SteamOS deck-session unit (a partial gamepadui config pins focus to the UI).
   if grep -q -- "-gamepadui" "$steam"; then
