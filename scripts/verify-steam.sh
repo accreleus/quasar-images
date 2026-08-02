@@ -141,6 +141,15 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # than just both present anywhere in the file.
   grep -A2 "write_app_state game_exited" "$steam" | grep -q "kill -USR1"
 
+  # PRODUCT RULE (Michael, 2026-08-02): the user must never see Big Picture
+  # after quitting a game -- client_only must be written IMMEDIATELY on the
+  # running -> debounce transition (game process no longer detected), not
+  # deferred to the confirmed/exit path, so the web client re-masks its
+  # loader the instant the game dies. Assert the write is adjacent to the
+  # "entering debounce" log line rather than merely present anywhere in the
+  # file (client_only is also written on the pre-launch armed path above).
+  grep -A10 "entering debounce" "$steam" | grep -q "write_app_state client_only"
+
   # Foreground gate (Phase B "Foreground polish"): default-on knob, the two
   # corroborating X atoms, and the bounded (10s) process-only fallback so an
   # untagged title cannot wedge the watcher in waiting_for_start forever.

@@ -458,6 +458,13 @@ game_exit_watcher() {
           state="debounce"
           debounce_elapsed=0
           extended=0
+          # PRODUCT RULE (Michael, 2026-08-02): the user must never see Big
+          # Picture after quitting a game -- written IMMEDIATELY here, not
+          # deferred to "confirmed", so the web client re-masks its loader
+          # the instant the game process dies. Semantically exact, no
+          # contract change: client_only already means "client up, target
+          # title not running" (same value used pre-launch, above).
+          write_app_state client_only
           continue
         fi
         sleep 2
