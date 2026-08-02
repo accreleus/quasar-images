@@ -394,8 +394,12 @@ game_exit_watcher() {
   trap - TERM INT USR1
 
   local state="waiting_for_start"
-  local debounce_window="${QUASAR_STEAM_GAME_EXIT_DEBOUNCE:-15}"
-  [[ "$debounce_window" =~ ^[0-9]+$ ]] || debounce_window=15
+  # Default 8s (was 15 at first ship; retuned 2026-08-02 after the first human
+  # test — quit-to-teardown latency was the complaint, and shim respawns
+  # observed in testing land within ~3.5s, so 8s still covers them). Raise
+  # per-app for known slow-respawning launcher shims.
+  local debounce_window="${QUASAR_STEAM_GAME_EXIT_DEBOUNCE:-8}"
+  [[ "$debounce_window" =~ ^[0-9]+$ ]] || debounce_window=8
   local debounce_elapsed=0
   local extended=0
   local running_appid=""
@@ -473,11 +477,14 @@ game_exit_watcher() {
         running_appid="$(registry_running_appid)"
         if [[ "$running_appid" == "$watch_appid" && "$extended" == "0" ]]; then
           # Registry lag: process signal already says gone, but the
-          # registry witness hasn't caught up yet. Extend once, then trust
+          # registry witness hasn't caught up yet. Extend once — CAPPED at 4s
+          # (retuned 2026-08-02: a full second window doubled the quit-to-
+          # teardown latency on big titles whose registry updates slowly; 4s
+          # is witness-settling time, not a second shim window) — then trust
           # the process signal regardless of what the registry says next.
-          log "debounce expired but registry still reports appid $watch_appid running; extending once"
+          log "debounce expired but registry still reports appid $watch_appid running; extending once (4s cap)"
           extended=1
-          debounce_elapsed=0
+          debounce_elapsed=$(( debounce_window > 4 ? debounce_window - 4 : 0 ))
           continue
         fi
         state="confirmed"

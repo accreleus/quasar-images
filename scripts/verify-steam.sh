@@ -60,7 +60,7 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # a debounce knob. If any of these regress, a derived (game) tile session
   # silently stops ending on game exit -- assert the shape loudly.
   grep -q "QUASAR_STEAM_EXIT_ON_GAME_EXIT:-1" "$steam"
-  grep -q "QUASAR_STEAM_GAME_EXIT_DEBOUNCE:-15" "$steam"
+  grep -q "QUASAR_STEAM_GAME_EXIT_DEBOUNCE:-8" "$steam"
   grep -q "watch_appid" "$steam"
   grep -q "game_exit_watcher" "$steam"
   grep -q "game_running" "$steam"
