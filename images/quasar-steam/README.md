@@ -68,6 +68,28 @@ Knobs:
 |---|---|---|
 | `QUASAR_STEAM_EXIT_ON_GAME_EXIT` | `1` | Set to `0` to disable the watcher entirely (operator/debug escape hatch), even when a valid `-applaunch <appid>` pair is present. A session without a valid pair never arms the watcher regardless of this knob — that is what makes a launcher-tile session unaffected. |
 | `QUASAR_STEAM_GAME_EXIT_DEBOUNCE` | `15` (seconds) | How long the watcher waits, after the reaper process is no longer detected, before treating the game as exited. A reappearing reaper (CEF shims, anti-cheat relaunchers, Proton restarts) during this window resets the watcher back to "running" instead of tearing down the session. If the window expires but the Steam registry still reports the title as the running app, the watcher extends once by one more window before trusting the process signal and confirming exit. |
+| `QUASAR_STEAM_FOREGROUND_CHECK` | `1` | Foreground gate (Phase B, spec §B.1 "Foreground polish"): before the watcher advances `waiting_for_start` → `running`, it requires gamescope's X root atoms (`GAMESCOPECTRL_BASELAYER_APPID`, or the topmost window's `STEAM_GAME`, read via `xprop -root`) to corroborate the title is actually on screen, not just alive as a process. If unconfirmed within 10 s of the process first appearing, the watcher falls back to process-only and advances anyway — a title gamescope never tags must still reveal, never wedge. Set to `0` to skip the atom check entirely (process-only, exactly Phase A behaviour). Also degrades to process-only automatically when there is no `$DISPLAY` (the `QUASAR_STEAM_GAMESCOPE=0` path) or `xprop` is not present in the image. The debounce/exit side of the watcher is unaffected — process death is still the exit trigger; this gate only affects entering `running`. |
+
+## Session state-file reporting (Phase B)
+
+When the node-agent wants launch-state reporting it bind-mounts a per-session
+directory into the container (read-write for the container's uid) at
+`/run/quasar/session`. The watcher (and, for `client_only`, the launcher
+itself as soon as the Steam client is backgrounded) writes a single line to
+`/run/quasar/session/app-state`, atomically (`printf > tmp && mv`, tmp file in
+the same directory so the rename is same-filesystem):
+
+| State | Written when |
+|---|---|
+| `client_only` | The client is up (armed or not), before the game is detected. A launcher tile (watcher unarmed, no `-applaunch`) writes this once and nothing further — it never reaches a `game_*` state. |
+| `game_running` | The watcher's state machine enters `running` (subject to the foreground gate above). |
+| `game_exited` | The watcher confirms exit, written *before* it self-signals (`SIGUSR1`) the main launcher process, so the agent's final teardown read of the file sees the true outcome. |
+
+If `/run/quasar/session` does not exist or is not writable (an older agent, or
+a plain `docker run` with no mount), every write silently no-ops — zero
+behaviour change. Absence of the file itself means "unknown" to any consumer.
+This is a generic, Quasar-owned protocol (`/run/quasar/session` is not
+Steam-specific); other app images can adopt the same single-file convention.
 
 ## Host / launch requirements
 

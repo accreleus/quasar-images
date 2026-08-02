@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-for executable in steam gamescope bwrap quasar-steam quasar-steam-client; do
+for executable in steam gamescope bwrap quasar-steam quasar-steam-client xprop; do
   docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc "command -v $executable >/dev/null"
 done
 
@@ -103,6 +103,45 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   if grep -q -- "-gamepadui" "$steam"; then
     grep -q -- "-gamepadui -steamos3 -steampal -steamdeck" "$steam"
   fi
+
+  # Phase B: session state-file reporting (game-exit-lifecycle spec §B.1).
+  # Writes must be atomic (tmp file in the SAME directory, then mv) and must
+  # no-op silently when the bind-mounted directory is absent/unwritable -- an
+  # old agent or a bare `docker run` must see zero behaviour change.
+  grep -q "QUASAR_SESSION_STATE_DIR:-/run/quasar/session" "$steam"
+  grep -q "write_app_state" "$steam"
+  grep -q "app-state" "$steam"
+  # These three contain a literal dollar sign in the pattern, so the regex
+  # must be wrapped using the single-quote-escape idiom already established
+  # in this file (see the kill -[A-Z]+ -[0-9$] check above) -- a bare quoted
+  # pattern here would prematurely close this scripts own outer quoting.
+  grep -qE '"'"'-d "$dir" && -w "$dir"'"'"' "$steam"
+  grep -qE '"'"'printf .* > "$tmp"'"'"' "$steam"
+  grep -qE '"'"'mv -f -- "$tmp" "$dir/app-state"'"'"' "$steam"
+
+  # The three state values must all be wired to a write_app_state call
+  # somewhere in the file (client_only at client-up, game_running on
+  # entering running, game_exited before the USR1 self-signal).
+  grep -q "write_app_state client_only" "$steam"
+  grep -q "write_app_state game_running" "$steam"
+  grep -q "write_app_state game_exited" "$steam"
+
+  # game_exited must be written strictly before the USR1 self-signal so the
+  # agent final teardown read sees the true outcome, not a stale
+  # game_running -- assert the two lines are adjacent in that order rather
+  # than just both present anywhere in the file.
+  grep -A2 "write_app_state game_exited" "$steam" | grep -q "kill -USR1"
+
+  # Foreground gate (Phase B "Foreground polish"): default-on knob, the two
+  # corroborating X atoms, and the bounded (10s) process-only fallback so an
+  # untagged title cannot wedge the watcher in waiting_for_start forever.
+  grep -q "QUASAR_STEAM_FOREGROUND_CHECK:-1" "$steam"
+  grep -q "foreground_gate_active" "$steam"
+  grep -q "game_foreground" "$steam"
+  grep -q "GAMESCOPECTRL_BASELAYER_APPID" "$steam"
+  grep -q "STEAM_GAME" "$steam"
+  grep -q "foreground_grace=10" "$steam"
+  grep -q "falling back to process-only" "$steam"
 
   # Steam must bind Gamescope Xwayland, not the nested Wayland socket. Display
   # wiring (DISPLAY export + outer-WAYLAND_DISPLAY unset) moved from the

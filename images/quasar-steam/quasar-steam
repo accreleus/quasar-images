@@ -18,6 +18,29 @@ mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
 
 log() { printf '%s quasar-steam: %s\n' "$(date -Iseconds)" "$*" >&2; }
 
+# --- Phase B: session state-file reporting (game-exit-lifecycle spec §B.1) --
+# When the node-agent wants launch-state reporting it bind-mounts a per-session
+# directory into the container (rw for our uid) at this path; an old agent, or
+# a bare `docker run`, never creates it. Every write below tests the directory
+# first and silently no-ops when it is absent/unwritable -- zero behaviour
+# change for anyone not reading the file. Atomic: write to a tmpfile in the
+# SAME directory (so the rename is same-filesystem, never cross-device), then
+# rename over the published name -- a reader never observes a partial line.
+# Guarded end-to-end so a write can never trip `set -e` and abort the
+# launcher: the early return and the trailing `return 0` mean this function's
+# exit status is always 0 regardless of what printf/mv/rm did.
+QUASAR_SESSION_STATE_DIR="${QUASAR_SESSION_STATE_DIR:-/run/quasar/session}"
+write_app_state() {
+  local state="$1" dir="$QUASAR_SESSION_STATE_DIR" tmp
+  [[ -d "$dir" && -w "$dir" ]] || return 0
+  tmp="$dir/.app-state.$$.tmp"
+  if printf '%s\n' "$state" > "$tmp" 2>/dev/null; then
+    mv -f -- "$tmp" "$dir/app-state" 2>/dev/null || true
+  fi
+  rm -f -- "$tmp" 2>/dev/null || true
+  return 0
+}
+
 export STEAM_COMPAT_DATA_PATH="${STEAM_COMPAT_DATA_PATH:-$HOME/.local/share/quasar-steam/pfx}"
 export WINEPREFIX="${WINEPREFIX:-$STEAM_COMPAT_DATA_PATH}"
 
@@ -208,6 +231,70 @@ registry_running_appid() {
   sed -n 's/.*"RunningAppID"[[:space:]]*"\([0-9]*\)".*/\1/p' "$registry_file" | tail -n1
 }
 
+# --- Game-exit watcher: foreground gate (Phase B, spec §B.1 "Foreground
+# polish", A.3 foreground paragraph) ------------------------------------------
+# `game_running` above only proves the title's process exists; it says
+# nothing about whether gamescope has actually brought it to the front (vs.
+# it sitting behind the Steam UI while shaders compile, or a title that never
+# gets focused). QUASAR_STEAM_FOREGROUND_CHECK gates the watcher's
+# waiting_for_start -> running transition on gamescope's X root atoms
+# corroborating "on screen", not just "alive" -- see game_exit_watcher()'s
+# use of this below for the bounded (10s) process-only fallback that keeps a
+# title gamescope never tags from wedging the watcher forever.
+#
+# foreground_gate_active() is the single degrade point: knob off, no
+# DISPLAY (QUASAR_STEAM_GAMESCOPE=0 -- no nested Xwayland to query), or no
+# xprop binary in the image all fall through to plain process-only detection,
+# exactly Phase A behaviour. This is deliberately checked fresh on every
+# watcher tick rather than cached once, so it stays correct even though none
+# of these three things can actually change mid-session today.
+foreground_gate_active() {
+  [[ "${QUASAR_STEAM_FOREGROUND_CHECK:-1}" == "1" ]] || return 1
+  [[ -n "${DISPLAY:-}" ]] || return 1
+  command -v xprop >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# Matches watch_appid as a whole numeric token inside an xprop property dump
+# (e.g. `GAMESCOPECTRL_BASELAYER_APPID(CARDINAL) = 620`) -- the same
+# no-substring-match discipline as game_running's AppId= comparison above, so
+# appid 620 can never match a dump carrying 6200 or vice versa.
+_atom_matches_appid() {
+  [[ "$1" =~ (^|[^0-9])${watch_appid}([^0-9]|$) ]]
+}
+
+# Two corroborating atoms, either is sufficient, queried against the nested
+# gamescope X root ($DISPLAY, exported once gamescope reports ready):
+#   - GAMESCOPECTRL_BASELAYER_APPID (root window): gamescope's own idea of
+#     which appid currently owns the base layer.
+#   - STEAM_GAME (per top-level window): Steam tags each game window with its
+#     appid; walk the root's stacking-order window list and check each
+#     window's STEAM_GAME atom, newest (topmost) window first.
+# Best-effort by construction: any xprop failure, an untagged window, or a
+# title gamescope never tags all just return 1 -- the caller's bounded grace
+# window is what keeps this from wedging the watcher, not this function.
+game_foreground() {
+  local baselayer
+  baselayer="$(xprop -root GAMESCOPECTRL_BASELAYER_APPID 2>/dev/null || true)"
+  if [[ -n "$baselayer" ]] && _atom_matches_appid "$baselayer"; then
+    return 0
+  fi
+
+  local client_list steam_game
+  client_list="$(xprop -root _NET_CLIENT_LIST_STACKING 2>/dev/null || true)"
+  [[ -n "$client_list" ]] || return 1
+  local -a wins=()
+  mapfile -t wins < <(grep -oE '0x[0-9a-fA-F]+' <<< "$client_list" || true)
+  local i
+  for (( i=${#wins[@]}-1; i>=0; i-- )); do
+    steam_game="$(xprop -id "${wins[$i]}" STEAM_GAME 2>/dev/null || true)"
+    if [[ -n "$steam_game" ]] && _atom_matches_appid "$steam_game"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 on_term() {
   # Idempotent: a second TERM/INT while a relay is already in flight is a
   # no-op -- the first invocation owns the steam-TERM -> client TERM ->
@@ -312,6 +399,15 @@ game_exit_watcher() {
   local debounce_elapsed=0
   local extended=0
   local running_appid=""
+  # Foreground-gate bookkeeping (waiting_for_start -> running only, see
+  # foreground_gate_active()/game_foreground() above): process_since is the
+  # epoch second the process was first observed this arming cycle, reset
+  # whenever the process is not seen; foreground_grace is the bounded window
+  # (spec-decided 10s) after which an unconfirmed foreground falls back to
+  # process-only rather than wedging the watcher on a title gamescope never
+  # tags.
+  local process_since=0
+  local foreground_grace=10
 
   log "game-exit watcher armed for appid $watch_appid (debounce ${debounce_window}s)"
 
@@ -322,10 +418,34 @@ game_exit_watcher() {
         # updates legitimately precede launch by minutes. The stream is up
         # and usable throughout; docker-level session stop still works.
         if game_running; then
+          if foreground_gate_active; then
+            if [[ "$process_since" == "0" ]]; then
+              process_since="$(date +%s)"
+              log "game $watch_appid process detected; awaiting foreground confirmation (grace ${foreground_grace}s)"
+            fi
+            if game_foreground; then
+              log "game $watch_appid detected running and foreground-confirmed"
+              state="running"
+              write_app_state game_running
+              continue
+            fi
+            local now
+            now="$(date +%s)"
+            if (( now - process_since >= foreground_grace )); then
+              log "game $watch_appid process running but foreground not confirmed within ${foreground_grace}s; falling back to process-only"
+              state="running"
+              write_app_state game_running
+              continue
+            fi
+            sleep 1
+            continue
+          fi
           log "game $watch_appid detected running"
           state="running"
+          write_app_state game_running
           continue
         fi
+        process_since=0
         sleep 2
         ;;
       running)
@@ -344,6 +464,7 @@ game_exit_watcher() {
         if game_running; then
           log "game $watch_appid reappeared during debounce; resuming running state"
           state="running"
+          write_app_state game_running
           continue
         fi
         if (( debounce_elapsed < debounce_window )); then
@@ -363,6 +484,10 @@ game_exit_watcher() {
         ;;
       confirmed)
         log "game $watch_appid exited; initiating clean shutdown"
+        # Written BEFORE the USR1 self-signal (below) so the main process's
+        # own final teardown read of the state file sees game_exited, not a
+        # stale game_running -- the ordering is the point, not just the write.
+        write_app_state game_exited
         kill -USR1 "$launcher_pid" 2>/dev/null || true
         return 0
         ;;
@@ -411,6 +536,11 @@ if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
   fi
   "${client[@]}" &
   client_pid=$!
+  # Client is up (armed or not): report client_only before the watcher (if
+  # any) can ever observe the game running -- see write_app_state's header
+  # comment. A launcher tile (watch_appid empty) writes this once and never
+  # writes a game_* state, since game_exit_watcher never runs for it.
+  write_app_state client_only
   if [[ -n "$watch_appid" ]]; then
     game_exit_watcher &
     watcher_pid=$!
@@ -520,6 +650,11 @@ fi
 
 "${client[@]}" &
 client_pid=$!
+# Client is up (armed or not): report client_only before the watcher (if
+# any) can ever observe the game running -- see write_app_state's header
+# comment. A launcher tile (watch_appid empty) writes this once and never
+# writes a game_* state, since game_exit_watcher never runs for it.
+write_app_state client_only
 if [[ -n "$watch_appid" ]]; then
   game_exit_watcher &
   watcher_pid=$!

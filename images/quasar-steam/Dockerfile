@@ -54,11 +54,19 @@ LABEL org.opencontainers.image.title="Quasar Steam application" \
       org.quasar.image.graphics-apis="vulkan,egl,opengl" \
       org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
 
+# xprop: NOT in quasar-base (verified -- `dnf provides '*/bin/xprop'` on
+# Fedora 43 resolves the standalone `xprop` package, not xorg-x11-utils,
+# which no longer bundles it). Needed by quasar-steam's game-exit watcher
+# foreground gate (QUASAR_STEAM_FOREGROUND_CHECK, game-exit-lifecycle spec
+# §B.1) to read gamescope's GAMESCOPECTRL_BASELAYER_APPID / STEAM_GAME X root
+# atoms. If absent at runtime the watcher degrades to process-only detection
+# (foreground_gate_active() in quasar-steam), so this is a quality-of-signal
+# dependency, not a hard requirement -- but we ship it since it's ~50 KiB.
 RUN dnf --setopt=install_weak_deps=False -y install \
       "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
       "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
     && dnf --setopt=install_weak_deps=False -y install \
-      dbus-daemon file gamescope ibus lsb-release pciutils steam \
+      dbus-daemon file gamescope ibus lsb-release pciutils steam xprop \
       mesa-libGLU mesa-libGLU.i686 \
       libglvnd-egl.i686 libglvnd-gles.i686 libglvnd-glx.i686 \
       mesa-dri-drivers.i686 mesa-libEGL.i686 mesa-libGL.i686 mesa-libgbm.i686 \
