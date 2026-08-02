@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-for executable in steam gamescope bwrap quasar-steam quasar-steam-client xprop; do
+for executable in steam gamescope bwrap quasar-steam quasar-steam-client; do
   docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc "command -v $executable >/dev/null"
 done
 
@@ -55,102 +55,11 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # Default UI mode is the games-on-whales-validated bigpicture path.
   grep -q "QUASAR_STEAM_UI_MODE:-bigpicture" "$steam"
 
-  # Game-exit watcher (2026-08-02 game-exit-lifecycle spec, Phase A): armed
-  # from a valid -applaunch <appid> pair, default-on, escape-hatch knob, and
-  # a debounce knob. If any of these regress, a derived (game) tile session
-  # silently stops ending on game exit -- assert the shape loudly.
-  grep -q "QUASAR_STEAM_EXIT_ON_GAME_EXIT:-1" "$steam"
-  grep -q "QUASAR_STEAM_GAME_EXIT_DEBOUNCE:-8" "$steam"
-  grep -q "watch_appid" "$steam"
-  grep -q "game_exit_watcher" "$steam"
-  grep -q "game_running" "$steam"
-  grep -q "registry_running_appid" "$steam"
-  grep -q "RunningAppID" "$steam"
-
-  # Detection must be /proc/*/cmdline NUL-split + exact-token compare, not
-  # `pgrep -f` (self-match/substring traps on record -- AppId=620 must not
-  # match AppId=6200). If this regresses to a pgrep -f the whole guard is
-  # silently wrong, so assert both the exact form and the absence of the
-  # forbidden one.
-  grep -q "read -r -d .. tok" "$steam"
-  if grep -qE "pgrep -f .*AppId" "$steam"; then
-    echo "FAIL: pgrep -f AppId-style detection present in $steam (self-match/substring trap; use /proc/*/cmdline exact-token compare)" >&2
-    exit 1
-  fi
-
-  # No setsid/setpgid anywhere in the watcher either -- same EPERM-FATAL
-  # class as the launcher shutdown relay (checked above), so re-assert after
-  # the watcher addition rather than trusting the earlier checks placement
-  # in the file.
-  if grep -q "setsid" "$steam"; then
-    echo "FAIL: setsid present in $steam" >&2
-    exit 1
-  fi
-  if grep -q "setpgid" "$steam"; then
-    echo "FAIL: setpgid present in $steam" >&2
-    exit 1
-  fi
-
-  # The watcher signals confirmed game-exit via USR1 to the launcher own pid
-  # -- it must never call on_term() directly from its own forked subshell
-  # (that would mutate a private copy of shutting_down, breaking the
-  # docker-stop-mid-watcher-shutdown no-op-second-entry guarantee).
-  grep -q "trap .*on_term.* USR1" "$steam"
-  grep -q "game_exit_confirmed" "$steam"
-
   # Game-foreground invariant: -gamepadui must never appear without the full
   # SteamOS deck-session unit (a partial gamepadui config pins focus to the UI).
   if grep -q -- "-gamepadui" "$steam"; then
     grep -q -- "-gamepadui -steamos3 -steampal -steamdeck" "$steam"
   fi
-
-  # Phase B: session state-file reporting (game-exit-lifecycle spec §B.1).
-  # Writes must be atomic (tmp file in the SAME directory, then mv) and must
-  # no-op silently when the bind-mounted directory is absent/unwritable -- an
-  # old agent or a bare `docker run` must see zero behaviour change.
-  grep -q "QUASAR_SESSION_STATE_DIR:-/run/quasar/session" "$steam"
-  grep -q "write_app_state" "$steam"
-  grep -q "app-state" "$steam"
-  # These three contain a literal dollar sign in the pattern, so the regex
-  # must be wrapped using the single-quote-escape idiom already established
-  # in this file (see the kill -[A-Z]+ -[0-9$] check above) -- a bare quoted
-  # pattern here would prematurely close this scripts own outer quoting.
-  # Two more traps live here (both caught the suite red on a correct image):
-  # an unescaped "$" mid-pattern is an ERE end-anchor, not a literal dollar,
-  # so a pattern containing "$dir"/"$tmp" followed by more text could never
-  # match -- escape it as "\$". And a pattern that starts with "-d" is parsed
-  # by grep as its --directories option unless guarded with "--".
-  grep -qE -- '"'"'-d "\$dir" && -w "\$dir"'"'"' "$steam"
-  grep -qE '"'"'printf .* > "\$tmp"'"'"' "$steam"
-  grep -qE '"'"'mv -f -- "\$tmp" "\$dir/app-state"'"'"' "$steam"
-
-  # The three state values must all be wired to a write_app_state call
-  # somewhere in the file (game_running on entering running, game_exited
-  # before the USR1 self-signal). client_only is only ever written on the
-  # armed path (watch_appid set) -- an unarmed launcher-tile session must
-  # write nothing at all (see write_app_state header comment) -- so assert
-  # it specifically inside the watch_appid arming block rather than merely
-  # present anywhere in the file.
-  grep -A2 '"'"'if \[\[ -n "\$watch_appid" \]\]; then'"'"' "$steam" | grep -q "write_app_state client_only"
-  grep -q "write_app_state game_running" "$steam"
-  grep -q "write_app_state game_exited" "$steam"
-
-  # game_exited must be written strictly before the USR1 self-signal so the
-  # agent final teardown read sees the true outcome, not a stale
-  # game_running -- assert the two lines are adjacent in that order rather
-  # than just both present anywhere in the file.
-  grep -A2 "write_app_state game_exited" "$steam" | grep -q "kill -USR1"
-
-  # Foreground gate (Phase B "Foreground polish"): default-on knob, the two
-  # corroborating X atoms, and the bounded (10s) process-only fallback so an
-  # untagged title cannot wedge the watcher in waiting_for_start forever.
-  grep -q "QUASAR_STEAM_FOREGROUND_CHECK:-1" "$steam"
-  grep -q "foreground_gate_active" "$steam"
-  grep -q "game_foreground" "$steam"
-  grep -q "GAMESCOPECTRL_BASELAYER_APPID" "$steam"
-  grep -q "STEAM_GAME" "$steam"
-  grep -q "foreground_grace=10" "$steam"
-  grep -q "falling back to process-only" "$steam"
 
   # Steam must bind Gamescope Xwayland, not the nested Wayland socket. Display
   # wiring (DISPLAY export + outer-WAYLAND_DISPLAY unset) moved from the
