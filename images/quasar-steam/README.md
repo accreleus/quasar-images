@@ -75,13 +75,14 @@ Knobs:
 When the node-agent wants launch-state reporting it bind-mounts a per-session
 directory into the container (read-write for the container's uid) at
 `/run/quasar/session`. The watcher (and, for `client_only`, the launcher
-itself as soon as the Steam client is backgrounded) writes a single line to
-`/run/quasar/session/app-state`, atomically (`printf > tmp && mv`, tmp file in
-the same directory so the rename is same-filesystem):
+itself as soon as the Steam client is backgrounded, but only when the watcher
+is armed) writes a single line to `/run/quasar/session/app-state`, atomically
+(`printf > tmp && mv`, tmp file in the same directory so the rename is
+same-filesystem):
 
 | State | Written when |
 |---|---|
-| `client_only` | The client is up (armed or not), before the game is detected. A launcher tile (watcher unarmed, no `-applaunch`) writes this once and nothing further — it never reaches a `game_*` state. |
+| `client_only` | The client is up and the watcher is armed (a valid `-applaunch <appid>` pair), before the game is detected. A launcher tile (watcher unarmed, no `-applaunch`) writes nothing at all — `app_launch_state` stays absent, so every consumer treats the session exactly as pre-spec. Writing `client_only` unconditionally was tried and reverted: an unarmed session would report a state it can never advance past, and a client waiting on `game_running` would hold indefinitely (live-measured as a 120s loader hold on a plain Big Picture session). |
 | `game_running` | The watcher's state machine enters `running` (subject to the foreground gate above). |
 | `game_exited` | The watcher confirms exit, written *before* it self-signals (`SIGUSR1`) the main launcher process, so the agent's final teardown read of the file sees the true outcome. |
 

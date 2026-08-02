@@ -536,12 +536,16 @@ if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
   fi
   "${client[@]}" &
   client_pid=$!
-  # Client is up (armed or not): report client_only before the watcher (if
-  # any) can ever observe the game running -- see write_app_state's header
-  # comment. A launcher tile (watch_appid empty) writes this once and never
-  # writes a game_* state, since game_exit_watcher never runs for it.
-  write_app_state client_only
+  # Only write a state file when the watcher is actually armed. An unarmed
+  # (launcher-tile) session must stay silent here: writing client_only would
+  # give app_launch_state a value the web client waits to advance past, and
+  # for a launcher tile it never does (game_exit_watcher never runs, so no
+  # game_* state ever follows) -- live-measured as a 120s loader hold on a
+  # plain Big Picture session (spec §A.1 "launcher tile unchanged"). Staying
+  # silent keeps app_launch_state absent, so every consumer treats the
+  # session exactly as pre-spec.
   if [[ -n "$watch_appid" ]]; then
+    write_app_state client_only
     game_exit_watcher &
     watcher_pid=$!
   fi
@@ -650,12 +654,16 @@ fi
 
 "${client[@]}" &
 client_pid=$!
-# Client is up (armed or not): report client_only before the watcher (if
-# any) can ever observe the game running -- see write_app_state's header
-# comment. A launcher tile (watch_appid empty) writes this once and never
-# writes a game_* state, since game_exit_watcher never runs for it.
-write_app_state client_only
+# Only write a state file when the watcher is actually armed. An unarmed
+# (launcher-tile) session must stay silent here: writing client_only would
+# give app_launch_state a value the web client waits to advance past, and
+# for a launcher tile it never does (game_exit_watcher never runs, so no
+# game_* state ever follows) -- live-measured as a 120s loader hold on a
+# plain Big Picture session (spec §A.1 "launcher tile unchanged"). Staying
+# silent keeps app_launch_state absent, so every consumer treats the
+# session exactly as pre-spec.
 if [[ -n "$watch_appid" ]]; then
+  write_app_state client_only
   game_exit_watcher &
   watcher_pid=$!
 fi

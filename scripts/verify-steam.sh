@@ -115,14 +115,23 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # must be wrapped using the single-quote-escape idiom already established
   # in this file (see the kill -[A-Z]+ -[0-9$] check above) -- a bare quoted
   # pattern here would prematurely close this scripts own outer quoting.
-  grep -qE '"'"'-d "$dir" && -w "$dir"'"'"' "$steam"
-  grep -qE '"'"'printf .* > "$tmp"'"'"' "$steam"
-  grep -qE '"'"'mv -f -- "$tmp" "$dir/app-state"'"'"' "$steam"
+  # Two more traps live here (both caught the suite red on a correct image):
+  # an unescaped "$" mid-pattern is an ERE end-anchor, not a literal dollar,
+  # so a pattern containing "$dir"/"$tmp" followed by more text could never
+  # match -- escape it as "\$". And a pattern that starts with "-d" is parsed
+  # by grep as its --directories option unless guarded with "--".
+  grep -qE -- '"'"'-d "\$dir" && -w "\$dir"'"'"' "$steam"
+  grep -qE '"'"'printf .* > "\$tmp"'"'"' "$steam"
+  grep -qE '"'"'mv -f -- "\$tmp" "\$dir/app-state"'"'"' "$steam"
 
   # The three state values must all be wired to a write_app_state call
-  # somewhere in the file (client_only at client-up, game_running on
-  # entering running, game_exited before the USR1 self-signal).
-  grep -q "write_app_state client_only" "$steam"
+  # somewhere in the file (game_running on entering running, game_exited
+  # before the USR1 self-signal). client_only is only ever written on the
+  # armed path (watch_appid set) -- an unarmed launcher-tile session must
+  # write nothing at all (see write_app_state header comment) -- so assert
+  # it specifically inside the watch_appid arming block rather than merely
+  # present anywhere in the file.
+  grep -A2 '"'"'if \[\[ -n "\$watch_appid" \]\]; then'"'"' "$steam" | grep -q "write_app_state client_only"
   grep -q "write_app_state game_running" "$steam"
   grep -q "write_app_state game_exited" "$steam"
 
