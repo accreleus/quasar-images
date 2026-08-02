@@ -61,6 +61,9 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # silently stops ending on game exit -- assert the shape loudly.
   grep -q "QUASAR_STEAM_EXIT_ON_GAME_EXIT:-1" "$steam"
   grep -q "QUASAR_STEAM_GAME_EXIT_DEBOUNCE:-8" "$steam"
+  # Registry-arbitrated exit redesign (2026-08-02): the total-extension safety
+  # valve knob, default 24s beyond the first debounce expiry.
+  grep -q "QUASAR_STEAM_EXIT_REGISTRY_CAP:-24" "$steam"
   grep -q "watch_appid" "$steam"
   grep -q "game_exit_watcher" "$steam"
   grep -q "game_running" "$steam"
@@ -141,14 +144,28 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # than just both present anywhere in the file.
   grep -A2 "write_app_state game_exited" "$steam" | grep -q "kill -USR1"
 
-  # PRODUCT RULE (Michael, 2026-08-02): the user must never see Big Picture
-  # after quitting a game -- client_only must be written IMMEDIATELY on the
-  # running -> debounce transition (game process no longer detected), not
-  # deferred to the confirmed/exit path, so the web client re-masks its
-  # loader the instant the game dies. Assert the write is adjacent to the
-  # "entering debounce" log line rather than merely present anywhere in the
-  # file (client_only is also written on the pre-launch armed path above).
-  grep -A10 "entering debounce" "$steam" | grep -q "write_app_state client_only"
+  # PRODUCT RULE (Michael, 2026-08-02, revised 2026-08-02 to registry
+  # arbitration): the user must never see Big Picture after quitting a game,
+  # but the reaper PROCESS going away is not itself the exit signal -- Steam
+  # drops it during a title'"'"'s own startup hand-offs (Redout ~1s, Hades II
+  # >4s, live-observed on Tower), so writing client_only at debounce ENTRY
+  # (process-gone) blinks the loader on those hand-offs or races a kill.
+  # Assert the debounce-entry write is GONE (negative-assert, explicit
+  # if/exit -- a "!"-inverted grep is inert under set -e per the standing
+  # convention in this file) ...
+  if grep -A10 "entering debounce" "$steam" | grep -q "write_app_state client_only"; then
+    echo "FAIL: client_only written immediately on running->debounce entry in $steam (must be gated on registry arbitration inside the debounce loop, not process-gone alone)" >&2
+    exit 1
+  fi
+  # ... and assert the REPLACEMENT: client_only is gated on the registry
+  # arbitration check inside the debounce state (registry_running_appid no
+  # longer equals watch_appid, notified exactly once via registry_notified).
+  # The pattern contains a literal "$" mid-string, which GNU grep treats as
+  # an anchor unless escaped (same trap the -d "$dir" checks above already
+  # document) -- escape it as "\$" and wrap with the single-quote-escape
+  # idiom already established in this file so the embedded literal single
+  # quotes survive the outer single-quoted docker -lc string.
+  grep -A5 -E '"'"'running_appid" != "\$watch_appid" && "\$registry_notified" == "0"'"'"' "$steam" | grep -q "write_app_state client_only"
 
   # Foreground gate (Phase B "Foreground polish"): default-on knob, the two
   # corroborating X atoms, and the bounded (10s) process-only fallback so an

@@ -220,11 +220,19 @@ game_running() {
   return 1
 }
 
-# Corroborating signal: Steam's own registry carries "RunningAppID" "<appid>"
-# while a game runs and "0" after it exits. It lags process death by a beat
-# -- exactly what makes it a debounce witness, not a primary. Single
-# sed/grep, no VDF parser. Empty output means the file is missing/unreadable
-# (first boot) or carries no RunningAppID line.
+# Arbitration signal (2026-08-02 redesign): Steam's own registry carries
+# "RunningAppID" "<appid>" from launch through every hand-off the title makes
+# to itself (nested launcher shims, Proton restarts, engine relaunches all
+# leave it untouched), and clears within ~1-2s of a REAL quit. The reaper
+# process (game_running above) is NOT reliable for exit signaling on its own
+# -- Steam drops it during a title's own startup for title-specific
+# durations (Redout ~1s, Hades II >4s, live-observed on Tower 2026-08-02),
+# which is indistinguishable from a real quit by process-liveness alone. The
+# registry is what the debounce loop in game_exit_watcher() polls to
+# arbitrate: it is the trigger for masking the client (client_only) AND the
+# gate on confirming exit, not just a corroborating witness. Single sed/grep,
+# no VDF parser. Empty output means the file is missing/unreadable (first
+# boot) or carries no RunningAppID line.
 registry_running_appid() {
   local registry_file="$HOME/.steam/registry.vdf"
   [[ -r "$registry_file" ]] || return 0
@@ -401,7 +409,17 @@ game_exit_watcher() {
   local debounce_window="${QUASAR_STEAM_GAME_EXIT_DEBOUNCE:-8}"
   [[ "$debounce_window" =~ ^[0-9]+$ ]] || debounce_window=8
   local debounce_elapsed=0
-  local extended=0
+  # Registry arbitration bookkeeping (2026-08-02 redesign, see the
+  # running->debounce comment above and registry_running_appid()'s header).
+  # extended_total is the cumulative seconds granted beyond the first
+  # debounce_window expiry, capped by QUASAR_STEAM_EXIT_REGISTRY_CAP.
+  # registry_notified guards the client_only write below so it fires exactly
+  # once per debounce cycle (the FIRST tick the registry no longer matches
+  # watch_appid), not on every subsequent tick.
+  local extended_total=0
+  local registry_notified=0
+  local registry_cap="${QUASAR_STEAM_EXIT_REGISTRY_CAP:-24}"
+  [[ "$registry_cap" =~ ^[0-9]+$ ]] || registry_cap=24
   local running_appid=""
   # Foreground-gate bookkeeping (waiting_for_start -> running only, see
   # foreground_gate_active()/game_foreground() above): process_since is the
@@ -457,14 +475,18 @@ game_exit_watcher() {
           log "game $watch_appid process no longer detected; entering debounce"
           state="debounce"
           debounce_elapsed=0
-          extended=0
-          # PRODUCT RULE (Michael, 2026-08-02): the user must never see Big
-          # Picture after quitting a game -- written IMMEDIATELY here, not
-          # deferred to "confirmed", so the web client re-masks its loader
-          # the instant the game process dies. Semantically exact, no
-          # contract change: client_only already means "client up, target
-          # title not running" (same value used pre-launch, above).
-          write_app_state client_only
+          extended_total=0
+          registry_notified=0
+          # PRODUCT RULE (Michael, 2026-08-02, revised 2026-08-02 to registry
+          # arbitration): the user must never see Big Picture after quitting a
+          # game. The process going away is NOT that signal by itself -- Steam
+          # drops the reaper process during a title's OWN startup for
+          # title-specific durations (Redout ~1s, Hades II >4s observed live
+          # on Tower), so writing client_only here blinked the loader on a
+          # startup hand-off and, for the slower titles, raced the client's
+          # respawn window into a kill. Stay SILENT on entry; the debounce
+          # loop below arbitrates via the Steam registry (Steam-confirmed,
+          # not process-guessed) before touching app_launch_state.
           continue
         fi
         # 1s (not the waiting_for_start 2s): this poll's lag is the dominant
@@ -483,23 +505,48 @@ game_exit_watcher() {
           write_app_state game_running
           continue
         fi
+
+        # Registry arbitration (Steam-confirmed, corroborates process death):
+        # RunningAppID is set at launch and stays set across every hand-off a
+        # title makes to itself, clearing within ~1-2s of a REAL quit. The
+        # first tick it no longer matches watch_appid is the client's
+        # exit-mask trigger -- write client_only exactly once here, not on
+        # every subsequent tick.
+        running_appid="$(registry_running_appid)"
+        if [[ "$running_appid" != "$watch_appid" && "$registry_notified" == "0" ]]; then
+          log "registry no longer reports appid $watch_appid running; masking client"
+          write_app_state client_only
+          registry_notified=1
+        fi
+
         if (( debounce_elapsed < debounce_window )); then
           continue
         fi
-        running_appid="$(registry_running_appid)"
-        if [[ "$running_appid" == "$watch_appid" && "$extended" == "0" ]]; then
-          # Registry lag: process signal already says gone, but the
-          # registry witness hasn't caught up yet. Extend once — CAPPED at 4s
-          # (retuned 2026-08-02: a full second window doubled the quit-to-
-          # teardown latency on big titles whose registry updates slowly; 4s
-          # is witness-settling time, not a second shim window) — then trust
-          # the process signal regardless of what the registry says next.
-          log "debounce expired but registry still reports appid $watch_appid running; extending once (4s cap)"
-          extended=1
-          debounce_elapsed=$(( debounce_window > 4 ? debounce_window - 4 : 0 ))
+
+        # Debounce window expired. The registry is the arbiter, not the
+        # elapsed clock: if it has cleared, the exit is confirmed now. If it
+        # still reports watch_appid, this is a long startup hand-off (Hades
+        # II observed >4s live on Tower), not registry lag -- extend in
+        # debounce-window steps up to a total cap of QUASAR_STEAM_EXIT_REGISTRY_CAP
+        # seconds beyond the first expiry. A process reappearance at any tick
+        # above still returns us to "running" before we ever get here again.
+        if [[ "$running_appid" != "$watch_appid" ]]; then
+          state="confirmed"
           continue
         fi
-        state="confirmed"
+
+        if (( extended_total >= registry_cap )); then
+          # Safety valve: a crashed game whose registry entry wedges set must
+          # not hang the session forever -- trust the process signal once the
+          # cap is exhausted. Logged distinctly from a normal registry-cleared
+          # confirm so this path is identifiable in the field.
+          log "registry still reports appid $watch_appid after ${registry_cap}s; trusting process signal"
+          state="confirmed"
+        else
+          extended_total=$((extended_total + debounce_window))
+          log "debounce expired but registry still reports appid $watch_appid running (long startup hand-off); extending window (+${debounce_window}s, total extended ${extended_total}s of ${registry_cap}s cap)"
+          debounce_elapsed=0
+        fi
         ;;
       confirmed)
         log "game $watch_appid exited; initiating clean shutdown"
