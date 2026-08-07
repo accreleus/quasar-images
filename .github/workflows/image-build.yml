@@ -1,21 +1,87 @@
 name: Image build
 
+# PUBLISHING MODEL
+#
+#   push to `stable`   -> publish :latest (+ immutable sha- tag)
+#   push tag vX.Y.Z    -> publish :X.Y.Z, :X.Y, :latest (+ sha-), and a Release
+#   workflow_dispatch  -> publish that branch's channel (develop -> :develop)
+#   pull_request       -> BUILD ONLY, never publishes, no write credentials
+#
+# Nothing on `develop` publishes automatically; develop images ship only by an
+# explicit dispatch. `stable` is reached through a reviewed PR, so a merge into
+# stable is what ships — but the trigger is the resulting PUSH, not the
+# pull_request.closed event: a push also covers merge queues, direct pushes, and
+# merged fork PRs (a fork's pull_request event gets a read-only token and could
+# never publish).
+#
+# PERMISSIONS ARE PER-JOB, DELIBERATELY. A job-wide `contents: write` would be
+# handed to pull-request validation too, which runs scripts/*.sh FROM THE PR —
+# a same-repo PR could then modify a build script and use the checkout-persisted
+# token to write to the repo or publish packages. Validation therefore gets
+# `contents: read` and `persist-credentials: false`; only publish gets
+# `packages: write`; only the release job gets `contents: write`.
 on:
   pull_request:
+    branches: [stable]
   push:
-    branches: [main]
+    branches: [stable]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
 
-permissions:
-  contents: read
-  packages: write
+permissions: {}
 
 jobs:
-  build:
+  # ── Validation: no credentials, no publishing. Runs for PRs into stable. ────
+  validate:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify the non-accelerated base lifecycle
+        run: ./scripts/verify.sh
+
+      - name: Build the complete image hierarchy
+        run: ./scripts/build.sh all
+
+      - name: Verify Steam launcher wiring
+        run: ./scripts/verify-steam.sh
+
+  # ── Publish: stable pushes, release tags, and explicit dispatches. ──────────
+  publish:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 so the release-tag guard below can ask whether the
+          # tagged commit is actually contained in stable.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A tag is not intrinsically tied to a branch: without this, anyone able
+      # to create a vX.Y.Z tag could point it at an unreviewed commit and
+      # overwrite :latest for every image. Belt and braces — this check lives in
+      # a workflow that the tagged commit could itself modify, so it MUST be
+      # paired with a repository ruleset restricting who can create v* tags.
+      - name: Release tags must point at a commit on stable
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin stable:refs/remotes/origin/stable
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/stable; then
+            echo "Release tag $GITHUB_REF_NAME does not point at a commit on stable" >&2
+            exit 64
+          fi
 
       - name: Verify the non-accelerated base lifecycle
         run: ./scripts/verify.sh
@@ -27,7 +93,6 @@ jobs:
         run: ./scripts/verify-steam.sh
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name == 'workflow_dispatch' || github.ref_name == 'main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -35,26 +100,70 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish immutable and channel tags
-        if: github.event_name == 'workflow_dispatch' || github.ref_name == 'main'
         env:
           REGISTRY: ghcr.io
           OWNER: ${{ github.repository_owner }}
+          REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
         run: |
-          case "$REF_NAME" in
-            develop) channel_tag=develop ;;
-            main) channel_tag=latest ;;
-            *) echo "Publishing is limited to develop and main; got $REF_NAME" >&2; exit 64 ;;
-          esac
+          set -euo pipefail
+          # channels[] is every MOVING tag this run publishes. The immutable
+          # sha- tag is always published alongside them and is what
+          # release-manifest pinning and quasar-manifest.json reference.
+          #
+          # Branch and tag names are distinguished by ref_type, never by
+          # pattern: a branch called "vulkan-fix" must not be mistaken for a
+          # release and publish a ":ulkan-fix" channel over :latest.
+          if [ "$REF_TYPE" = tag ]; then
+            if ! printf '%s' "$REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Invalid release tag: $REF_NAME (want vX.Y.Z)" >&2; exit 64
+            fi
+            v="${REF_NAME#v}"
+            channels=("$v" "${v%.*}" latest)
+          else
+            case "$REF_NAME" in
+              develop) channels=(develop) ;;
+              stable)  channels=(latest) ;;
+              *) echo "Publishing is limited to develop, stable and vX.Y.Z tags; got $REF_NAME" >&2; exit 64 ;;
+            esac
+          fi
           sha_tag="sha-${SHA:0:12}"
           for image in quasar-base quasar-app quasar-diagnostics quasar-test-vulkan quasar-test-egl quasar-steam; do
             remote="$REGISTRY/$OWNER/$image"
-            docker tag "$image:dev" "$remote:$channel_tag"
             docker tag "$image:dev" "$remote:$sha_tag"
-            docker push "$remote:$channel_tag"
             docker push "$remote:$sha_tag"
+            for channel_tag in "${channels[@]}"; do
+              docker tag "$image:dev" "$remote:$channel_tag"
+              docker push "$remote:$channel_tag"
+            done
           done
 
       # Accelerated images intentionally are not started here. Their entrypoint
       # requires an assigned Vulkan UUID and is validated on Tower and Hermes.
+
+  # ── Release: the only job that can write repository contents. ──────────────
+  release:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # A GitHub Release is the human-readable half of a version tag: it records
+      # what shipped and when, which is the point of the version being
+      # informational. Idempotent — a re-run of a successful tag workflow (or a
+      # retry after a lost response) must not fail on an existing release.
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — nothing to do"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi

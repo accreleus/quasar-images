@@ -7,7 +7,7 @@
       "display_name": "Steam",
       "description": "Steam in a game-console experience through nested Gamescope (legacy Big Picture, the games-on-whales-validated game-foreground path). Needs a host --shm-size bump, 32-bit graphics libraries, and PUID/PGID matching the managed home.",
       "kind": "prebuilt",
-      "version": "sha-4afbf76",
+      "version": "2026.08.07",
       "registry_ref": "ghcr.io/salty2011/quasar-steam:sha-4afbf76",
       "library_provider": "steam",
       "artwork": {
@@ -23,7 +23,6 @@
         "env": {},
         "mounts": []
       },
-      "min_quasar_version": "0.1.0",
       "notes": "no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'."
     }
   ]
