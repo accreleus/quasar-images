@@ -9,7 +9,7 @@
 
 ## Image hierarchy
 
-`quasar-app` builds on `quasar-base` and adds the shared Vulkan/EGL/OpenGL, Mesa, GLVND, GBM, Wayland, audio, NVIDIA-runtime initialization, and GPU-probe runtime. `quasar-diagnostics`, `quasar-test-vulkan`, `quasar-test-egl`, and `quasar-steam` build on `quasar-app`.
+`quasar-app` builds on `quasar-base` and adds the shared Vulkan/EGL/OpenGL, Mesa, GLVND, GBM, Wayland, audio, NVIDIA-runtime initialization, and GPU-probe runtime. `quasar-diagnostics`, `quasar-test-vulkan`, `quasar-test-egl`, and `quasar-steam` build on `quasar-app`. **`quasar-test-vulkan` and `quasar-test-egl` are local-only GPU probes** — buildable via `./scripts/build.sh`, deliberately NOT published, because nothing consumes them from a registry.
 
 ```sh
 ./scripts/build.sh all
@@ -19,7 +19,7 @@
 
 ## Published images
 
-Branching model: **`stable` is the default and published branch; `develop` is the persistent integration branch.** Use manual workflow dispatch on `develop` to build and publish each image to `ghcr.io/salty2011/<image>:develop` and an immutable `sha-<commit>` tag. Pushes to `stable` build and publish `:latest` and the same immutable SHA tag automatically. Pull requests build only; ordinary `develop` pushes do not trigger a workflow.
+Branching model: **`stable` is the default and published branch; `develop` is the persistent integration branch.** Use manual workflow dispatch on `develop` to build and publish each image to `ghcr.io/accretion-io/<image>:develop` and an immutable `sha-<commit>` tag. Pushes to `stable` build and publish `:latest` and the same immutable SHA tag automatically. Pull requests build only; ordinary `develop` pushes do not trigger a workflow.
 
 `quasar-manifest.json` at the repository root is the **app-image catalog manifest** the Quasar control plane consumes (`GET /v1/admin/images`, `POST /v1/admin/images/sync`). It is a contract surface — Quasar refuses a `manifest_version` it does not understand. See `MANIFEST.md` before editing it.
 
