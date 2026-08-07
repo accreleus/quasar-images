@@ -8,7 +8,7 @@
       "description": "Steam in a game-console experience through nested Gamescope (legacy Big Picture, the games-on-whales-validated game-foreground path). Needs a host --shm-size bump, 32-bit graphics libraries, and PUID/PGID matching the managed home.",
       "kind": "prebuilt",
       "version": "2026.08.07",
-      "registry_ref": "ghcr.io/salty2011/quasar-steam:sha-4afbf76",
+      "registry_ref": "ghcr.io/accretion-io/quasar-steam:sha-969cc14ea168",
       "library_provider": "steam",
       "artwork": {
         "tile": "images/quasar-steam/artwork/tile.png"

@@ -129,13 +129,21 @@ jobs:
             esac
           fi
           sha_tag="sha-${SHA:0:12}"
-          for image in quasar-base quasar-app quasar-diagnostics quasar-test-vulkan quasar-test-egl quasar-steam; do
+          # PUBLISHED SET. quasar-test-vulkan / quasar-test-egl are deliberately
+          # absent: they are local-only GPU probes (./scripts/build.sh still
+          # builds them) and nothing consumes them from a registry, so paying
+          # build+push time for them on every stable push bought nothing.
+          for image in quasar-base quasar-app quasar-diagnostics quasar-steam; do
             remote="$REGISTRY/$OWNER/$image"
+            # Push the immutable tag ONCE, then add every moving channel tag as
+            # a registry-side manifest copy. A `docker tag` + `docker push` per
+            # channel re-walks and re-verifies each layer, and that burst across
+            # several images tripped GitHub's secondary rate limit (403) on the
+            # first real publish. imagetools copies the manifest only.
             docker tag "$image:dev" "$remote:$sha_tag"
             docker push "$remote:$sha_tag"
             for channel_tag in "${channels[@]}"; do
-              docker tag "$image:dev" "$remote:$channel_tag"
-              docker push "$remote:$channel_tag"
+              docker buildx imagetools create --tag "$remote:$channel_tag" "$remote:$sha_tag"
             done
           done
 
