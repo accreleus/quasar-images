@@ -35,6 +35,7 @@
       "build_args": {
         "QUASAR_PROBE_TAG": "p4-live-gate"
       },
+      "library_provider": "quasar-probe",
       "runtime": {
         "preset_name": "Quasar Probe",
         "gpu": false,
