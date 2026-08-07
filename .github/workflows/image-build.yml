@@ -6,14 +6,22 @@ name: Image build
 # published only by an explicit workflow_dispatch. PRs targeting stable get a
 # validation build with publishing switched off, so the images are proven to
 # build BEFORE the merge that ships them.
+#
+# A RELEASE is a tag: push `vX.Y.Z` on stable and the same build publishes the
+# version channels (:X.Y.Z, :X.Y, :latest) and opens a GitHub Release. The tag
+# is the only place a version is declared, so it cannot drift from what shipped.
 on:
   pull_request:
     branches: [stable]
     types: [opened, synchronize, reopened, closed]
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # contents: write is required only by the release step on a tag run; the
+  # token is scoped per-run, so this does not widen anything a PR build can do.
+  contents: write
   packages: write
 
 jobs:
@@ -21,6 +29,7 @@ jobs:
     # Skip a PR that was closed WITHOUT merging - nothing to validate or ship.
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v') ||
       github.event.action != 'closed' ||
       github.event.pull_request.merged == true
     runs-on: ubuntu-latest
@@ -38,7 +47,7 @@ jobs:
         run: ./scripts/verify-steam.sh
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name == 'workflow_dispatch' || (github.event.action == 'closed' && github.event.pull_request.merged == true)
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || (github.event.action == 'closed' && github.event.pull_request.merged == true)
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -46,7 +55,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish immutable and channel tags
-        if: github.event_name == 'workflow_dispatch' || (github.event.action == 'closed' && github.event.pull_request.merged == true)
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || (github.event.action == 'closed' && github.event.pull_request.merged == true)
         env:
           REGISTRY: ghcr.io
           OWNER: ${{ github.repository_owner }}
@@ -54,24 +63,44 @@ jobs:
           # so the publish channel is derived explicitly: a merged PR always
           # ships the base branch it merged into (stable), and a manual dispatch
           # ships the branch it was dispatched from.
-          REF_NAME: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.base.ref }}
+          REF_NAME: ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && github.ref_name || github.event.pull_request.base.ref }}
           # Likewise github.sha on a PR event is the ephemeral merge commit of
           # the test merge; the durable identity is the real merge commit.
-          SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
+          SHA: ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && github.sha || github.event.pull_request.merge_commit_sha }}
         run: |
+          # channels[] is every moving tag this run publishes. The immutable
+          # sha- tag is always published alongside them and is what
+          # release-manifest pinning and quasar-manifest.json reference.
           case "$REF_NAME" in
-            develop) channel_tag=develop ;;
-            stable) channel_tag=latest ;;
-            *) echo "Publishing is limited to develop and stable; got $REF_NAME" >&2; exit 64 ;;
+            develop) channels=(develop) ;;
+            stable)  channels=(latest) ;;
+            v*)      v="${REF_NAME#v}"
+                     channels=("$v" "${v%.*}" latest) ;;
+            *) echo "Publishing is limited to develop, stable and vX.Y.Z tags; got $REF_NAME" >&2; exit 64 ;;
           esac
           sha_tag="sha-${SHA:0:12}"
           for image in quasar-base quasar-app quasar-diagnostics quasar-test-vulkan quasar-test-egl quasar-steam; do
             remote="$REGISTRY/$OWNER/$image"
-            docker tag "$image:dev" "$remote:$channel_tag"
             docker tag "$image:dev" "$remote:$sha_tag"
-            docker push "$remote:$channel_tag"
             docker push "$remote:$sha_tag"
+            for channel_tag in "${channels[@]}"; do
+              docker tag "$image:dev" "$remote:$channel_tag"
+              docker push "$remote:$channel_tag"
+            done
           done
 
       # Accelerated images intentionally are not started here. Their entrypoint
       # requires an assigned Vulkan UUID and is validated on Tower and Hermes.
+
+      # A GitHub Release is the human-readable half of a version tag: it records
+      # what shipped and when, which is the whole point of the version being
+      # informational. Tag runs only.
+      - name: Publish the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

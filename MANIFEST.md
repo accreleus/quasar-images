@@ -19,14 +19,13 @@ Each image:
 | `display_name` | yes | Shown in the admin catalog. |
 | `description` | | Longer text. |
 | `kind` | yes | `prebuilt` (pull `registry_ref`) or `template` (build locally — a later Quasar phase). |
-| `version` | yes | Upstream's version for THIS entry. "Update available" = this value moved. Pinned, never a floating tag. |
+| `version` | yes | The image's CalVer `YYYY.MM.DD[.N]` — when this image was released. App images track upstream software with no meaningful semver of its own, so a date is honest where `1.2.0` would be fiction. "Update available" = this value moved, which is always a deliberate edit here. |
 | `registry_ref` | prebuilt | Concrete, immutable image reference (a `sha-<commit>` or digest tag, never `:latest`/`:develop`). |
 | `dockerfile` | template | Path within this repo. (Reserved; template builds are a later phase.) |
 | `build_args` | template | Build args. |
 | `artwork` | | Paths within this repo (e.g. `{ "tile": "images/.../tile.png" }`). |
 | `library_provider` | | Set when this image IS a provider's canonical image (e.g. `steam`). Enabling that provider in Quasar auto-ensures this image. |
 | `runtime` | yes | The default runtime configuration Quasar lands when the image is installed (below). |
-| `min_quasar_version` | | Guard; Quasar skips an image it is too old for. |
 | `notes` | | Free text for operators/maintainers. |
 
 ## runtime mapping — read this before editing a `runtime` block
