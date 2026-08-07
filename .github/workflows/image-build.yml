@@ -1,9 +1,15 @@
 name: Image build
 
+# Publishing happens on exactly one automatic path: a PULL REQUEST MERGED INTO
+# `stable`. A direct push to stable does NOT publish (there is no push trigger),
+# and nothing on `develop` triggers anything automatically — develop images are
+# published only by an explicit workflow_dispatch. PRs targeting stable get a
+# validation build with publishing switched off, so the images are proven to
+# build BEFORE the merge that ships them.
 on:
   pull_request:
-  push:
     branches: [stable]
+    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 permissions:
@@ -12,6 +18,11 @@ permissions:
 
 jobs:
   build:
+    # Skip a PR that was closed WITHOUT merging - nothing to validate or ship.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.action != 'closed' ||
+      github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -27,7 +38,7 @@ jobs:
         run: ./scripts/verify-steam.sh
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name == 'workflow_dispatch' || github.ref_name == 'stable'
+        if: github.event_name == 'workflow_dispatch' || (github.event.action == 'closed' && github.event.pull_request.merged == true)
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -35,12 +46,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish immutable and channel tags
-        if: github.event_name == 'workflow_dispatch' || github.ref_name == 'stable'
+        if: github.event_name == 'workflow_dispatch' || (github.event.action == 'closed' && github.event.pull_request.merged == true)
         env:
           REGISTRY: ghcr.io
           OWNER: ${{ github.repository_owner }}
-          REF_NAME: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
+          # On a pull_request event github.ref_name is "<n>/merge", not a branch,
+          # so the publish channel is derived explicitly: a merged PR always
+          # ships the base branch it merged into (stable), and a manual dispatch
+          # ships the branch it was dispatched from.
+          REF_NAME: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.base.ref }}
+          # Likewise github.sha on a PR event is the ephemeral merge commit of
+          # the test merge; the durable identity is the real merge commit.
+          SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
         run: |
           case "$REF_NAME" in
             develop) channel_tag=develop ;;
