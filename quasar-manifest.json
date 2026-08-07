@@ -24,6 +24,27 @@
         "mounts": []
       },
       "notes": "no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'."
+    },
+    {
+      "id": "quasar-probe",
+      "display_name": "Quasar Probe (template)",
+      "description": "Minimal template image used to validate the P4 agent-side build path. FROM alpine, no package installs — builds in seconds. Not a production app; safe to install/uninstall as a mechanism check.",
+      "kind": "template",
+      "version": "2026.08.08",
+      "dockerfile": "images/quasar-probe/Dockerfile",
+      "build_args": {
+        "QUASAR_PROBE_TAG": "p4-live-gate"
+      },
+      "runtime": {
+        "preset_name": "Quasar Probe",
+        "gpu": false,
+        "no_new_privileges": true,
+        "managed_home": false,
+        "args": [],
+        "env": {},
+        "mounts": []
+      },
+      "notes": "Template mechanism proof for image-management P4. Not launchable as a game; exists to exercise download-context -> docker build -> host_images building->ready."
     }
   ]
 }
