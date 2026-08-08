@@ -19,11 +19,12 @@
         "no_new_privileges": false,
         "managed_home": true,
         "home_container_path": "/home/quasar",
+        "network": "bridge",
         "args": [],
         "env": {},
         "mounts": []
       },
-      "notes": "no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'."
+      "notes": "no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'. network MUST be \"bridge\": Steam's first boot downloads steamui.so and clean-exits fatal under the hardened --network none default (first-run-experience spec §S2, #463) — this maps onto the runtime_presets.network column, hardened default stays \"none\" for every other image."
     },
     {
       "id": "quasar-probe",

@@ -33,8 +33,11 @@ Each image:
 The `runtime` block is a **superset** of two distinct Quasar objects, and they are stored in
 different places:
 
-- `preset_name`, `args`, `env`, `mounts`, `managed_home`, `home_container_path`, `gpu` map to a
-  Quasar **runtime preset** (`runtime_presets` table — first-class columns).
+- `preset_name`, `args`, `env`, `mounts`, `managed_home`, `home_container_path`, `network`, `gpu` map to a
+  Quasar **runtime preset** (`runtime_presets` table — first-class columns). `network` is a
+  CLOSED set (`none` | `bridge` | `host`; absent = inherit the host default) — Quasar rejects the
+  install on any other value, because the string ends up as `docker run --network <value>` on a
+  host (first-run-experience spec §S2, quasar#463).
 - `no_new_privileges` (and other future security knobs) ride the app's **`runtime_spec`** JSONB
   blob, NOT the preset columns. Quasar resolves the split when it installs an image; the
   manifest states the whole intended runtime and lets Quasar place each field correctly.

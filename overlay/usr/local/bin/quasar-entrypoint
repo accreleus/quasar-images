@@ -29,7 +29,39 @@ if [[ "$(id -u)" == "0" ]]; then
   export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
   export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/quasar-runtime-$PUID}"
-  install -d -o "$PUID" -g "$PGID" -m 0750 "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+
+  # `install -d` only chowns the directories it is EXPLICITLY told to create —
+  # an intermediate parent it creates implicitly along the way (e.g. ~/.local
+  # when creating ~/.local/share, since only .local/share is named) is left
+  # root-owned. Walk each target path under $HOME level by level so every
+  # directory it passes through is created+chowned, not just the leaf.
+  own_dir_chain() {
+    local target="$1" rel part path="$HOME"
+    install -d -o "$PUID" -g "$PGID" -m 0750 "$HOME"
+    if [[ "$target" == "$HOME" ]]; then
+      return
+    fi
+    rel="${target#"$HOME"/}"
+    if [[ "$rel" == "$target" ]]; then
+      # target is not under $HOME — nothing implicit to walk; just create it.
+      install -d -o "$PUID" -g "$PGID" -m 0750 "$target"
+      return
+    fi
+    while [[ -n "$rel" ]]; do
+      part="${rel%%/*}"
+      path="$path/$part"
+      install -d -o "$PUID" -g "$PGID" -m 0750 "$path"
+      if [[ "$rel" == "$part" ]]; then
+        rel=""
+      else
+        rel="${rel#"$part"/}"
+      fi
+    done
+  }
+
+  for d in "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"; do
+    own_dir_chain "$d"
+  done
   install -d -o "$PUID" -g "$PGID" -m 0700 "$XDG_RUNTIME_DIR"
   umask "$UMASK"
 
