@@ -80,6 +80,63 @@ nvidia_toolkit() {
   fi
 }
 
+# Quasar-provisioned driver volume (first-run S1) mounted at
+# /opt/quasar/nvidia-driver — the THIRD injection shape, alongside the GOW
+# /usr/nvidia volume and the container toolkit. The node-agent injects EGL and
+# Vulkan discovery for it by environment, so only GBM needs help here: Mesa's
+# libgbm finds backends by scanning a compile-time directory (/usr/lib64/gbm),
+# and no environment variable was pointing it at the volume's copy.
+#
+# WHY THIS MATTERS (quasar-images#4 follow-on, root-caused live 2026-08-09):
+# without it, Vulkan worked — gamescope selected the RTX 5090 and reported DRM
+# format modifiers, so the session looked healthy — while everything routed
+# through gbm_create_device() fell back to Mesa, which has no driver for
+# nvidia-drm:
+#
+#   pci id for fd 5: 10de:2b85, driver (null)
+#   Refusing to try glamor on llvmpipe
+#   XWAYLAND: Disabling GLAMOR support
+#   libEGL warning: failed to open /dev/dri/card1: Permission denied
+#
+# A software-rendered Xwayland advertises no DRI3, so Steam's CEF GPU process
+# failed init in a loop and steamwebhelper's X window churned — the Big Picture
+# logo flickered and never painted a sign-in screen.
+#
+# The `card1: Permission denied` line is a SYMPTOM, not the cause: it is Mesa
+# reaching for the primary node as a last resort. Once libgbm loads NVIDIA's
+# backend nothing wants that node and the message disappears. Do NOT "fix" it
+# by adding the app user to the `video` group or chmod'ing the device — that
+# grants privilege to paper over a discovery bug and still leaves Mesa driving
+# an NVIDIA node.
+#
+# The durable fix is agent-side (GBM_BACKENDS_PATH in the node-agent's
+# app-container args), because it reaches third-party images that will never
+# carry this script. This branch is the image-side belt: no agent rebuild
+# needed, and it also covers a bare `docker run` with the volume mounted. When
+# the agent sets the env var it wins (GBM_BACKENDS_PATH REPLACES the search
+# directory) and this symlink simply goes unused — harmless by construction.
+nvidia_quasar_volume() {
+  local backend=/opt/quasar/nvidia-driver/gbm/nvidia-drm_gbm.so
+  # Absent on a host with its own driver and on every non-NVIDIA host. Never
+  # create a dangling symlink: libgbm would find the name, fail to dlopen it,
+  # and that is strictly worse than an empty directory.
+  [[ -f "$backend" ]] || return 0
+  # A WORKING backend already published by the toolkit branch above (or baked
+  # into the image) wins — clobbering another driver integration is not our
+  # business. `-e` follows symlinks, so this skips a valid symlink and replaces
+  # a dangling one, which is exactly the wanted behaviour.
+  if [[ -e /usr/lib64/gbm/nvidia-drm_gbm.so ]]; then
+    return 0
+  fi
+  if mkdir -p /usr/lib64/gbm && ln -sfn "$backend" /usr/lib64/gbm/nvidia-drm_gbm.so; then
+    log "Quasar NVIDIA driver volume: published GBM backend at /usr/lib64/gbm/nvidia-drm_gbm.so"
+  else
+    log "WARNING: could not publish the GBM backend; Xwayland will software-render"
+    log "         unless the node-agent sets GBM_BACKENDS_PATH"
+  fi
+  return 0
+}
+
 # 32-bit-only additive driver volume (issue #375): independent of, and safe to
 # run alongside, either branch above — ldconfig's class-based matching means a
 # 32-bit-only search path here never shadows the 64-bit libs the toolkit or
@@ -99,4 +156,9 @@ nvidia_32bit_volume() {
 }
 
 nvidia_volume || nvidia_toolkit || true
+# Runs AFTER the branches above so a backend either of them published wins, and
+# unconditionally (not chained with ||) because the Quasar volume coexists with
+# the toolkit: the agent passes --gpus all for CUDA while the volume supplies
+# the GL/EGL/Vulkan/GBM userspace the toolkit's CUDA-only injection omits.
+nvidia_quasar_volume
 nvidia_32bit_volume

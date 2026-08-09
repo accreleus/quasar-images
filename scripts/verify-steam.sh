@@ -84,6 +84,17 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   grep -q "^/opt/quasar/nvidia-lib32$" /etc/ld.so.conf.d/90-quasar-nvidia-volume.conf
   grep -q "nvidia_32bit_volume" /usr/local/bin/quasar-gpu-init
 
+  # The Quasar driver volume is the THIRD NVIDIA injection shape (alongside the
+  # GOW /usr/nvidia volume and the container toolkit) and it needs its GBM
+  # backend published into Mesa'"'"'s backend directory, or libgbm silently falls
+  # back to Mesa, Mesa has no driver for nvidia-drm, Xwayland refuses glamor on
+  # llvmpipe, and Steam'"'"'s CEF GPU process crash-loops -- the flickering Big
+  # Picture logo that never reached a sign-in screen. The function must exist
+  # AND be invoked: it shipped defined-but-never-called once, which validated as
+  # a no-op with the bug fully intact.
+  grep -q "nvidia_quasar_volume()" /usr/local/bin/quasar-gpu-init
+  grep -qE "^nvidia_quasar_volume$" /usr/local/bin/quasar-gpu-init
+
   # D-Bus system bus + NetworkManager (quasar-images#4). Without them Steam'"'"'s
   # libnm client fails to construct, the client never registers
   # SteamClient.System.Network.*, and Big Picture'"'"'s SystemNetworkStore throws
