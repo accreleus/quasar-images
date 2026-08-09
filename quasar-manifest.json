@@ -19,11 +19,34 @@
         "no_new_privileges": false,
         "managed_home": true,
         "home_container_path": "/home/quasar",
+        "network": "bridge",
         "args": [],
         "env": {},
         "mounts": []
       },
-      "notes": "no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'."
+      "notes": "no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'. network MUST be \"bridge\": Steam's first boot downloads steamui.so and clean-exits fatal under the hardened --network none default (first-run-experience spec §S2, #463) — this maps onto the runtime_presets.network column, hardened default stays \"none\" for every other image."
+    },
+    {
+      "id": "quasar-probe",
+      "display_name": "Quasar Probe (template)",
+      "description": "Minimal template image used to validate the P4 agent-side build path. FROM alpine, no package installs — builds in seconds. Not a production app; safe to install/uninstall as a mechanism check.",
+      "kind": "template",
+      "version": "2026.08.08",
+      "dockerfile": "images/quasar-probe/Dockerfile",
+      "build_args": {
+        "QUASAR_PROBE_TAG": "p4-live-gate"
+      },
+      "library_provider": "quasar-probe",
+      "runtime": {
+        "preset_name": "Quasar Probe",
+        "gpu": false,
+        "no_new_privileges": true,
+        "managed_home": false,
+        "args": [],
+        "env": {},
+        "mounts": []
+      },
+      "notes": "Template mechanism proof for image-management P4. Not launchable as a game; exists to exercise download-context -> docker build -> host_images building->ready."
     }
   ]
 }
