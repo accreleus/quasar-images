@@ -72,6 +72,41 @@ must provide them.
    convention (e.g. unraid's `99:100`): run as root and pass `PUID`/`PGID` and the
    entrypoint drops to that user via `setpriv`. Steam state lives under `$HOME`.
 
+## In-container system services (D-Bus + NetworkManager)
+
+`/etc/quasar/init.d/20-steam-system-services.sh` starts a **D-Bus system bus** and
+**NetworkManager** inside the container, as root, before `quasar-entrypoint` drops
+privileges. Both are required for Steam Big Picture to start at all
+(quasar-images#4): Steam builds its network subsystem on `libnm`, and when
+`nm_client_new()` fails it never registers the `SteamClient.System.Network.*`
+bindings into the UI's JS context. The BPM `SystemNetworkStore` initialises
+*before login*, throws `RegisterForDeviceChanges is not a function`, and the UI
+sits on "Waiting for network…" forever — even though the client itself is online
+and its connectivity test passes. games-on-whales' steam image
+(`apps/steam/build-fedora/scripts/system-services.sh`) does the same two things
+for the same reason.
+
+Properties of this arrangement:
+
+- The bus is created **inside** the container. The host's system bus is never
+  mounted in — an app container is a tenant workload.
+- NetworkManager runs as a read-only **observer**. The session container has
+  `--cap-drop ALL` with no `NET_ADMIN`, so it cannot reconfigure anything, and
+  `/etc/NetworkManager/conf.d/00-quasar.conf` sets `no-auto-default=*` +
+  `dns=none` so it never tries to. Verified live: `eth0` is adopted as
+  `connected (externally)`, docker's address and `/etc/resolv.conf` are untouched,
+  DNS keeps resolving.
+- NM reports overall connectivity as `limited` (its captive-portal probe has no
+  route to Fedora's hotspot endpoint from here). That is cosmetic — Steam only
+  needs the client to construct, and BPM reaches the sign-in screen regardless.
+- Escape hatch: `QUASAR_STEAM_SYSTEM_SERVICES=0` skips both services and restores
+  the previous behaviour (i.e. reproduces the hang). It exists for A/B debugging,
+  not for production.
+
+This is a workaround for a Steam-side coupling, not a fix: a containerised Steam
+ought to degrade to "assume online" when no NetworkManager exists. Until Valve
+changes that, an in-container NM is the only lever available to us.
+
 ## Build & verify
 
 ```sh

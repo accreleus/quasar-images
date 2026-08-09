@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-for executable in steam gamescope bwrap quasar-steam quasar-steam-client; do
+for executable in steam gamescope bwrap quasar-steam quasar-steam-client dbus-daemon NetworkManager; do
   docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc "command -v $executable >/dev/null"
 done
 
@@ -83,6 +83,27 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   test -f /etc/ld.so.conf.d/90-quasar-nvidia-volume.conf
   grep -q "^/opt/quasar/nvidia-lib32$" /etc/ld.so.conf.d/90-quasar-nvidia-volume.conf
   grep -q "nvidia_32bit_volume" /usr/local/bin/quasar-gpu-init
+
+  # D-Bus system bus + NetworkManager (quasar-images#4). Without them Steam'"'"'s
+  # libnm client fails to construct, the client never registers
+  # SteamClient.System.Network.*, and Big Picture'"'"'s SystemNetworkStore throws
+  # pre-login -- the UI hangs on "Waiting for network" forever with a perfectly
+  # online client. Proven by A/B on quasar-devbox 2026-08-09 (same image, same
+  # home volume, QUASAR_STEAM_SYSTEM_SERVICES on/off).
+  hook=/etc/quasar/init.d/20-steam-system-services.sh
+  test -x "$hook"
+  grep -q "dbus-daemon --system" "$hook"
+  grep -q "NetworkManager" "$hook"
+  # The host system bus must never be mounted in -- the bus is created here.
+  if grep -q "/var/run/dbus\|--mount.*system_bus_socket" "$hook"; then
+    echo "FAIL: $hook references a host D-Bus socket; the bus must be created in-container" >&2
+    exit 1
+  fi
+  # NM must stay a read-only observer: no auto-created DHCP profile on a docker
+  # bridge network (no DHCP server there; an activation attempt can flush the
+  # address docker assigned).
+  test -f /etc/NetworkManager/conf.d/00-quasar.conf
+  grep -q "^no-auto-default=\*" /etc/NetworkManager/conf.d/00-quasar.conf
 '
 
 labels="$(docker image inspect quasar-steam:dev --format '{{json .Config.Labels}}')"
