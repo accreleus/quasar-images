@@ -59,6 +59,7 @@ RUN dnf --setopt=install_weak_deps=False -y install \
       "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
     && dnf --setopt=install_weak_deps=False -y install \
       dbus-daemon file gamescope ibus lsb-release pciutils steam \
+      NetworkManager \
       mesa-libGLU mesa-libGLU.i686 \
       libglvnd-egl.i686 libglvnd-gles.i686 libglvnd-glx.i686 \
       mesa-dri-drivers.i686 mesa-libEGL.i686 mesa-libGL.i686 mesa-libgbm.i686 \
@@ -71,6 +72,15 @@ COPY --from=gamescope-builder /build/gamescope/build/src/gamescope /usr/bin/game
 COPY images/quasar-steam/quasar-steam /usr/local/bin/quasar-steam
 COPY images/quasar-steam/steam-wrapper /usr/local/bin/quasar-steam-client
 RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client /usr/bin/bwrap
+
+# Steam Big Picture blocks on "Waiting for network" without a D-Bus system bus +
+# NetworkManager to build its libnm client against (quasar-images#4). The hook
+# runs as root from quasar-entrypoint's init.d chain; the conf keeps NM a
+# read-only observer of docker's networking. See the files for the full trace.
+COPY images/quasar-steam/overlay/etc/NetworkManager/conf.d/00-quasar.conf /etc/NetworkManager/conf.d/00-quasar.conf
+COPY images/quasar-steam/overlay/etc/quasar/init.d/20-steam-system-services.sh /etc/quasar/init.d/20-steam-system-services.sh
+RUN chmod 0644 /etc/NetworkManager/conf.d/00-quasar.conf \
+    && chmod 0755 /etc/quasar/init.d/20-steam-system-services.sh
 
 # No baked GAMESCOPE_WIDTH/HEIGHT/REFRESH: a baked value is non-empty, so it
 # would shadow the session mode Quasar injects as QUASAR_STREAM_* and pin every
