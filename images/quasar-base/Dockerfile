@@ -11,8 +11,11 @@ LABEL org.opencontainers.image.title="Quasar common Fedora base" \
       org.quasar.image.acceleration="optional" \
       org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
 
+# fuse3 (fusermount3): xdg-desktop-portal's document portal mounts its
+# fuse filesystem for sandboxed apps' file-chooser access; without it the
+# portal's fuse mount fails on every image in this family.
 RUN dnf --setopt=install_weak_deps=False -y install \
-      bash ca-certificates coreutils curl findutils glibc-langpack-en jq procps-ng shadow-utils \
+      bash ca-certificates coreutils curl findutils fuse3 glibc-langpack-en jq procps-ng shadow-utils \
       tini tzdata util-linux \
     && groupadd --gid 1000 quasar \
     && useradd --no-log-init --uid 1000 --gid 1000 --home-dir /home/quasar --create-home --shell /bin/bash quasar \
