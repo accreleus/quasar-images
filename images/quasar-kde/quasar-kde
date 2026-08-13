@@ -198,6 +198,41 @@ export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=KDE
 export DESKTOP_SESSION=plasma
 
+# --- Overlay (subsurface) offloading OFF: the black-stream fix ---------------
+# BLOCKING BUG, live-diagnosed on the dev box 2026-08-13 under the real Quasar
+# stack (RTX 5090): the session came up perfectly -- kwin 1920x1080, Xwayland,
+# ksmserver, plasmashell, GPU probe pass -- but the encoded stream was BLACK
+# (browser peer: LUMA mean=0.0, fps=0), and the agent logged
+# "app presented its first frame after 9537 ms (app_surface_commits=3)".
+#
+# WHAT IS ACTUALLY HAPPENING (WAYLAND_DEBUG=1 trace of kwin's connection to the
+# agent compositor -- the only way to see it; every process-level symptom is a
+# red herring):
+#   -> wp_single_pixel_buffer_manager_v1.create_u32_rgba_buffer(wl_buffer, 0,0,0, 0xffffffff)
+#   -> wl_surface@3.attach(wl_buffer, 0, 0)          <-- ONE opaque BLACK pixel
+#   -> wp_viewport.set_destination(1920, 1080)       <-- stretched to full screen
+# Over the whole session kwin's root output surface saw exactly **1 attach** and
+# 144 commits: after that first frame it only ever sent set_buffer_scale + frame
+# + commit, i.e. NULL commits with no new buffer and no damage, forever. The
+# desktop was being drawn the entire time (885 wl_surface.attach calls from
+# kwin's own clients), but kwin was offloading every window to a wl_subsurface
+# ("overlay") and leaving its root surface as the single-pixel black backdrop.
+# The agent's gst-wayland-display compositor presents the root surface, so the
+# stream is that black pixel scaled to 1080p. Frame callbacks were NOT the
+# problem -- wl_callback.done arrives normally and kwin commits at ~60 Hz.
+#
+# KWIN_USE_OVERLAYS=0 disables that offload path, so kwin composites the whole
+# scene into its own output buffer and attaches it every frame -- which is what
+# a nested compositor has to do when the parent presents one surface. Measured
+# immediately after, same session type: LUMA mean=122.0 sd=0.02, DECODE fps=60,
+# INPUT_PROBE click_delta=3.679 (idle_delta=0.001).
+#
+# gamescope never hits this: it composites everything itself and self-paces, so
+# it has no overlay path to take. Do NOT remove this without re-running a live
+# luma check -- the failure is invisible to every in-container smoke test,
+# because in-container the session looks completely healthy.
+export KWIN_USE_OVERLAYS=0
+
 # --- Nested output sizing: HOW kwin gets its size ---------------------------
 # Decision + evidence, settled empirically on the dev box against the actual
 # image (Plasma 6.7.4 / kwin-6.7.4-1.fc43 / plasma-workspace-6.7.4-1.fc43,
