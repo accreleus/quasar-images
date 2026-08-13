@@ -53,10 +53,31 @@ COPY images/quasar-kde/overlay/usr/share/plasma/look-and-feel/org.fedoraproject.
 
 COPY images/quasar-kde/quasar-kde /usr/local/bin/quasar-kde
 
+# PATH-shadowing kwin_wayland wrapper: the ONLY way to get the session's mode
+# onto the nested kwin output on Plasma 6.7 (kwin_wayland_wrapper spawns the
+# compositor by bare name and forwards no size). Deliberately NOT in
+# /usr/local/bin -- quasar-kde prepends this directory to PATH for the session
+# only. Full rationale in both files.
+COPY images/quasar-kde/kwin_wayland /usr/local/libexec/quasar-kde/kwin_wayland
+
 RUN chmod 0644 /etc/xdg/kscreenlockerrc /etc/xdg/baloofilerc /etc/xdg/kwalletrc \
       /usr/share/icons/hicolor/scalable/apps/quasar.svg \
       /usr/share/icons/hicolor/256x256/apps/quasar.png \
       /usr/share/plasma/look-and-feel/org.fedoraproject.fedora.desktop/contents/plasmoidsetupscripts/org.kde.plasma.kickoff.js \
-    && chmod 0755 /usr/local/bin/quasar-kde
+    && chmod 0755 /usr/local/bin/quasar-kde /usr/local/libexec/quasar-kde/kwin_wayland
+
+# Strip kwin's cap_sys_nice=ep FILE capability (same fix games-on-whales applies
+# to sway: `setcap -r /usr/sbin/sway` in their base-app image). Linux refuses
+# execve with EPERM when a file's permitted capability set is not a subset of
+# the process's bounding set, so with the file cap in place kwin_wayland cannot
+# be exec'd AT ALL in a container started without `--cap-add SYS_NICE` -- the
+# only symptom is a bare "Operation not permitted". Verified on the dev box
+# 2026-08-13: `kwin_wayland --help` fails that way without the cap and succeeds
+# with it. CAP_SYS_NICE is OPTIONAL in the Quasar contract (quasar-base's
+# ambient grant is deliberately conditional -- see 9bb58d9 -- because older
+# node-agents don't pass it), so the file cap is redundant where the cap exists
+# (the entrypoint's ambient grant is inherited across exec) and fatal where it
+# does not. setcap ships in the inherited libcap; no extra package needed.
+RUN setcap -r /usr/bin/kwin_wayland
 
 CMD ["/usr/local/bin/quasar-kde"]
