@@ -13,6 +13,7 @@ build_vulkan() { build -f images/quasar-test-vulkan/Dockerfile -t "quasar-test-v
 build_egl() { build -f images/quasar-test-egl/Dockerfile -t "quasar-test-egl:$tag" --build-arg "APP_IMAGE=quasar-app:$tag" --build-arg "VERSION=$version"; }
 build_steam_runtime() { build -f images/quasar-steam-runtime/Dockerfile -t "quasar-steam-runtime:$tag" --build-arg "APP_IMAGE=quasar-app:$tag" --build-arg "VERSION=$version"; }
 build_steam() { build -f images/quasar-steam/Dockerfile -t "quasar-steam:$tag" --build-arg "APP_IMAGE=quasar-app:$tag" --build-arg "STEAM_RUNTIME_IMAGE=quasar-steam-runtime:$tag" --build-arg "VERSION=$version"; }
+build_kde() { build -f images/quasar-kde/Dockerfile -t "quasar-kde:$tag" --build-arg "STEAM_RUNTIME_IMAGE=quasar-steam-runtime:$tag" --build-arg "VERSION=$version"; }
 
 case "$target" in
   quasar-base) build_base ;;
@@ -22,6 +23,7 @@ case "$target" in
   quasar-test-egl) build_base; build_app; build_egl ;;
   quasar-steam-runtime) build_base; build_app; build_steam_runtime ;;
   quasar-steam) build_base; build_app; build_steam_runtime; build_steam ;;
-  all) build_base; build_app; build_diagnostics; build_vulkan; build_egl; build_steam_runtime; build_steam ;;
-  *) echo "usage: $0 {all|quasar-base|quasar-app|quasar-diagnostics|quasar-test-vulkan|quasar-test-egl|quasar-steam-runtime|quasar-steam}" >&2; exit 64 ;;
+  quasar-kde) build_base; build_app; build_steam_runtime; build_kde ;;
+  all) build_base; build_app; build_diagnostics; build_vulkan; build_egl; build_steam_runtime; build_steam; build_kde ;;
+  *) echo "usage: $0 {all|quasar-base|quasar-app|quasar-diagnostics|quasar-test-vulkan|quasar-test-egl|quasar-steam-runtime|quasar-steam|quasar-kde}" >&2; exit 64 ;;
 esac

@@ -92,17 +92,20 @@ Bazzite both do it). Two baked pieces:
 
 1. **Icon asset:** `/usr/share/icons/hicolor/scalable/apps/quasar.svg` (plus
    256px PNG fallback at `icons/hicolor/256x256/apps/quasar.png`).
-2. **Default panel layout:** override the shipped
-   `/usr/share/plasma/shells/org.kde.plasma.desktop/contents/layout.js` so the
-   Kickoff applet is created with `icon = "quasar"`. This sets the *default*;
-   it applies on first run (no `plasma-org.kde.plasma.desktop-appletsrc` in
-   `$HOME` yet). A user who changes the icon keeps their change — per-user
-   config wins, per the persistence model.
+2. **Kickoff default icon** *(path corrected during unit 1 — the design-spec's
+   assumed `plasma/shells/.../layout.js` does not exist on Plasma 6.7.4 /
+   Fedora 43; verified empirically on the dev box)*: override Fedora's
+   plasmoid-setup script
+   `/usr/share/plasma/look-and-feel/org.fedoraproject.fedora.desktop/contents/plasmoidsetupscripts/org.kde.plasma.kickoff.js`,
+   which is what actually runs on Kickoff-applet creation, so a fresh applet
+   gets `icon = "quasar"`. Applies on first run (no
+   `plasma-org.kde.plasma.desktop-appletsrc` in `$HOME` yet); a user who
+   changes the icon keeps their change — per-user config wins.
 
-Fragility note: `layout.js` is replaced wholesale, so a Plasma version bump can
-drift from upstream's layout. Mitigation: the verify script asserts the file
-still contains the Kickoff `icon` assignment, so a silent regression fails CI
-rather than shipping.
+Fragility note: the file is replaced wholesale, so a Plasma/kde-settings bump
+can drift from upstream. Mitigation: the verify script asserts the file still
+contains the `writeConfig("icon", "quasar")` assignment, so a silent
+regression fails CI rather than shipping.
 
 **Logo asset (provided 2026-08-13):** the Quasar mark from the site build —
 `/Users/michael/code/quasar/site/dist/_astro/quasar-mark.DOqKpC47.svg`
