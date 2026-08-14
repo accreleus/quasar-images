@@ -71,15 +71,20 @@ on_term() {
   log "shutdown requested; relaying to the XFCE session"
 
   if [[ -n "$session_pid" ]] && kill -0 "$session_pid" 2>/dev/null; then
-    # A SINGLE TERM to the session process (the dbus-run-session child, which
-    # has exec'd through startxfce4 -> /etc/xdg/xfce4/xinitrc -> xfce4-session;
-    # dbus-run-session execs its program rather than forking it and both shell
-    # stages end in `exec`, so this pid IS xfce4-session, the session leader).
-    # xfce4-session's own signal handling closes the session: registered
-    # clients are asked to quit, then xfdesktop/xfce4-panel/xfwm4 follow.
-    # Nothing below TERMs the panel or the window manager individually --
-    # doing so races that orderly teardown, the same class of unclean shutdown
-    # proven on the Steam launcher.
+    # A SINGLE TERM to dbus-run-session, which is the session's root: it keeps
+    # a process of its own (it has to outlive the program to reap its private
+    # dbus-daemon -- measured in the nested smoke: dbus-run-session at pid 110
+    # with xfce4-session its direct child at 112, NOT an exec'd-over pid) and
+    # forwards the signal to that child. startxfce4 with DISPLAY already set
+    # execs /etc/xdg/xfce4/xinitrc, which ends in
+    # `exec ${XFCE4_SESSION_COMPOSITOR:-xfce4-session}`, so the child is
+    # xfce4-session itself and the TERM reaches the session leader.
+    # xfce4-session then closes the session from the top: registered clients
+    # are asked to quit, then xfdesktop/xfce4-panel/xfsettingsd/xfwm4 follow
+    # ("Disconnected from session manager" in the smoke log). Nothing below
+    # TERMs the panel or the window manager individually -- doing so races that
+    # orderly teardown, the same class of unclean shutdown proven on the Steam
+    # launcher. Measured end to end: `docker stop` returned in 0.65s, exit 143.
     log "sending SIGTERM to the XFCE session (pid $session_pid, budget ${shutdown_timeout}s)"
     kill -TERM "$session_pid" 2>/dev/null || true
     await_pid_exit "$session_pid" "XFCE session"
@@ -327,12 +332,10 @@ log "X display :0 ready (rootful Xwayland pid $xwayland_pid)"
 
 # --- Launch: the XFCE session ------------------------------------------------
 # dbus-run-session gives the whole session one session bus (there is no systemd
-# --user to provide one, and xfconfd/Thunar/xfce4-session all need it). It EXECS
-# its program rather than forking it, and startxfce4 with DISPLAY already set
-# takes its `prog=/bin/sh` path and `exec`s /etc/xdg/xfce4/xinitrc, which itself
-# ends in `exec ${XFCE4_SESSION_COMPOSITOR:-xfce4-session}` -- so session_pid
-# below ends up being xfce4-session itself and the shutdown relay TERMs the
-# session leader directly.
+# --user to provide one, and xfconfd/Thunar/xfce4-session all need it).
+# session_pid below is dbus-run-session itself, with xfce4-session as its direct
+# child (see the shutdown relay above for the measured process tree and why a
+# single TERM to this pid is the right relay).
 session=(dbus-run-session -- startxfce4)
 
 if [[ "$shutting_down" == "1" ]]; then
