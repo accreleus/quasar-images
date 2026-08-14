@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- Wayland socket handoff (quasar#379) -------------------------------------
+# Identical contract to images/quasar-kde/quasar-kde lines 4-17 and
+# images/quasar-steam/quasar-steam lines 13-17. The node-agent provides
+# XDG_RUNTIME_DIR + WAYLAND_DISPLAY for ITS compositor socket (a file bind at
+# $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY, e.g. /run/quasar-wayland/wayland-3 -- the
+# name varies per session). The XFCE session needs a private, user-owned
+# XDG_RUNTIME_DIR for its own runtime files (dbus, xfconf, Thunar), so this
+# launcher repoints it below -- but first the agent socket is resolved to an
+# ABSOLUTE path so the repoint cannot orphan it. libwayland uses WAYLAND_DISPLAY
+# verbatim when it starts with '/', ignoring XDG_RUNTIME_DIR entirely.
+if [[ -n "${WAYLAND_DISPLAY:-}" && "${WAYLAND_DISPLAY}" != /* ]]; then
+  export WAYLAND_DISPLAY="${XDG_RUNTIME_DIR:-/run/quasar-wayland}/${WAYLAND_DISPLAY}"
+fi
+export XDG_RUNTIME_DIR="${QUASAR_XFCE_RUNTIME_DIR:-$HOME/.runtime}"
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
+
+log() { printf '%s quasar-xfce: %s\n' "$(date -Iseconds)" "$*" >&2; }
+
+# --- Graceful shutdown: launcher-owned sequenced relay (quasar-images#1) -----
+# images/quasar-base/Dockerfile's tini does not run with -g, so `docker stop`
+# SIGTERMs only this launcher (tini's direct child) -- this script owns relaying
+# that shutdown to the XFCE session itself instead of `exec`ing the session
+# chain away. No process-group tricks anywhere below: every process stays in
+# tini's direct descendant tree, so there is no group to kill and no way to
+# reproduce the quasar-steam 6551fe8 FATAL (EPERM from a group-kill against a
+# reshaped process group under --cap-drop ALL / no CAP_KILL).
+#
+# TWO children here, unlike quasar-kde's one: the rootful Xwayland server and
+# the XFCE session that runs against it. They are torn down in that order --
+# session FIRST, Xwayland only once the session is gone -- for exactly the
+# reason quasar-steam TERMs steam before gamescope: killing the display server
+# out from under its clients turns every orderly "save state and quit" into an
+# X11 I/O error. xfce4-session unwinds the session from the top (session
+# clients, then xfdesktop/xfce4-panel/xfwm4), and each of those needs a live
+# X connection to do it. Both waits are bounded by the same budget.
+shutdown_timeout="${QUASAR_XFCE_SHUTDOWN_TIMEOUT:-8}"
+# A non-numeric override must not silently collapse the budget to a zero-wait
+# escalation -- fall back to the documented default instead.
+[[ "$shutdown_timeout" =~ ^[0-9]+$ ]] || shutdown_timeout=8
+session_pid=""
+xwayland_pid=""
+shutting_down=0
+
+# Bounded poll for one pid to disappear. Deliberately NOT escalated to SIGKILL:
+# docker's SIGKILL-after-timeout backstop reaps a wedged process, and a kill
+# from this launcher would only strand half-written xfconf config.
+await_pid_exit() {
+  local pid="$1" what="$2"
+  local waited=0
+  local max_waited=$(( shutdown_timeout * 4 ))  # 0.25s poll ticks
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= max_waited )); then
+      log "$what still running after ${shutdown_timeout}s; leaving it to the runtime backstop"
+      return 0
+    fi
+    sleep 0.25 || true
+    waited=$((waited + 1))
+  done
+}
+
+on_term() {
+  # Idempotent: a second TERM/INT while a relay is already in flight is a
+  # no-op -- the first invocation owns the sequence through to completion.
+  if [[ "$shutting_down" == "1" ]]; then
+    return
+  fi
+  shutting_down=1
+  log "shutdown requested; relaying to the XFCE session"
+
+  if [[ -n "$session_pid" ]] && kill -0 "$session_pid" 2>/dev/null; then
+    # A SINGLE TERM to the session process (the dbus-run-session child, which
+    # has exec'd through startxfce4 -> /etc/xdg/xfce4/xinitrc -> xfce4-session;
+    # dbus-run-session execs its program rather than forking it and both shell
+    # stages end in `exec`, so this pid IS xfce4-session, the session leader).
+    # xfce4-session's own signal handling closes the session: registered
+    # clients are asked to quit, then xfdesktop/xfce4-panel/xfwm4 follow.
+    # Nothing below TERMs the panel or the window manager individually --
+    # doing so races that orderly teardown, the same class of unclean shutdown
+    # proven on the Steam launcher.
+    log "sending SIGTERM to the XFCE session (pid $session_pid, budget ${shutdown_timeout}s)"
+    kill -TERM "$session_pid" 2>/dev/null || true
+    await_pid_exit "$session_pid" "XFCE session"
+  fi
+
+  # Xwayland only AFTER the session is gone (or its budget expired): it is the
+  # session's display server, and pulling it first would strand every client
+  # mid-teardown on an X11 I/O error.
+  if [[ -n "$xwayland_pid" ]] && kill -0 "$xwayland_pid" 2>/dev/null; then
+    log "sending SIGTERM to Xwayland (pid $xwayland_pid, budget ${shutdown_timeout}s)"
+    kill -TERM "$xwayland_pid" 2>/dev/null || true
+    await_pid_exit "$xwayland_pid" "Xwayland"
+  fi
+}
+
+# Installed before anything below can block or is backgrounded: no window where
+# a TERM/INT could arrive and find no handler wired up.
+trap on_term TERM INT
+
+# `wait PID` returns EARLY (status >128) the instant a trapped signal is caught
+# -- bash runs the trap synchronously, then hands control back to the statement
+# after wait, whether or not PID has actually exited yet. Re-wait in a loop and
+# only trust the exit status once `kill -0` confirms the pid is actually gone
+# (that final wait's status is the real one; earlier ones are just
+# signal-delivery artifacts). set -e is live, so every wait/kill here is the
+# condition of an if/while -- never a bare statement -- or its nonzero would
+# abort the script before we get to read $?.
+wait_for_exit() {
+  local pid="$1" rc=0
+  while :; do
+    if wait "$pid"; then rc=0; else rc=$?; fi
+    if kill -0 "$pid" 2>/dev/null; then
+      continue
+    fi
+    break
+  done
+  return "$rc"
+}
+
+# --- Parent compositor readiness --------------------------------------------
+# Same philosophy as the Steam launcher's gamescope-ready handshake and the KDE
+# launcher's: bounded, never infinite, and generous enough that a
+# healthy-but-slow parent cannot lose the race. The observable precondition is
+# the parent compositor's socket file existing.
+compositor_timeout="${QUASAR_XFCE_COMPOSITOR_TIMEOUT:-30}"
+[[ "$compositor_timeout" =~ ^[0-9]+$ ]] || compositor_timeout=30
+
+if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+  log "FATAL: WAYLAND_DISPLAY is not set; quasar-xfce runs a rootful Xwayland NESTED as a"
+  log "       client of the node-agent's parent compositor (XDG_RUNTIME_DIR + WAYLAND_DISPLAY)."
+  exit 1
+fi
+# Kept for Xwayland alone. The session env below UNSETS WAYLAND_DISPLAY (see the
+# long comment there) so no X11 client can grab the parent socket.
+parent_wayland_display="$WAYLAND_DISPLAY"
+
+compositor_waited=0
+compositor_max=$(( compositor_timeout * 4 ))  # 0.25s poll ticks
+while [[ ! -e "$parent_wayland_display" ]]; do
+  if [[ "$shutting_down" == "1" ]]; then
+    log "shutdown requested during startup; exiting without launching XFCE"
+    exit 143
+  fi
+  if (( compositor_waited >= compositor_max )); then
+    log "FATAL: parent compositor socket '$parent_wayland_display' did not appear within ${compositor_timeout}s"
+    exit 1
+  fi
+  sleep 0.25 || true
+  compositor_waited=$((compositor_waited + 1))
+done
+log "parent compositor socket ready: $parent_wayland_display"
+
+# --- First-run $HOME init (idempotent) --------------------------------------
+# Every step is safe to repeat on every boot, so no marker file is needed (a
+# marker would also go stale against a $HOME volume restored from backup).
+# xdg-user-dirs-update is idempotent by design; `flatpak remote-add
+# --if-not-exists` is a no-op when flathub is already configured; `flatpak
+# override` rewrites the same user override file each time.
+if command -v xdg-user-dirs-update >/dev/null 2>&1; then
+  xdg-user-dirs-update || log "WARNING: xdg-user-dirs-update failed; \$HOME user dirs may be missing"
+fi
+if command -v flatpak >/dev/null 2>&1; then
+  # NEVER fatal: the desktop must start with no network at all. gnome-software
+  # simply shows no Flathub content until a later boot succeeds.
+  flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo \
+    || log "WARNING: could not add the Flathub user remote (offline?); Software will have no Flatpak source"
+
+  # Flatpak apps must NOT reach the parent Wayland compositor (games-on-whales
+  # ships the same override in apps/xfce/build-fedora/scripts/launch-comp.sh).
+  # The container's Wayland socket is the *node-agent's* -- the surface the
+  # stream is composited from -- and flatpak's default sandbox hands
+  # --socket=wayland to any app whose manifest asks for it. A Wayland-capable
+  # Flatpak would then bypass this session's Xwayland entirely and map its
+  # window as a sibling of the whole desktop instead of a window inside it:
+  # invisible to xfwm4, unfocusable, and fighting the desktop for the stream.
+  # Forcing the X11 path keeps every Flatpak inside the session.
+  flatpak override --user --nosocket=wayland \
+    || log "WARNING: could not write the flatpak --nosocket=wayland user override; Flatpak apps may render outside the session"
+fi
+
+# --- Game menu + Flatpak menu entries ---------------------------------------
+# The node-agent may bind-mount agent-generated .desktop entries at
+# /run/quasar/share (a full XDG data dir: applications/, icons/, ...). Absent is
+# the normal standalone case: no games section, no error. The user Flatpak
+# exports dir is appended unconditionally so Flatpaks the user installs through
+# Software surface in the Whisker menu without a re-login (the dir is created by
+# flatpak on first install; a non-existent entry in XDG_DATA_DIRS is ignored).
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+if [[ -d /run/quasar/share ]]; then
+  export XDG_DATA_DIRS="${XDG_DATA_DIRS}:/run/quasar/share"
+  log "game menu mount detected: /run/quasar/share added to XDG_DATA_DIRS"
+fi
+export XDG_DATA_DIRS="${XDG_DATA_DIRS}:${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/exports/share"
+
+# --- Xwayland socket directory ----------------------------------------------
+# /tmp/.X11-unix is created by systemd-tmpfiles on a normal host and by nothing
+# at all in a container. Rootful Xwayland binds its listening socket at
+# /tmp/.X11-unix/X0, so without this directory the server exits immediately and
+# there is no display for XFCE (or for the desktop Steam client, a plain X11
+# app) to connect to. Same lesson as quasar-kde, where the missing directory
+# stalled the whole Plasma startup sequence.
+mkdir -p /tmp/.X11-unix 2>/dev/null || true
+chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+if [[ ! -d /tmp/.X11-unix ]]; then
+  log "FATAL: /tmp/.X11-unix could not be created; rootful Xwayland cannot bind its socket"
+  exit 1
+fi
+
+# --- Nested output size (quasar#384) ----------------------------------------
+# Quasar injects the session's streamed mode as QUASAR_STREAM_WIDTH/HEIGHT/FPS;
+# NOTHING is baked as ENV in the Dockerfile (a baked 1920x1080 would silently
+# downscale every non-1080p session, which is the exact quasar#384 defect).
+# QUASAR_XFCE_* wins as an explicit per-app pin; the literals are the last
+# resort for a bare `docker run`.
+xfce_width="${QUASAR_XFCE_WIDTH:-${QUASAR_STREAM_WIDTH:-1920}}"
+xfce_height="${QUASAR_XFCE_HEIGHT:-${QUASAR_STREAM_HEIGHT:-1080}}"
+# Recorded and logged for parity with the Steam launcher's mode contract, but
+# NOT passed to Xwayland: an X server nested on Wayland is driven by the parent
+# compositor's frame callbacks and has no refresh-rate flag (`-fakescreenfps`
+# exists but only fakes the *reported* rate for headless clients). The parent's
+# rate is authoritative.
+xfce_refresh="${QUASAR_XFCE_REFRESH:-${QUASAR_STREAM_FPS:-60}}"
+[[ "$xfce_width"  =~ ^[0-9]+$ ]] || { log "WARNING: non-numeric width override; using 1920";  xfce_width=1920; }
+[[ "$xfce_height" =~ ^[0-9]+$ ]] || { log "WARNING: non-numeric height override; using 1080"; xfce_height=1080; }
+
+# --- How XFCE gets its size: rootful Xwayland -geometry ----------------------
+# Decision + evidence, settled empirically on the dev box against the actual
+# package set (xorg-x11-server-Xwayland 24.1.13-1.fc43, Fedora 43). XFCE is
+# X11-only -- there is no Wayland session to nest -- so the display server is a
+# ROOTFUL Xwayland running as a client of the parent compositor, and the X
+# screen it exposes is the size of its own window on that parent.
+#
+#   `Xwayland -help` on this build lists, verbatim:
+#     -geometry WxH          set Xwayland window size when rootful
+#     -fullscreen            run fullscreen when rootful
+#     -output                specify which output to use for fullscreen when rootful
+#     -decorate              add decorations to Xwayland when rootful
+#   so -geometry is supported directly and is the whole mechanism. No xrandr
+#   pass, no RANDR mode-add and no -fullscreen/-output dance is needed (and
+#   -fullscreen would be wrong: it sizes to a parent *output*, but the agent
+#   compositor advertises whatever mode the stream negotiated, which is exactly
+#   what QUASAR_STREAM_* already tells us).
+#
+# NOTE for the black-stream class of bug (quasar-kde's KWIN_USE_OVERLAYS=0):
+# rootful Xwayland presents its entire X root window as ONE wl_surface and does
+# not offload windows to wl_subsurfaces, so it has no overlay path to take and
+# the parent compositor's root-surface capture sees the real desktop. Verified
+# live, not assumed -- see the luma smoke recorded in the branch notes.
+#
+# `-retro` (the classic grey weave root window) is deliberately NOT passed: a
+# non-black root would mask exactly the failure the live luma smoke exists to
+# catch. A black root means "nothing is drawing"; keep it that way.
+xwayland_args=(:0 -geometry "${xfce_width}x${xfce_height}")
+
+# --- Launch: rootful Xwayland ------------------------------------------------
+# Re-check right before backgrounding: a TERM/INT could have landed anywhere in
+# the first-run init / preflight above (on_term already ran -- shutting_down=1,
+# and both pids are still unset so it had nothing to relay to).
+if [[ "$shutting_down" == "1" ]]; then
+  log "shutdown requested during startup; exiting without launching XFCE"
+  exit 143
+fi
+
+log "starting rootful Xwayland :0 (${xfce_width}x${xfce_height}@${xfce_refresh}, nested on $parent_wayland_display)"
+# Xwayland is the ONLY process that gets the parent socket -- passed in its own
+# environment rather than exported, so nothing else can inherit it.
+WAYLAND_DISPLAY="$parent_wayland_display" Xwayland "${xwayland_args[@]}" &
+xwayland_pid=$!
+
+# --- Session environment: X11 only -------------------------------------------
+# WAYLAND_DISPLAY is UNSET here -- the exact INVERSE of quasar-kde, where kwin
+# is itself the nested Wayland client and needs the parent socket for the whole
+# session lifetime. Here the nested client is Xwayland, which already has the
+# socket in its own environment (above). Every process in the XFCE session is an
+# X11 client of that Xwayland; if any of them found WAYLAND_DISPLAY set they
+# would connect to the PARENT compositor instead and map their windows as
+# siblings of the whole desktop -- outside the session, unmanaged by xfwm4, and
+# fighting the desktop for the stream. GTK, Qt and SDL all prefer Wayland when
+# the variable is present, so unsetting it is the only reliable gate.
+# games-on-whales does the same thing (apps/xfce/build-fedora/scripts/
+# launch-comp.sh: `export REAL_WAYLAND_DISPLAY=$WAYLAND_DISPLAY; unset
+# WAYLAND_DISPLAY`). The toolkit pins below are belt-and-braces for anything
+# that ignores the unset.
+unset WAYLAND_DISPLAY
+export DISPLAY=:0
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=XFCE
+export DESKTOP_SESSION=xfce
+export GDK_BACKEND=x11
+export QT_QPA_PLATFORM=xcb
+export MOZ_ENABLE_WAYLAND=0
+# Java/AWT window managers misplace windows under reparenting WMs unless told
+# otherwise; xfwm4 reparents. Same line games-on-whales ships.
+export _JAVA_AWT_WM_NONREPARENTING=1
+
+# --- Wait for the X server to accept connections -----------------------------
+# Bounded, for the same reason the parent-compositor wait is: never infinite.
+# The socket file appearing is necessary but not sufficient (Xwayland binds
+# before it finishes initialising), so the readiness probe is an actual X
+# round-trip via xset, which ships with the inherited xorg-x11-server-Xwayland
+# dependency set. games-on-whales uses a flat `sleep 2` here; a probe is
+# strictly better and costs nothing when the server is fast.
+x_waited=0
+x_max=$(( compositor_timeout * 4 ))  # 0.25s poll ticks, same budget
+while :; do
+  if [[ -e /tmp/.X11-unix/X0 ]] && xset -q >/dev/null 2>&1; then
+    break
+  fi
+  if [[ "$shutting_down" == "1" ]]; then
+    log "shutdown requested while waiting for Xwayland; exiting without launching XFCE"
+    exit 143
+  fi
+  if ! kill -0 "$xwayland_pid" 2>/dev/null; then
+    log "FATAL: Xwayland exited before the X display became available"
+    exit 1
+  fi
+  if (( x_waited >= x_max )); then
+    log "FATAL: X display :0 did not become available within ${compositor_timeout}s"
+    exit 1
+  fi
+  sleep 0.25 || true
+  x_waited=$((x_waited + 1))
+done
+log "X display :0 ready (rootful Xwayland pid $xwayland_pid)"
+
+# --- Launch: the XFCE session ------------------------------------------------
+# dbus-run-session gives the whole session one session bus (there is no systemd
+# --user to provide one, and xfconfd/Thunar/xfce4-session all need it). It EXECS
+# its program rather than forking it, and startxfce4 with DISPLAY already set
+# takes its `prog=/bin/sh` path and `exec`s /etc/xdg/xfce4/xinitrc, which itself
+# ends in `exec ${XFCE4_SESSION_COMPOSITOR:-xfce4-session}` -- so session_pid
+# below ends up being xfce4-session itself and the shutdown relay TERMs the
+# session leader directly.
+session=(dbus-run-session -- startxfce4)
+
+if [[ "$shutting_down" == "1" ]]; then
+  log "shutdown requested during startup; exiting without launching XFCE"
+  exit 143
+fi
+
+log "starting XFCE session on DISPLAY=$DISPLAY"
+"${session[@]}" &
+session_pid=$!
+# A non-zero/signal exit here (e.g. 143) after an already-clean shutdown relay is
+# expected docker-stop signal-exit semantics, not a failure -- intentional.
+if wait_for_exit "$session_pid"; then rc=0; else rc=$?; fi
+log "XFCE session exited (rc=$rc)"
+
+# The session is the lifecycle owner: when it ends (user logout, or the relay
+# above), the display server has nothing left to serve. Bounded, never a
+# group-kill, and a no-op if the relay already took it down.
+if [[ -n "$xwayland_pid" ]] && kill -0 "$xwayland_pid" 2>/dev/null; then
+  log "session over; stopping Xwayland (pid $xwayland_pid)"
+  kill -TERM "$xwayland_pid" 2>/dev/null || true
+  await_pid_exit "$xwayland_pid" "Xwayland"
+fi
+
+exit "$rc"
