@@ -27,6 +27,26 @@
       "notes": "no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'. network MUST be \"bridge\": Steam's first boot downloads steamui.so and clean-exits fatal under the hardened --network none default (first-run-experience spec §S2, #463) — this maps onto the runtime_presets.network column, hardened default stays \"none\" for every other image."
     },
     {
+      "id": "kde-desktop",
+      "display_name": "KDE Desktop",
+      "description": "KDE Plasma 6 Wayland desktop session with the Steam desktop client, user-level Flatpak (Discover), and Quasar branding. Runs nested under the Quasar compositor; the whole mutable state lives in the /home/quasar volume (org.quasar.image.persist). Needs a host --shm-size bump and PUID/PGID matching the managed home, like Steam.",
+      "kind": "prebuilt",
+      "version": "2026.08.14",
+      "registry_ref": "ghcr.io/accretion-io/quasar-kde@sha256:9b2a0179f6a528f0c6565b2835ea6492ed494378986ecc63a175ecfc4a0e0a17",
+      "runtime": {
+        "preset_name": "KDE Desktop",
+        "gpu": true,
+        "no_new_privileges": false,
+        "managed_home": true,
+        "home_container_path": "/home/quasar",
+        "network": "bridge",
+        "args": [],
+        "env": {},
+        "mounts": []
+      },
+      "notes": "no_new_privileges MUST be false: the bundled Steam desktop client's startup re-escalates via sudo, same as the steam image. network MUST be \"bridge\" (Steam sign-in/downloads). Desktop-session host requirements beyond the preset (agent-side, not yet preset-mappable): unprivileged user namespaces (seccomp permitting CLONE_NEWUSER — the agent's seccomp=unconfined covers it) AND unmasked /proc (--security-opt systempaths=unconfined) for user Flatpak's bwrap; without the latter flatpak install works but flatpak run fails mounting /proc (live-verified 2026-08-13). One running session per home volume (org.quasar.image.session=desktop)."
+    },
+    {
       "id": "quasar-probe",
       "display_name": "Quasar Probe (template)",
       "description": "Minimal template image used to validate the P4 agent-side build path. FROM alpine, no package installs — builds in seconds. Not a production app; safe to install/uninstall as a mechanism check.",
