@@ -14,7 +14,11 @@ LABEL org.opencontainers.image.title="Quasar KDE Plasma desktop" \
 
 # Session: plasma-desktop plasma-workspace-wayland kwin (dbus-daemon already
 # inherited from quasar-steam-runtime). Portal: xdg-desktop-portal-kde. Apps:
-# konsole dolphin. Flatpak: flatpak plasma-discover plasma-discover-flatpak.
+# konsole dolphin firefox (a desktop without a browser gives the user no way
+# to even confirm networking works — operator request 2026-08-14; native
+# package, not a flatpak, so it exists before any per-home flatpak state and
+# runs Wayland-native out of the box).
+# Flatpak: flatpak plasma-discover plasma-discover-flatpak.
 # Fonts: google-noto-sans-fonts google-noto-emoji-fonts
 # google-noto-sans-mono-fonts. xdg-user-dirs for first-run $HOME layout.
 # Lean-image principle: weak deps off, no docs, dnf cache cleaned in-layer.
@@ -24,7 +28,7 @@ LABEL org.opencontainers.image.title="Quasar KDE Plasma desktop" \
 # baloofilerc below (see overlay/etc/xdg/baloofilerc) rather than force-removed.
 RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
       plasma-desktop plasma-workspace-wayland kwin xdg-desktop-portal-kde \
-      konsole dolphin \
+      konsole dolphin firefox \
       flatpak plasma-discover plasma-discover-flatpak \
       google-noto-sans-fonts google-noto-emoji-fonts google-noto-sans-mono-fonts \
       xdg-user-dirs \
