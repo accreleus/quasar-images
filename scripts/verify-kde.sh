@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-for executable in startplasma-wayland kwin_wayland dbus-run-session flatpak steam bwrap quasar-kde xdg-user-dirs-update; do
+for executable in startplasma-wayland kwin_wayland dbus-run-session flatpak steam bwrap quasar-kde xdg-user-dirs-update firefox; do
   docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc "command -v $executable >/dev/null"
 done
 
