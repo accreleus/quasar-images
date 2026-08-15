@@ -5,7 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 for executable in startxfce4 xfce4-session xfwm4 xfce4-panel xfdesktop Xwayland xset \
-                  dbus-run-session flatpak gnome-software steam bwrap quasar-xfce \
+                  dbus-run-session flatpak gnome-software firefox steam bwrap quasar-xfce \
                   xdg-user-dirs-update; do
   docker run --rm --entrypoint /bin/bash quasar-xfce:dev -lc "command -v $executable >/dev/null"
 done
@@ -54,6 +54,13 @@ docker run --rm --entrypoint /bin/bash quasar-xfce:dev -lc '
   grep -q "QUASAR_XFCE_SHUTDOWN_TIMEOUT:-8" "$xfce"
   grep -q "QUASAR_XFCE_COMPOSITOR_TIMEOUT:-30" "$xfce"
   grep -q "flatpak remote-add --user --if-not-exists flathub" "$xfce"
+  # Flatpak/gnome-software usable at all (parity with quasar-kde, 2026-08-15):
+  # the empty SYSTEM installation must exist or every flatpak call -- and
+  # gnome-software'"'"'s flatpak backend -- fails "opening repo:
+  # opendir(/var/lib/flatpak/repo)"; the fwupd gnome-software plugin must be
+  # gone (no firmware in a container, only error dialogs).
+  test -f /var/lib/flatpak/repo/config
+  test ! -e /usr/lib64/gnome-software/plugins-*/libgs_plugin_fwupd.so
   grep -q "xdg-user-dirs-update" "$xfce"
   grep -q "/run/quasar/share" "$xfce"
 

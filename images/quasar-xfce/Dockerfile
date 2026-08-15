@@ -15,7 +15,10 @@ LABEL org.opencontainers.image.title="Quasar XFCE desktop" \
 # Session: xfce4-session xfwm4 xfce4-panel xfdesktop xfce4-settings xfconf,
 # plus xorg-x11-server-Xwayland (NOT inherited -- quasar-steam-runtime has no
 # X server; verified on the dev box) and dbus-x11 for dbus-launch/dbus-run-session
-# against an X11 session. Apps: xfce4-terminal thunar xfce4-taskmanager mousepad.
+# against an X11 session. Apps: xfce4-terminal thunar xfce4-taskmanager mousepad
+# firefox (same operator rationale as quasar-kde -- a desktop without a browser
+# gives no way to confirm networking works; native RPM, not a flatpak, so it
+# exists before any per-home flatpak state).
 # Menu: xfce4-whiskermenu-plugin. Flatpak: flatpak (NOT inherited) + gnome-software
 # as the GUI store. Fonts: google-noto-sans-fonts google-noto-emoji-fonts
 # google-noto-sans-mono-fonts. xdg-user-dirs for first-run $HOME layout.
@@ -40,13 +43,35 @@ LABEL org.opencontainers.image.title="Quasar XFCE desktop" \
 RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
       xfce4-session xfwm4 xfce4-panel xfdesktop xfce4-settings xfconf \
       xorg-x11-server-Xwayland dbus-x11 \
-      xfce4-terminal thunar xfce4-taskmanager mousepad \
+      xfce4-terminal thunar xfce4-taskmanager mousepad firefox \
       xfce4-whiskermenu-plugin \
       flatpak gnome-software \
       google-noto-sans-fonts google-noto-emoji-fonts google-noto-sans-mono-fonts \
       xdg-user-dirs \
     && dnf clean all \
     && rm -rf /var/cache/dnf
+
+# Two post-install fixups (parity with quasar-kde, live-verified on the dev box):
+# 1. gnome-software ships an fwupd (firmware) backend plugin as part of its main
+#    package (/usr/lib64/gnome-software/plugins-*/libgs_plugin_fwupd.so, verified
+#    via `rpm -ql gnome-software` on the dev box); there is no firmware to manage
+#    inside a container and the plugin only produces "Update Issue" errors on
+#    every launch, the same symptom quasar-kde hit with Discover's fwupd backend.
+#    Remove the plugin file only -- it is part of the gnome-software package
+#    itself, not a separate subpackage, so there is no fwupd daemon package to
+#    keep around for a dependent (unlike plasma-discover-flatpak's dependency on
+#    the fwupd package in quasar-kde).
+# 2. Flatpak refuses EVERY operation, including user-scope ones, until the
+#    SYSTEM installation dir exists: "While opening repository
+#    /var/lib/flatpak/repo: opening repo: opendir(...): No such file or
+#    directory". gnome-software's flatpak backend hits the same error and
+#    reports missing backends even though the launcher already added the
+#    user-scope Flathub remote. Any --system query as root initialises the
+#    empty repo; it stays empty -- installs go to the user scope in the
+#    persistent $HOME (unprivileged, no polkit/system-helper needed).
+RUN rm -f /usr/lib64/gnome-software/plugins-*/libgs_plugin_fwupd.so \
+    && flatpak remotes --system >/dev/null \
+    && test -f /var/lib/flatpak/repo/config
 
 # xfce-polkit is pulled in as a hard dependency of this set. Its authentication
 # agent calls polkit_unix_session_new_for_process_sync() at startup, which needs
