@@ -14,6 +14,11 @@ LABEL org.opencontainers.image.title="Quasar KDE Plasma desktop" \
 
 # Session: plasma-desktop plasma-workspace-wayland kwin (dbus-daemon already
 # inherited from quasar-steam-runtime). Portal: xdg-desktop-portal-kde. Apps:
+# kscreen: the Display Configuration KCM (System Settings -> Display) — the
+# scaling and per-output settings UI; without it there is no way to change
+# display scaling from inside the session (operator report 2026-08-15). The
+# nested output offers a single mode = the streamed resolution (quasar#384),
+# so the resolution list is one entry by design; scaling is what this buys.
 # konsole dolphin firefox (a desktop without a browser gives the user no way
 # to even confirm networking works — operator request 2026-08-14; native
 # package, not a flatpak, so it exists before any per-home flatpak state and
@@ -30,10 +35,28 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
       plasma-desktop plasma-workspace-wayland kwin xdg-desktop-portal-kde \
       konsole dolphin firefox \
       flatpak plasma-discover plasma-discover-flatpak \
+      kscreen \
       google-noto-sans-fonts google-noto-emoji-fonts google-noto-sans-mono-fonts \
       xdg-user-dirs \
     && dnf clean all \
     && rm -rf /var/cache/dnf
+
+# Two post-install fixups (live-verified 2026-08-15):
+# 1. Discover ships a firmware (fwupd) backend as a hard dependency; there is
+#    no firmware to manage inside a container and the backend only produces
+#    "Update Issue" errors on every launch. Remove the plugin, keep the package
+#    (removing fwupd would take plasma-discover with it).
+# 2. Flatpak refuses EVERY operation, including user-scope ones, until the
+#    SYSTEM installation dir exists: "While opening repository
+#    /var/lib/flatpak/repo: opening repo: opendir(...): No such file or
+#    directory". Discover's flatpak backend hits the same error and reports
+#    "Missing Backends" even though the launcher already added the user-scope
+#    Flathub remote. Any --system query as root initialises the empty repo; it
+#    stays empty -- installs go to the user scope in the persistent $HOME
+#    (unprivileged, no polkit/system-helper needed).
+RUN rm -f /usr/lib64/qt6/plugins/discover/fwupd-backend.so \
+    && flatpak remotes --system >/dev/null \
+    && test -f /var/lib/flatpak/repo/config
 
 # Baked Plasma defaults for a container-streamed session (no local display to
 # lock/dim/suspend; per-user config in $HOME still wins if a user changes it).

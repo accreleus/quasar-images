@@ -52,6 +52,15 @@ docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc '
   grep -q "QUASAR_KDE_SHUTDOWN_TIMEOUT:-8" "$kde"
   grep -q "QUASAR_KDE_COMPOSITOR_TIMEOUT:-30" "$kde"
   grep -q "flatpak remote-add --user --if-not-exists flathub" "$kde"
+  # Flatpak/Discover usable at all (2026-08-15): the empty SYSTEM installation
+  # must exist or every flatpak call -- and the Discover flatpak backend -- fails
+  # "opening repo: opendir(/var/lib/flatpak/repo)"; the fwupd Discover backend
+  # must be gone (no firmware in a container, only error dialogs); kscreen must
+  # be present or there is no Display/scaling settings page.
+  test -f /var/lib/flatpak/repo/config
+  test ! -e /usr/lib64/qt6/plugins/discover/fwupd-backend.so
+  test -f /usr/lib64/qt6/plugins/discover/flatpak-backend.so
+  test -f /usr/share/applications/kcm_kscreen.desktop
   grep -q "xdg-user-dirs-update" "$kde"
   grep -q "/run/quasar/share" "$kde"
 
