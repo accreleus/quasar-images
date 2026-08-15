@@ -55,6 +55,9 @@ jobs:
       - name: Verify KDE launcher wiring
         run: ./scripts/verify-kde.sh
 
+      - name: Verify XFCE launcher wiring
+        run: ./scripts/verify-xfce.sh
+
   # ── Publish: stable pushes, release tags, and explicit dispatches. ──────────
   publish:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -98,6 +101,9 @@ jobs:
       - name: Verify KDE launcher wiring
         run: ./scripts/verify-kde.sh
 
+      - name: Verify XFCE launcher wiring
+        run: ./scripts/verify-xfce.sh
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -139,7 +145,7 @@ jobs:
           # absent: they are local-only GPU probes (./scripts/build.sh still
           # builds them) and nothing consumes them from a registry, so paying
           # build+push time for them on every stable push bought nothing.
-          for image in quasar-base quasar-app quasar-diagnostics quasar-steam-runtime quasar-steam quasar-kde; do
+          for image in quasar-base quasar-app quasar-diagnostics quasar-steam-runtime quasar-steam quasar-kde quasar-xfce; do
             remote="$REGISTRY/$OWNER/$image"
             # Push the immutable tag ONCE, then add every moving channel tag as
             # a registry-side manifest copy. A `docker tag` + `docker push` per
