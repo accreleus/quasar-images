@@ -31,8 +31,8 @@
       "display_name": "KDE Desktop",
       "description": "KDE Plasma 6 Wayland desktop session with the Steam desktop client, user-level Flatpak (Discover), and Quasar branding. Runs nested under the Quasar compositor; the whole mutable state lives in the /home/quasar volume (org.quasar.image.persist). Needs a host --shm-size bump and PUID/PGID matching the managed home, like Steam.",
       "kind": "prebuilt",
-      "version": "2026.08.14.2",
-      "registry_ref": "ghcr.io/accretion-io/quasar-kde@sha256:5bf4dd05b7513d27faf342f378d458206f9af9f742197c1e7566056cd61b1c2a",
+      "version": "2026.08.15",
+      "registry_ref": "ghcr.io/accretion-io/quasar-kde@sha256:a44b94009af5ae23faf20052975121c4f1145c37ab70a48afc9eda2a39c812f8",
       "runtime": {
         "preset_name": "KDE Desktop",
         "gpu": true,
