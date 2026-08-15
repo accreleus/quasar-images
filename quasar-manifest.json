@@ -7,8 +7,8 @@
       "display_name": "Steam",
       "description": "Steam in a game-console experience through nested Gamescope (legacy Big Picture, the games-on-whales-validated game-foreground path). Needs a host --shm-size bump, 32-bit graphics libraries, and PUID/PGID matching the managed home.",
       "kind": "prebuilt",
-      "version": "2026.08.09.1",
-      "registry_ref": "ghcr.io/accretion-io/quasar-steam@sha256:009ad4633d655ec1e65d51a3807d6734d5643126f9a0c0903f955d21cc33a5cf",
+      "version": "2026.08.14",
+      "registry_ref": "ghcr.io/accretion-io/quasar-steam@sha256:16666d15f9c1e2493f50646cf6ce3eb22c362258571c28bdd6ef463e6f88d1f5",
       "library_provider": "steam",
       "artwork": {
         "tile": "images/quasar-steam/artwork/tile.png"
@@ -31,8 +31,8 @@
       "display_name": "KDE Desktop",
       "description": "KDE Plasma 6 Wayland desktop session with the Steam desktop client, user-level Flatpak (Discover), and Quasar branding. Runs nested under the Quasar compositor; the whole mutable state lives in the /home/quasar volume (org.quasar.image.persist). Needs a host --shm-size bump and PUID/PGID matching the managed home, like Steam.",
       "kind": "prebuilt",
-      "version": "2026.08.14",
-      "registry_ref": "ghcr.io/accretion-io/quasar-kde@sha256:9b2a0179f6a528f0c6565b2835ea6492ed494378986ecc63a175ecfc4a0e0a17",
+      "version": "2026.08.14.1",
+      "registry_ref": "ghcr.io/accretion-io/quasar-kde@sha256:0074fd2ce556980be4527c9c1ae931f354dd3b56343bb95f5e8975ad897ba090",
       "runtime": {
         "preset_name": "KDE Desktop",
         "gpu": true,
