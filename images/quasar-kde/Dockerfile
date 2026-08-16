@@ -1,5 +1,12 @@
 ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
 
+# Exact kwin source package the patch is written against. PINNED, not "whatever
+# dnf has today": a Fedora kwin update needs the patch re-diffed (see the README,
+# "Patched KWin (nested mode ladder)"), and a floating version would apply the
+# patch to a moving target and fail -- or worse, apply with fuzz. Bumping this
+# ARG is the deliberate act that says "the re-diff was done".
+ARG KWIN_NVR=6.7.4-1.fc43
+
 # --- Patched KWin ------------------------------------------------------------
 # Fedora's kwin, rebuilt with images/quasar-kde/kwin/*.patch, so the NESTED
 # wayland backend advertises a real mode ladder and applies a resolution picked
@@ -10,13 +17,16 @@ ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
 # problem statement, and the README section "Patched KWin (nested mode ladder)"
 # for the recurring re-diff cost on a Fedora kwin update.
 #
-# This stage is DISCARDED: only /tmp/kwin-rpms is copied forward, so none of the
-# ~1.5 GB of build dependencies reaches the shipped image.
+# This stage is DISCARDED and its RPMs are never copied into a layer -- the
+# install below bind-mounts them instead -- so neither the ~1.5 GB of build
+# dependencies nor the ~100 MB of RPMs reaches the shipped image.
 #
 # Base is pinned to the same Fedora release the runtime family is built from --
 # an RPM built against a different release would not be interchangeable with the
 # kwin it replaces.
 FROM fedora:43 AS kwin-build
+ARG KWIN_NVR
+ENV QUASAR_KWIN_NVR=${KWIN_NVR}
 COPY images/quasar-kde/kwin/0001-nested-backend-mode-ladder.patch /tmp/kwin-patches/
 COPY images/quasar-kde/kwin/build-kwin.sh /usr/local/bin/build-kwin.sh
 RUN chmod 0755 /usr/local/bin/build-kwin.sh && /usr/local/bin/build-kwin.sh
@@ -24,7 +34,9 @@ RUN chmod 0755 /usr/local/bin/build-kwin.sh && /usr/local/bin/build-kwin.sh
 FROM ${STEAM_RUNTIME_IMAGE}
 
 ARG VERSION=0.1.0-dev
+ARG KWIN_NVR
 LABEL org.opencontainers.image.title="Quasar KDE Plasma desktop" \
+      org.quasar.kde.kwin="${KWIN_NVR}.quasar1" \
       org.quasar.image.contract="1" \
       org.quasar.image.family="fedora" \
       org.quasar.image.base.version="${VERSION}" \
@@ -38,9 +50,9 @@ LABEL org.opencontainers.image.title="Quasar KDE Plasma desktop" \
 # inherited from quasar-steam-runtime). Portal: xdg-desktop-portal-kde. Apps:
 # kscreen: the Display Configuration KCM (System Settings -> Display) — the
 # scaling and per-output settings UI; without it there is no way to change
-# display scaling from inside the session (operator report 2026-08-15). The
-# nested output offers a single mode = the streamed resolution (quasar#384),
-# so the resolution list is one entry by design; scaling is what this buys.
+# display scaling from inside the session (operator report 2026-08-15). With
+# the patched kwin installed below the resolution list is a real ladder too
+# (it used to be a single entry = the streamed resolution, quasar#384).
 # konsole dolphin firefox (a desktop without a browser gives the user no way
 # to even confirm networking works — operator request 2026-08-14; native
 # package, not a flatpak, so it exists before any per-home flatpak state and
@@ -63,19 +75,6 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# Two post-install fixups (live-verified 2026-08-15):
-# 1. Discover ships a firmware (fwupd) backend as a hard dependency; there is
-#    no firmware to manage inside a container and the backend only produces
-#    "Update Issue" errors on every launch. Remove the plugin, keep the package
-#    (removing fwupd would take plasma-discover with it).
-# 2. Flatpak refuses EVERY operation, including user-scope ones, until the
-#    SYSTEM installation dir exists: "While opening repository
-#    /var/lib/flatpak/repo: opening repo: opendir(...): No such file or
-#    directory". Discover's flatpak backend hits the same error and reports
-#    "Missing Backends" even though the launcher already added the user-scope
-#    Flathub remote. Any --system query as root initialises the empty repo; it
-#    stays empty -- installs go to the user scope in the persistent $HOME
-#    (unprivileged, no polkit/system-helper needed).
 # Install the patched kwin over the distro package. Same N-V-R plus a .quasar1
 # %dist suffix, so this is an ordinary upgrade of the same package, not a
 # replacement by a different one -- every other Plasma package's `Requires:
@@ -86,9 +85,14 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
 # silently fatten the image with things the session never runs; kwin's
 # subpackages are mutually version-locked, so a partial set that does NOT match
 # what is installed would break deps -- hence the explicit intersection.
-# --allowerasing covers a subpackage split changing between Fedora rebuilds.
-COPY --from=kwin-build /tmp/kwin-rpms /tmp/kwin-rpms
-RUN set -eu; \
+# --allowerasing covers a subpackage split changing between Fedora rebuilds
+# (dnf5 wants it AFTER the subcommand).
+#
+# The RPMs are BIND-MOUNTED from the builder stage rather than COPYed: a COPY
+# would persist ~100 MB of packages in a layer forever, and `rm -rf` in a later
+# layer cannot reclaim it. Nothing from the builder stage ends up in the image.
+RUN --mount=type=bind,from=kwin-build,source=/tmp/kwin-rpms,target=/tmp/kwin-rpms \
+    set -eu; \
     installed="$(rpm -qa --qf '%{NAME}\n' 'kwin*' | sort -u)"; \
     test -n "$installed"; \
     rpms=""; \
@@ -103,8 +107,21 @@ RUN set -eu; \
       install --allowerasing $rpms; \
     rpm -q kwin | grep -q '\.quasar'; \
     dnf clean all; \
-    rm -rf /var/cache/dnf /tmp/kwin-rpms
+    rm -rf /var/cache/dnf
 
+# Two post-install fixups (live-verified 2026-08-15):
+# 1. Discover ships a firmware (fwupd) backend as a hard dependency; there is
+#    no firmware to manage inside a container and the backend only produces
+#    "Update Issue" errors on every launch. Remove the plugin, keep the package
+#    (removing fwupd would take plasma-discover with it).
+# 2. Flatpak refuses EVERY operation, including user-scope ones, until the
+#    SYSTEM installation dir exists: "While opening repository
+#    /var/lib/flatpak/repo: opening repo: opendir(...): No such file or
+#    directory". Discover's flatpak backend hits the same error and reports
+#    "Missing Backends" even though the launcher already added the user-scope
+#    Flathub remote. Any --system query as root initialises the empty repo; it
+#    stays empty -- installs go to the user scope in the persistent $HOME
+#    (unprivileged, no polkit/system-helper needed).
 RUN rm -f /usr/lib64/qt6/plugins/discover/fwupd-backend.so \
     && flatpak remotes --system >/dev/null \
     && test -f /var/lib/flatpak/repo/config

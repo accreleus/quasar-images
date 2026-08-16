@@ -33,10 +33,12 @@ WHAT THIS PATCH DOES
    see the list churn. `applyChanges()` now honours `props->currentMode` and
    remembers the pick in `m_userMode`.
 
-3. Stickiness: the toplevel deliberately keeps filling the host's area, so the
-   host re-configures at the SAME size after a mode change. `applyConfigure()`
-   only drops `m_userMode` when the configure size actually CHANGES - a genuine
-   external resolution change. A same-size configure is just re-acked.
+3. Stickiness: a user-picked mode is INDEPENDENT of the host's configure size.
+   `applyConfigure()` never drops `m_userMode` because the size changed - Quasar
+   steps the streamed (external) resolution live, and an external step must not
+   throw away the user's chosen internal resolution. The pick only degrades, to
+   the new native size, when it no longer FITS inside it. It likewise survives
+   the same-size configure the host sends right after a mode change.
 
 4. Fit-to-host: the root surface's `wp_viewport` destination is pinned to the
    host-configured logical size, and the content subsurfaces
@@ -69,8 +71,8 @@ WHAT THIS PATCH DOES
 host's, not arbitrary user-defined modelines.
 
 diff -uNr a/src/backends/wayland/wayland_backend.cpp b/src/backends/wayland/wayland_backend.cpp
---- a/src/backends/wayland/wayland_backend.cpp	2026-08-16 10:32:10
-+++ b/src/backends/wayland/wayland_backend.cpp	2026-08-16 10:32:10
+--- a/src/backends/wayland/wayland_backend.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_backend.cpp	2026-08-16 11:12:26
 @@ -107,8 +107,12 @@
          WaylandOutput *output = m_seat->backend()->findOutput(m_pointer->enteredSurface());
          Q_ASSERT(output);
@@ -86,9 +88,54 @@ diff -uNr a/src/backends/wayland/wayland_backend.cpp b/src/backends/wayland/wayl
          Q_EMIT pointerMotionAbsolute(absolutePos, std::chrono::milliseconds(time), this);
      });
      connect(pointer, &Pointer::buttonStateChanged, this, [this](quint32 serial, quint32 time, quint32 button, Pointer::ButtonState nativeState) {
+@@ -181,6 +185,11 @@
+     : m_seat(seat)
+     , m_relativePointer(relativePointer)
+ {
++    // Quasar NOTE: relative-pointer deltas are NOT mapped through contentScale().
++    // A relative pointer has no output association (upstream does not scale these
++    // by output scale either), and this path only runs while the pointer is
++    // explicitly locked via the nested backend's right-ctrl grab - a debugging
++    // affordance, not the streamed session's input path. Left as upstream.
+     connect(relativePointer, &RelativePointer::relativeMotion, this, [this](const QSizeF &delta, const QSizeF &deltaNonAccelerated, quint64 timestamp) {
+         Q_EMIT pointerMotion(sizeToPoint(delta), sizeToPoint(deltaNonAccelerated), std::chrono::microseconds(timestamp), this);
+     });
+@@ -196,16 +205,21 @@
+     connect(touch, &Touch::frameEnded, this, [this]() {
+         Q_EMIT touchFrame(this);
+     });
++    // Quasar: tp->position() is in the HOST's logical coordinates, exactly like
++    // wl_pointer motion - so it needs the same mapFromParent() inverse of the
++    // content scale/offset. Identity while the output runs at the host-configured
++    // size. (Upstream never adds a subsurface offset on the touch path the way it
++    // does for the pointer; that gap is pre-existing and untouched here.)
+     connect(touch, &Touch::sequenceStarted, this, [this](TouchPoint *tp) {
+         auto o = m_seat->backend()->findOutput(tp->surface());
+         Q_ASSERT(o);
+-        const QPointF position = o->position() + tp->position();
++        const QPointF position = o->position() + o->mapFromParent(tp->position());
+         Q_EMIT touchDown(tp->id(), position, std::chrono::milliseconds(tp->time()), this);
+     });
+     connect(touch, &Touch::pointAdded, this, [this](TouchPoint *tp) {
+         auto o = m_seat->backend()->findOutput(tp->surface());
+         Q_ASSERT(o);
+-        const QPointF position = o->position() + tp->position();
++        const QPointF position = o->position() + o->mapFromParent(tp->position());
+         Q_EMIT touchDown(tp->id(), position, std::chrono::milliseconds(tp->time()), this);
+     });
+     connect(touch, &Touch::pointRemoved, this, [this](TouchPoint *tp) {
+@@ -214,7 +228,7 @@
+     connect(touch, &Touch::pointMoved, this, [this](TouchPoint *tp) {
+         auto o = m_seat->backend()->findOutput(tp->surface());
+         Q_ASSERT(o);
+-        const QPointF position = o->position() + tp->position();
++        const QPointF position = o->position() + o->mapFromParent(tp->position());
+         Q_EMIT touchMotion(tp->id(), position, std::chrono::milliseconds(tp->time()), this);
+     });
+ }
 diff -uNr a/src/backends/wayland/wayland_display.cpp b/src/backends/wayland/wayland_display.cpp
---- a/src/backends/wayland/wayland_display.cpp	2026-08-16 10:32:10
-+++ b/src/backends/wayland/wayland_display.cpp	2026-08-16 10:32:10
+--- a/src/backends/wayland/wayland_display.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_display.cpp	2026-08-16 11:12:26
 @@ -24,6 +24,7 @@
  #include <QThread>
  #include <QWaitCondition>
@@ -217,8 +264,8 @@ diff -uNr a/src/backends/wayland/wayland_display.cpp b/src/backends/wayland/wayl
  
  }
 diff -uNr a/src/backends/wayland/wayland_display.h b/src/backends/wayland/wayland_display.h
---- a/src/backends/wayland/wayland_display.h	2026-08-16 10:32:10
-+++ b/src/backends/wayland/wayland_display.h	2026-08-16 10:32:10
+--- a/src/backends/wayland/wayland_display.h	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_display.h	2026-08-16 11:12:26
 @@ -7,11 +7,16 @@
  #pragma once
  
@@ -285,8 +332,8 @@ diff -uNr a/src/backends/wayland/wayland_display.h b/src/backends/wayland/waylan
      wl_display *m_display = nullptr;
      wl_registry *m_registry = nullptr;
 diff -uNr a/src/backends/wayland/wayland_egl_backend.cpp b/src/backends/wayland/wayland_egl_backend.cpp
---- a/src/backends/wayland/wayland_egl_backend.cpp	2026-08-16 10:32:10
-+++ b/src/backends/wayland/wayland_egl_backend.cpp	2026-08-16 10:32:10
+--- a/src/backends/wayland/wayland_egl_backend.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_egl_backend.cpp	2026-08-16 11:12:26
 @@ -202,7 +202,12 @@
      wl_buffer *buffer = m_backend->backend()->importBuffer(m_buffer->buffer());
      Q_ASSERT(buffer);
@@ -302,8 +349,8 @@ diff -uNr a/src/backends/wayland/wayland_egl_backend.cpp b/src/backends/wayland/
      EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
      m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
 diff -uNr a/src/backends/wayland/wayland_layer.cpp b/src/backends/wayland/wayland_layer.cpp
---- a/src/backends/wayland/wayland_layer.cpp	2026-08-16 10:32:10
-+++ b/src/backends/wayland/wayland_layer.cpp	2026-08-16 10:32:10
+--- a/src/backends/wayland/wayland_layer.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_layer.cpp	2026-08-16 11:12:26
 @@ -95,7 +95,15 @@
      // this is a bit annoying, we need a new Wayland protocol
      // to do this properly with fractional scaling. Until we
@@ -322,9 +369,17 @@ diff -uNr a/src/backends/wayland/wayland_layer.cpp b/src/backends/wayland/waylan
          m_viewport->setSource(sourceRect());
          m_viewport->setDestination(logicalTarget.size());
 diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
---- a/src/backends/wayland/wayland_output.cpp	2026-08-16 10:32:10
-+++ b/src/backends/wayland/wayland_output.cpp	2026-08-16 10:32:10
-@@ -37,6 +37,8 @@
+--- a/src/backends/wayland/wayland_output.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_output.cpp	2026-08-16 11:12:26
+@@ -17,6 +17,7 @@
+ #include "wayland_backend.h"
+ #include "wayland_display.h"
+ #include "wayland_layer.h"
++#include "wayland_logging.h"
+ 
+ #include <KWayland/Client/compositor.h>
+ #include <KWayland/Client/pointer.h>
+@@ -37,6 +38,8 @@
  
  #include <QPainter>
  
@@ -333,7 +388,7 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
  #include <cmath>
  #include <ranges>
  
-@@ -169,6 +171,9 @@
+@@ -169,6 +172,9 @@
          xdg_toplevel_icon_v1_destroy(toplevelIcon);
      }
  
@@ -343,7 +398,7 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
      connect(m_xdgShellSurface.get(), &XdgShellSurface::configureRequested, this, &WaylandOutput::handleConfigure);
      connect(m_xdgShellSurface.get(), &XdgShellSurface::closeRequested, qApp, &QCoreApplication::quit);
      connect(this, &WaylandOutput::enabledChanged, this, &WaylandOutput::updateWindowTitle);
-@@ -312,7 +317,14 @@
+@@ -312,7 +318,14 @@
          m_surface->attachBuffer(buffer);
          m_mapped = true;
      }
@@ -359,7 +414,7 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
      m_surface->setScale(1);
      // commit the subsurfaces before the main surface
      for (OutputLayer *layer : layersToUpdate) {
-@@ -345,10 +357,12 @@
+@@ -345,10 +358,12 @@
  {
      if (refreshRate != this->refreshRate()) {
          m_refreshRate = refreshRate;
@@ -375,7 +430,7 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
          setState(next);
          m_renderLoop->setRefreshRate(m_refreshRate);
      }
-@@ -365,6 +379,161 @@
+@@ -365,6 +380,171 @@
      m_frames.pop_front();
  }
  
@@ -457,10 +512,20 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
 +
 +void WaylandOutput::rebuildModes(State &next, const QSize &nativeSize, const QSize &currentSize)
 +{
++    // Resolve the current size ONCE: an invalid or oversized request falls back
++    // to the native size, and everything below (including the Preferred flag)
++    // then agrees on what "current" is. Computing it twice let an invalid
++    // currentSize cache the native mode with Preferred cleared.
++    QSize cur = currentSize;
++    if (!cur.isValid() || cur.isEmpty()
++        || cur.width() > nativeSize.width() || cur.height() > nativeSize.height()) {
++        cur = nativeSize;
++    }
++
 +    QList<QSize> sizes;
 +    sizes.append(nativeSize);
-+    if (currentSize.isValid() && !sizes.contains(currentSize)) {
-+        sizes.append(currentSize);
++    if (!sizes.contains(cur)) {
++        sizes.append(cur);
 +    }
 +    QList<QSize> candidates = m_backend->display()->parentModeSizes();
 +    candidates.append(standardRungs(nativeSize));
@@ -484,7 +549,7 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
 +        modes.append(modeFor(size, size == nativeSize));
 +    }
 +    next.modes = modes;
-+    next.currentMode = modeFor(currentSize.isValid() ? currentSize : nativeSize, currentSize == nativeSize);
++    next.currentMode = modeFor(cur, cur == nativeSize);
 +}
 +
 +void WaylandOutput::refreshModeLadder()
@@ -537,7 +602,7 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
  void WaylandOutput::applyChanges(const OutputConfiguration &config)
  {
      const auto props = config.constChangeSet(this);
-@@ -375,9 +544,34 @@
+@@ -375,9 +555,38 @@
      next.enabled = props->enabled.value_or(m_state.enabled);
      next.transform = props->transform.value_or(m_state.transform);
      next.position = props->pos.value_or(m_state.position);
@@ -567,6 +632,10 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
 +            } else {
 +                m_userMode = requested;
 +            }
++        } else {
++            qCWarning(KWIN_WAYLAND_BACKEND) << "ignoring requested mode" << requested
++                                            << "- a nested output cannot exceed the size the host configured it at"
++                                            << m_nativeSize;
 +        }
 +    }
 +    if (m_nativeSize.isValid() && !m_nativeSize.isEmpty()) {
@@ -575,7 +644,7 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
      next.desiredMode = props->desiredMode.value_or(m_state.desiredMode);
      next.uuid = props->uuid.value_or(m_state.uuid);
      next.replicationSource = props->replicationSource.value_or(m_state.replicationSource);
-@@ -428,12 +622,14 @@
+@@ -428,12 +637,14 @@
  {
      m_renderLoop->setRefreshRate(m_refreshRate);
  
@@ -593,19 +662,21 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
      setState(initialState);
  
      m_xdgShellSurface->setFullscreen(fullscreen);
-@@ -461,12 +657,28 @@
+@@ -461,12 +672,30 @@
  {
      m_xdgShellSurface->ackConfigure(serial);
      if (!size.isEmpty()) {
 -        auto mode = std::make_shared<OutputMode>(OutputModeline(size * m_pendingScale, m_refreshRate));
-+        // Quasar: a configure at the SAME size is not an external resolution
-+        // change - it is the host re-confirming the area we already fill (and it
-+        // arrives after every mode change, because the toplevel never shrinks).
-+        // Only a genuinely different size drops the user's pick.
-+        const bool externalChange = (size != m_parentLogicalSize);
-+        if (externalChange) {
-+            m_userMode.reset();
-+        }
++        // Quasar: a user-picked mode is INDEPENDENT of the host's configure size
++        // and survives it changing. The host resizes this toplevel routinely -
++        // Quasar steps the streamed (external) resolution live - and an external
++        // step must not silently throw away the user's chosen internal
++        // resolution. The pick only degrades, to the new native size, when it no
++        // longer FITS: the surface must never overflow the host's area.
++        //
++        // It also survives a same-size configure, which is what the host sends
++        // right after a mode change (the toplevel deliberately keeps filling the
++        // host's area, so from the host's side nothing changed).
 +        m_parentLogicalSize = size;
 +        m_nativeSize = size * m_pendingScale;
  
@@ -627,8 +698,8 @@ diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayla
  
          Q_EMIT m_backend->outputsQueried();
 diff -uNr a/src/backends/wayland/wayland_output.h b/src/backends/wayland/wayland_output.h
---- a/src/backends/wayland/wayland_output.h	2026-08-16 10:32:10
-+++ b/src/backends/wayland/wayland_output.h	2026-08-16 10:32:10
+--- a/src/backends/wayland/wayland_output.h	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_output.h	2026-08-16 11:12:26
 @@ -12,9 +12,13 @@
  
  #include <KWayland/Client/xdgshell.h>
@@ -707,16 +778,19 @@ diff -uNr a/src/backends/wayland/wayland_output.h b/src/backends/wayland/wayland
  
  } // namespace Wayland
 diff -uNr a/src/backends/wayland/wayland_qpainter_backend.cpp b/src/backends/wayland/wayland_qpainter_backend.cpp
---- a/src/backends/wayland/wayland_qpainter_backend.cpp	2026-08-16 10:32:10
-+++ b/src/backends/wayland/wayland_qpainter_backend.cpp	2026-08-16 10:32:10
-@@ -124,7 +124,9 @@
+--- a/src/backends/wayland/wayland_qpainter_backend.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_qpainter_backend.cpp	2026-08-16 11:12:26
+@@ -124,7 +124,12 @@
      wl_buffer *buffer = static_cast<WaylandOutput *>(m_output.get())->backend()->importBuffer(m_back->buffer());
      Q_ASSERT(buffer);
  
 -    static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_back->buffer()->size() / m_output->scale(), hotspot().toPoint());
-+    // Quasar: see the note in WaylandEglCursorLayer::doEndFrame.
++    // Quasar: see the note in WaylandEglCursorLayer::doEndFrame. The hotspot is
++    // scaled here too, matching the EGL path -- upstream passes it through
++    // unscaled, which is only right while contentScale() is 1.
 +    auto *waylandOutput = static_cast<WaylandOutput *>(m_output.get());
-+    waylandOutput->cursor()->update(buffer, m_back->buffer()->size() * waylandOutput->contentScale(), hotspot().toPoint());
++    const qreal contentScale = waylandOutput->contentScale();
++    waylandOutput->cursor()->update(buffer, m_back->buffer()->size() * contentScale, (hotspot() * contentScale).toPoint());
      m_swapchain->release(m_back);
      return true;
  }

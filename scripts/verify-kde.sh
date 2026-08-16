@@ -38,6 +38,21 @@ if [[ "$kwin_nvr" != *".quasar"* ]]; then
 fi
 echo "patched kwin present: $kwin_nvr"
 
+# The org.quasar.kde.kwin label records WHICH kwin was patched, so a deployed
+# image can be identified without running it. It must agree with what is
+# actually installed, otherwise the label is worse than no label at all.
+kwin_label="$(docker image inspect quasar-kde:dev --format '{{index .Config.Labels "org.quasar.kde.kwin"}}')"
+if [[ -z "$kwin_label" || "$kwin_label" == "<no value>" ]]; then
+  echo "FAIL: org.quasar.kde.kwin label missing from quasar-kde:dev" >&2
+  exit 1
+fi
+# rpm -q prints kwin-<version>-<release>.<arch>; the label is <version>-<release>.
+if [[ "$kwin_nvr" != "kwin-${kwin_label}."* ]]; then
+  echo "FAIL: org.quasar.kde.kwin label ($kwin_label) does not match the installed kwin ($kwin_nvr)" >&2
+  exit 1
+fi
+echo "kwin label agrees with the installed package: $kwin_label"
+
 # The builder stage must not have leaked into the shipped image.
 docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc '
   set -e
@@ -50,6 +65,58 @@ docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc '
     exit 1
   fi
 '
+
+# FUNCTIONAL smoke: the assertions above only prove a .quasar-tagged kwin is
+# installed, not that the patch still does anything. A re-diff that applies with
+# fuzz, or a hunk silently dropped, would sail past them -- and the failure mode
+# is a Display KCM that quietly does nothing, which nobody notices for weeks.
+# So: actually run a nested session and change its resolution.
+#
+# Two kwins are needed. --virtual alone exercises the VIRTUAL backend, which was
+# never broken and is not what the patch touches; the patched code only runs when
+# kwin is a Wayland CLIENT of another compositor. So an outer --virtual kwin
+# plays the host and the inner one is the nested session under test.
+# Hard time-box: every wait is bounded and the container is --rm.
+echo "running the nested mode-ladder smoke (time-boxed)"
+smoke="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -c '
+  export XDG_RUNTIME_DIR=/tmp/rt HOME=/tmp/h
+  mkdir -p "$XDG_RUNTIME_DIR" "$HOME"; chmod 0700 "$XDG_RUNTIME_DIR"
+  export KWIN_COMPOSE=Q QT_FORCE_STDERR_LOGGING=1
+
+  wait_socket() { for _ in $(seq 24); do [ -e "$XDG_RUNTIME_DIR/$1" ] && return 0; sleep 0.25; done; return 1; }
+
+  dbus-daemon --session --fork --print-address=1 > /tmp/busA
+  DBUS_SESSION_BUS_ADDRESS="$(head -1 /tmp/busA)" \
+    kwin_wayland --virtual --width 1920 --height 1080 --socket=wl-host >/tmp/host.log 2>&1 &
+  wait_socket wl-host || { echo "SMOKE-FAIL: host compositor never came up"; exit 1; }
+  sleep 3
+
+  dbus-daemon --session --fork --print-address=1 > /tmp/busB
+  WAYLAND_DISPLAY=wl-host DBUS_SESSION_BUS_ADDRESS="$(head -1 /tmp/busB)" \
+    kwin_wayland --width 1920 --height 1080 --socket=wl-nested >/tmp/nested.log 2>&1 &
+  wait_socket wl-nested || { echo "SMOKE-FAIL: nested compositor never came up"; exit 1; }
+  sleep 4
+
+  export WAYLAND_DISPLAY=wl-nested
+  modes=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Modes: //p" | tr -d "\033" | sed "s/\[[0-9;]*m//g")
+  count=$(printf "%s" "$modes" | grep -oE "[0-9]+x[0-9]+@" | wc -l)
+  echo "MODES=$count"
+  if [ "$count" -lt 2 ]; then
+    echo "SMOKE-FAIL: nested output advertises $count mode(s); the patch is not taking effect"
+    exit 1
+  fi
+
+  kscreen-doctor output.1.mode.1280x720@60 >/dev/null 2>&1
+  sleep 2
+  geom=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Geometry: //p" | sed "s/\[[0-9;]*m//g" | head -1)
+  echo "GEOMETRY=$geom"
+  case "$geom" in
+    *"0,0 1280x720"*) echo "SMOKE-OK" ;;
+    *) echo "SMOKE-FAIL: applying 1280x720 left the output at [$geom]"; exit 1 ;;
+  esac
+' 2>&1)" || { echo "$smoke" >&2; echo "FAIL: nested mode-ladder smoke failed" >&2; exit 1; }
+printf '%s\n' "$smoke" | grep -E '^(MODES|GEOMETRY|SMOKE-OK)'
+grep -q 'SMOKE-OK' <<<"$smoke"
 
 # gamescope must be ABSENT from this image (quasar-kde carries zero gamescope/
 # BPM weight by construction -- it inherits from quasar-steam-runtime, not

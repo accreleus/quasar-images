@@ -33,8 +33,18 @@ dnf --setopt=install_weak_deps=False -y install \
 
 mkdir -p "$topdir" "$out_dir"
 
-log "downloading the distro kwin source package"
-dnf download --source kwin --destdir="$topdir" >/dev/null
+nvr="${QUASAR_KWIN_NVR:-}"
+test -n "$nvr" || { log "FATAL: QUASAR_KWIN_NVR is not set (Dockerfile ARG KWIN_NVR)"; exit 1; }
+
+log "downloading the pinned kwin source package: kwin-${nvr}"
+if ! dnf download --source "kwin-${nvr}" --destdir="$topdir" >/dev/null 2>&1; then
+  log "FATAL: kwin-${nvr}.src.rpm is not available in the configured repositories."
+  log "       Fedora has almost certainly moved kwin on. The patch is version-specific:"
+  log "       re-diff it against the new source, then bump ARG KWIN_NVR in"
+  log "       images/quasar-kde/Dockerfile. See the README, 'Patched KWin (nested mode ladder)'."
+  log "       available: $(dnf list --showduplicates kwin 2>/dev/null | awk '/^kwin\./ {print $2}' | tr '\n' ' ')"
+  exit 1
+fi
 srpm="$(find "$topdir" -maxdepth 1 -name 'kwin-*.src.rpm' | head -1)"
 test -n "$srpm" || { log "FATAL: no kwin src.rpm downloaded"; exit 1; }
 log "source package: $(basename "$srpm")"
@@ -43,15 +53,17 @@ rpm -i "$srpm" --define "_topdir $topdir" 2>&1 | grep -v '^warning:' || true
 spec="$topdir/SPECS/kwin.spec"
 test -f "$spec" || { log "FATAL: $spec missing after installing the src.rpm"; exit 1; }
 
-# The patch is written against the wayland backend as of 6.7.x. A major version
-# bump WILL need a re-diff; fail loudly rather than shipping a half-applied
-# backend (see README, "Patched KWin (nested mode ladder)").
-version="$(awk '/^Version:/ {print $2; exit}' "$spec")"
-log "distro kwin version: $version"
-case "$version" in
-  6.7.*) : ;;
-  *) log "WARNING: patch was written against kwin 6.7.x, this is $version -- re-diff it if the build fails" ;;
-esac
+# HARD fail on any drift from the pin. The patch is written against one exact
+# source tree; a mismatch means it is being applied to something it was never
+# reviewed against, and `patch` applying with fuzz is a worse outcome than a
+# failed build (see README, "Patched KWin (nested mode ladder)").
+srpm_nvr="$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$srpm" 2>/dev/null)"
+if [[ "$srpm_nvr" != "$nvr" ]]; then
+  log "FATAL: source package is kwin-${srpm_nvr}, but the pin is kwin-${nvr}."
+  log "       Re-diff the patch and bump ARG KWIN_NVR in images/quasar-kde/Dockerfile."
+  exit 1
+fi
+log "source package NVR matches the pin: ${srpm_nvr}"
 
 log "installing build dependencies (this is the slow part)"
 dnf builddep -y --setopt=install_weak_deps=False "$spec" >/dev/null
