@@ -81,10 +81,17 @@ PY
 # The build is marked through %dist (below), not by rewriting Release: -- so
 # `rpm -q kwin` reports e.g. kwin-6.7.4-1.fc43.quasar1 and verify-kde.sh can
 # prove the image runs OUR kwin.
+# %dist must be redefined to a LITERAL: `--define "dist %{?dist}.quasar1"` is a
+# recursive declaration and rpm rejects it with "Too many levels of recursion in
+# macro expansion".
+base_dist="$(rpm --eval '%{?dist}')"
+new_dist="${base_dist}${dist_suffix}"
+log "release marker: %dist ${base_dist:-<empty>} -> ${new_dist}"
+
 log "building binary RPMs (expect 20-40 minutes)"
 rpmbuild -bb "$spec" \
   --define "_topdir $topdir" \
-  --define "dist %{?dist}${dist_suffix}" \
+  --define "dist ${new_dist}" \
   --define "debug_package %{nil}" \
   --nocheck
 
