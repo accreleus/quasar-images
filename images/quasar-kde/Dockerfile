@@ -94,13 +94,13 @@ RUN set -eu; \
     rpms=""; \
     for name in $installed; do \
       for rpm in /tmp/kwin-rpms/*.rpm; do \
-        [ "$(rpm -qp --qf '%{NAME}' "$rpm" 2>/dev/null)" = "$name" ] && rpms="$rpms $rpm"; \
+        if [ "$(rpm -qp --qf '%{NAME}' "$rpm" 2>/dev/null)" = "$name" ]; then rpms="$rpms $rpm"; fi; \
       done; \
     done; \
     test -n "$rpms"; \
     echo "upgrading to patched kwin:$rpms"; \
     dnf -y --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
-      --allowerasing install $rpms; \
+      install --allowerasing $rpms; \
     rpm -q kwin | grep -q '\.quasar'; \
     dnf clean all; \
     rm -rf /var/cache/dnf /tmp/kwin-rpms
