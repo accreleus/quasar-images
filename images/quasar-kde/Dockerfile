@@ -19,7 +19,8 @@ ARG KWIN_NVR=6.7.4-1.fc43
 #
 # This stage is DISCARDED and its RPMs are never copied into a layer -- the
 # install below bind-mounts them instead -- so neither the ~1.5 GB of build
-# dependencies nor the ~100 MB of RPMs reaches the shipped image.
+# dependencies nor the RPMs themselves reach the shipped image (measured: the
+# bind-mount saves 11.9 MB over a COPY, which a later rm could not reclaim).
 #
 # Base is pinned to the same Fedora release the runtime family is built from --
 # an RPM built against a different release would not be interchangeable with the
@@ -89,8 +90,9 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
 # (dnf5 wants it AFTER the subcommand).
 #
 # The RPMs are BIND-MOUNTED from the builder stage rather than COPYed: a COPY
-# would persist ~100 MB of packages in a layer forever, and `rm -rf` in a later
-# layer cannot reclaim it. Nothing from the builder stage ends up in the image.
+# would persist the packages in a layer forever (11.9 MB, measured), and a
+# `rm -rf` in a later layer cannot reclaim it. Nothing from the builder stage
+# ends up in the image.
 RUN --mount=type=bind,from=kwin-build,source=/tmp/kwin-rpms,target=/tmp/kwin-rpms \
     set -eu; \
     installed="$(rpm -qa --qf '%{NAME}\n' 'kwin*' | sort -u)"; \
