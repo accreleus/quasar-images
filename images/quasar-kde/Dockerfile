@@ -1,4 +1,26 @@
 ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
+
+# --- Patched KWin ------------------------------------------------------------
+# Fedora's kwin, rebuilt with images/quasar-kde/kwin/*.patch, so the NESTED
+# wayland backend advertises a real mode ladder and applies a resolution picked
+# in System Settings -> Display. Upstream's nested backend synthesises exactly
+# one mode from the host's xdg_toplevel.configure size and ignores
+# OutputConfiguration::currentMode entirely, so the Display KCM is inert inside a
+# Quasar session -- see kwin/0001-nested-backend-mode-ladder.patch for the full
+# problem statement, and the README section "Patched KWin (nested mode ladder)"
+# for the recurring re-diff cost on a Fedora kwin update.
+#
+# This stage is DISCARDED: only /tmp/kwin-rpms is copied forward, so none of the
+# ~1.5 GB of build dependencies reaches the shipped image.
+#
+# Base is pinned to the same Fedora release the runtime family is built from --
+# an RPM built against a different release would not be interchangeable with the
+# kwin it replaces.
+FROM fedora:43 AS kwin-build
+COPY images/quasar-kde/kwin/0001-nested-backend-mode-ladder.patch /tmp/kwin-patches/
+COPY images/quasar-kde/kwin/build-kwin.sh /usr/local/bin/build-kwin.sh
+RUN chmod 0755 /usr/local/bin/build-kwin.sh && /usr/local/bin/build-kwin.sh
+
 FROM ${STEAM_RUNTIME_IMAGE}
 
 ARG VERSION=0.1.0-dev
@@ -54,6 +76,35 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
 #    Flathub remote. Any --system query as root initialises the empty repo; it
 #    stays empty -- installs go to the user scope in the persistent $HOME
 #    (unprivileged, no polkit/system-helper needed).
+# Install the patched kwin over the distro package. Same N-V-R plus a .quasar1
+# %dist suffix, so this is an ordinary upgrade of the same package, not a
+# replacement by a different one -- every other Plasma package's `Requires:
+# kwin = 6.7.4-1.fc43` style dependency still resolves.
+#
+# ONLY the subpackages already installed above are upgraded. `install *.rpm`
+# would drag in every subpackage the SRPM produces (kwin-x11, -devel, ...) and
+# silently fatten the image with things the session never runs; kwin's
+# subpackages are mutually version-locked, so a partial set that does NOT match
+# what is installed would break deps -- hence the explicit intersection.
+# --allowerasing covers a subpackage split changing between Fedora rebuilds.
+COPY --from=kwin-build /tmp/kwin-rpms /tmp/kwin-rpms
+RUN set -eu; \
+    installed="$(rpm -qa --qf '%{NAME}\n' 'kwin*' | sort -u)"; \
+    test -n "$installed"; \
+    rpms=""; \
+    for name in $installed; do \
+      for rpm in /tmp/kwin-rpms/*.rpm; do \
+        [ "$(rpm -qp --qf '%{NAME}' "$rpm" 2>/dev/null)" = "$name" ] && rpms="$rpms $rpm"; \
+      done; \
+    done; \
+    test -n "$rpms"; \
+    echo "upgrading to patched kwin:$rpms"; \
+    dnf -y --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+      --allowerasing install $rpms; \
+    rpm -q kwin | grep -q '\.quasar'; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf /tmp/kwin-rpms
+
 RUN rm -f /usr/lib64/qt6/plugins/discover/fwupd-backend.so \
     && flatpak remotes --system >/dev/null \
     && test -f /var/lib/flatpak/repo/config

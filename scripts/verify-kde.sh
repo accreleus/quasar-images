@@ -8,6 +8,49 @@ for executable in startplasma-wayland kwin_wayland dbus-run-session flatpak stea
   docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc "command -v $executable >/dev/null"
 done
 
+# --- Patched KWin (nested mode ladder) --------------------------------------
+# The image MUST run the kwin rebuilt from images/quasar-kde/kwin/*.patch, not
+# Fedora's stock kwin: without the patch the nested backend advertises a single
+# output mode and ignores OutputConfiguration::currentMode, so System Settings ->
+# Display cannot change the session's internal resolution at all. A base-image
+# refresh that pulls a newer distro kwin would silently undo this, and the only
+# symptom is a Display KCM that quietly does nothing -- hence a hard assertion
+# rather than a comment. Re-diff instructions: README, "Patched KWin (nested
+# mode ladder)".
+build_context_patch="images/quasar-kde/kwin/0001-nested-backend-mode-ladder.patch"
+if [[ ! -s "$build_context_patch" ]]; then
+  echo "FAIL: $build_context_patch is missing or empty in the build context" >&2
+  exit 1
+fi
+grep -q "src/backends/wayland/wayland_output.cpp" "$build_context_patch"
+grep -q "src/backends/wayland/wayland_display.cpp" "$build_context_patch"
+if [[ ! -x images/quasar-kde/kwin/build-kwin.sh ]]; then
+  echo "FAIL: images/quasar-kde/kwin/build-kwin.sh is missing or not executable" >&2
+  exit 1
+fi
+grep -q "FROM fedora:43 AS kwin-build" images/quasar-kde/Dockerfile
+
+kwin_nvr="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc 'rpm -q kwin')"
+if [[ "$kwin_nvr" != *".quasar"* ]]; then
+  echo "FAIL: quasar-kde:dev runs an UNPATCHED kwin ($kwin_nvr); expected a .quasar release marker" >&2
+  echo "      the nested mode ladder / Display Settings resolution change will not work" >&2
+  exit 1
+fi
+echo "patched kwin present: $kwin_nvr"
+
+# The builder stage must not have leaked into the shipped image.
+docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc '
+  set -e
+  if [[ -e /tmp/kwin-rpms ]]; then
+    echo "FAIL: /tmp/kwin-rpms left behind in the shipped image" >&2
+    exit 1
+  fi
+  if command -v rpmbuild >/dev/null 2>&1; then
+    echo "FAIL: rpmbuild present in the shipped image (kwin build stage leaked)" >&2
+    exit 1
+  fi
+'
+
 # gamescope must be ABSENT from this image (quasar-kde carries zero gamescope/
 # BPM weight by construction -- it inherits from quasar-steam-runtime, not
 # quasar-steam). NOTE: negative assertions must use explicit if/exit, not

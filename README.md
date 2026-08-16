@@ -23,6 +23,27 @@
 
 Host requirements for `quasar-kde`: the parent Wayland compositor socket must be handed off (`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`), same as other Quasar desktop sessions. A persistent `/home/quasar` volume is required (image carries `org.quasar.image.persist=/home/quasar`; one session per home volume) and the image carries `org.quasar.image.session=desktop`. Same `--shm-size` requirement as `quasar-steam`. `no_new_privileges` must stay `false` (Steam's startup re-escalation, same reason as `quasar-steam`). User-level Flatpak (Discover, `flatpak install`/`flatpak run`) needs an unprivileged user namespace — the agent must run the container with a seccomp profile permitting `clone(CLONE_NEWUSER)` — **and** the container's default `/proc` masking disabled (`docker run --security-opt systempaths=unconfined`): without it, `flatpak install` succeeds but `flatpak run`'s bwrap sandbox fails to mount `/proc` (live-verified 2026-08-13). Mounting `/run/quasar/share` for agent-provided game-menu entries is optional.
 
+### Patched KWin (nested mode ladder)
+
+`quasar-kde` does **not** ship Fedora's stock `kwin`. It rebuilds the distro source package with `images/quasar-kde/kwin/0001-nested-backend-mode-ladder.patch` applied, in a discarded `kwin-build` Dockerfile stage (`images/quasar-kde/kwin/build-kwin.sh`).
+
+**Why.** KWin runs nested here: it is a Wayland client of Quasar's compositor, and its output size comes from the host's `xdg_toplevel.configure`. Upstream's nested backend therefore synthesises exactly one output mode and throws the rest away (`src/backends/wayland/wayland_output.cpp`, in `init()`, `applyConfigure()` and `framePresented()`), and `applyChanges()` never reads `OutputConfiguration`'s `currentMode` at all. The visible result inside a Quasar session is that System Settings → Display lists a single resolution and choosing anything does nothing. Since this nested session *is* the desktop the user streams, "pick your internal resolution" has to work, so the backend is patched to advertise the host compositor's own `wl_output` mode ladder, honour a picked mode, and keep filling the host's area by scaling the content through `wp_viewport` (aspect-preserving, letterboxed). The patch header documents each change and the reasoning; read it before touching any of this.
+
+**The recurring cost.** Every Fedora `kwin` update needs the patch re-diffed and the image rebuilt. This is deliberate and is the price of the feature; it is not a temporary hack awaiting cleanup (upstream has no interest in nested-backend mode setting).
+
+Re-diffing on a kwin update:
+
+1. Fetch the new source: `dnf download --source kwin` in a `fedora:43` container, then `rpm -i` it and unpack `SOURCES/kwin-<version>.tar.xz`.
+2. Apply the current patch: `patch -p1 --dry-run < 0001-nested-backend-mode-ladder.patch`. If it applies clean, only the version bump is needed — rebuild and re-run `scripts/verify-kde.sh`.
+3. If it rejects, port the hunks by hand against `src/backends/wayland/`. The patch touches seven files; `wayland_output.cpp` carries the real logic (mode ladder, sticky user mode, `contentScale()`), and the other six are the mechanical consequences (host `wl_output` binding, layer/cursor placement, pointer mapping).
+4. Regenerate the patch, keeping the prose header, and rebuild.
+
+`scripts/verify-kde.sh` asserts `rpm -q kwin` carries the `.quasar` release marker, so a base-image refresh that quietly reinstates the stock package fails the build rather than shipping an inert Display KCM.
+
+**Where the rungs come from.** The host compositor's own `wl_output` ladder is read and offered first. It is only a hint, though: the patched backend always commits a surface covering the host's configured area and scales the content into it, so any size at or below that is presentable against *any* host — which matters, because every headless parent advertises exactly one mode (KWin's own Wayland server included: `OutputInterfacePrivate::sendMode` only ever sends the current mode). The standard rungs in the host-configured size's aspect family are therefore offered as well, which is what makes the list useful today rather than after `gst-wayland-display` grows a ladder. `KWIN_NESTED_EXTRA_MODES=0` in the session environment restricts the list to the host's own ladder.
+
+**Known limitation.** Rungs are only ever offered at or below the size the host configured the session at; the session cannot be made *larger* than its streamed resolution from inside. Changing the streamed resolution stays a Quasar-side control.
+
 ## Published images
 
 Branching model: **`stable` is the default and published branch; `develop` is the persistent integration branch.** Use manual workflow dispatch on `develop` to build and publish each image to `ghcr.io/accretion-io/<image>:develop` and an immutable `sha-<commit>` tag. Pushes to `stable` build and publish `:latest` and the same immutable SHA tag automatically. Pull requests build only; ordinary `develop` pushes do not trigger a workflow.
