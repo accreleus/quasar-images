@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# quasar-unigine — an autonomous, deterministic GPU benchmark workload.
+#
+# Why this image exists: a Quasar streaming test needs a *self-driving* load.
+# Redout (the previous candidate, quasar docs/design/research/2026-08-17-redout-
+# probe-results.md) needed a scripted keypress to clear a photosensitivity gate
+# and then sat stationary on the grid. UNIGINE Heaven with the PHORONIX extern
+# define runs its 26-scene flythrough start to finish with zero input, prints a
+# score, and exits — which is the whole property a benchmark workload needs.
+#
+# This launcher: bridges Wayland->X11 with gamescope, runs the benchmark in a
+# loop, and lands every artefact in the managed home so the harness can pull it
+# from /var/lib/quasar/homes/<user>/<app>/ on the host.
+
+log() { printf '%s quasar-unigine: %s\n' "$(date -Iseconds)" "$*" >&2; }
+fail() { log "FATAL: $*"; exit 1; }
+
+# --- Wayland socket handoff (quasar#379) -------------------------------------
+# Identical reasoning to images/quasar-steam/quasar-steam: the node-agent hands
+# us ITS compositor socket via XDG_RUNTIME_DIR + WAYLAND_DISPLAY, but gamescope
+# needs a private, user-owned XDG_RUNTIME_DIR for its own sockets. Resolve the
+# agent socket to an ABSOLUTE path FIRST so repointing cannot orphan it.
+if [[ -n "${WAYLAND_DISPLAY:-}" && "${WAYLAND_DISPLAY}" != /* ]]; then
+  export WAYLAND_DISPLAY="${XDG_RUNTIME_DIR:-/run/quasar-wayland}/${WAYLAND_DISPLAY}"
+fi
+export XDG_RUNTIME_DIR="${QUASAR_UNIGINE_RUNTIME_DIR:-$HOME/.runtime}"
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
+
+# --- Configuration -----------------------------------------------------------
+bench="${UNIGINE_BENCH:-heaven}"
+# Quasar injects the session's negotiated mode as QUASAR_STREAM_* (quasar#384).
+# An explicit UNIGINE_WIDTH/HEIGHT wins (per-app pin); the literals are the last
+# resort for a standalone `docker run`.
+width="${UNIGINE_WIDTH:-${QUASAR_STREAM_WIDTH:-1920}}"
+height="${UNIGINE_HEIGHT:-${QUASAR_STREAM_HEIGHT:-1080}}"
+refresh="${UNIGINE_REFRESH:-${QUASAR_STREAM_FPS:-60}}"
+fullscreen="${UNIGINE_FULLSCREEN:-1}"
+sound="${UNIGINE_SOUND:-null}"
+loop="${UNIGINE_LOOP:-1}"
+loop_gap="${UNIGINE_LOOP_GAP:-5}"
+max_passes="${UNIGINE_MAX_PASSES:-0}"     # 0 = unbounded
+extra_args="${UNIGINE_EXTRA_ARGS:-}"
+gs_ready_timeout="${QUASAR_GAMESCOPE_READY_TIMEOUT:-30}"
+
+[[ "$width"  =~ ^[0-9]+$ ]] || fail "UNIGINE_WIDTH must be numeric (got '$width')"
+[[ "$height" =~ ^[0-9]+$ ]] || fail "UNIGINE_HEIGHT must be numeric (got '$height')"
+[[ "$refresh" =~ ^[0-9]+$ ]] || refresh=60
+[[ "$loop_gap" =~ ^[0-9]+$ ]] || loop_gap=5
+[[ "$max_passes" =~ ^[0-9]+$ ]] || max_passes=0
+
+# Results live in the managed home so the host can collect them from
+# /var/lib/quasar/homes/<user>/<app>/unigine-bench/.
+results_root="${UNIGINE_RESULTS_DIR:-$HOME/unigine-bench}"
+run_id="$(date -u +%Y%m%dT%H%M%SZ)"
+run_dir="$results_root/run-$run_id"
+mkdir -p "$run_dir"
+summary="$run_dir/summary.jsonl"
+
+# --- Per-benchmark command construction --------------------------------------
+# Both command lines follow the Phoronix Test Suite invocation pattern (the only
+# publicly documented way to drive these benchmarks headlessly). The load-bearing
+# token is `PHORONIX` in -extern_define: it selects the automation system script
+# branch, which runs the full scene sequence unattended, prints the score, and
+# exits. Without it both binaries come up in their interactive GUI and wait for
+# a mouse click that a benchmark harness has no business supplying.
+upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+
+build_cmd() {
+  case "$bench" in
+    heaven)
+      install_dir=/opt/unigine/heaven
+      quality="$(upper "${UNIGINE_QUALITY:-high}")"
+      tess="$(upper "${UNIGINE_TESSELLATION:-normal}")"
+      case "$quality" in LOW|MEDIUM|HIGH|ULTRA) ;; *) fail "UNIGINE_QUALITY for heaven must be low|medium|high|ultra (got '$quality')";; esac
+      case "$tess" in DISABLED|MODERATE|NORMAL|EXTREME) ;; *) fail "UNIGINE_TESSELLATION must be disabled|moderate|normal|extreme (got '$tess')";; esac
+      binary=./heaven_x64
+      defines="PHORONIX,RELEASE,LANGUAGE_EN,QUALITY_${quality},TESSELLATION_${tess}"
+      cmd=(
+        "$binary"
+        -video_app opengl
+        -sound_app "$sound"
+        -data_path ../
+        -engine_config ../data/heaven_4.0.cfg
+        -system_script heaven/unigine.cpp
+        -video_mode -1
+        -video_width "$width"
+        -video_height "$height"
+        -video_fullscreen "$fullscreen"
+        -extern_define "$defines"
+      )
+      ;;
+    superposition)
+      install_dir=/opt/unigine/superposition
+      quality="$(upper "${UNIGINE_QUALITY:-medium}")"
+      preset="$(upper "${UNIGINE_PRESET:-1080p_medium}")"
+      case "$quality" in LOW|MEDIUM|HIGH|EXTREME) ;; *) fail "UNIGINE_QUALITY for superposition must be low|medium|high|extreme (got '$quality')";; esac
+      binary=./superposition
+      defines="PHORONIX,LANGUAGE_EN,QUALITY_${quality},PRESET_${preset}"
+      cmd=(
+        "$binary"
+        -project_name Superposition
+        -data_path ../
+        -engine_config ../data/superposition/unigine.cfg
+        -system_script superposition/system_script.cpp
+        -sound_app "${UNIGINE_SOUND:-openal}"
+        -video_app opengl
+        -video_multisample 0
+        -video_mode -1
+        -video_width "$width"
+        -video_height "$height"
+        -video_fullscreen "$fullscreen"
+        -extern_define "$defines"
+        -extern_plugin GPUMonitor
+      )
+      ;;
+    *)
+      fail "UNIGINE_BENCH must be heaven|superposition (got '$bench')"
+      ;;
+  esac
+  [[ -d "$install_dir" ]] || fail "$bench is not installed in this image ($install_dir missing) — rebuild with WITH_$(upper "$bench")=1"
+  [[ -x "$install_dir/bin/${binary#./}" ]] || fail "$install_dir/bin/${binary#./} is missing or not executable"
+  # shellcheck disable=SC2206
+  [[ -n "$extra_args" ]] && cmd+=($extra_args)
+  return 0
+}
+
+build_cmd
+
+# UNIGINE_DRY_RUN=1 validates the whole configuration path (env parsing, install
+# presence, binary executability, command construction) and exits without
+# needing a GPU, a compositor socket, or an X server. This is what
+# scripts/verify-unigine.sh asserts against, and it is the fastest way to check
+# an app row's env in isolation before spending a session on it.
+if [[ "${UNIGINE_DRY_RUN:-0}" == "1" ]]; then
+  printf '[unigine-result] dry-run bench=%s mode=%sx%s@%s quality=%s\n' \
+    "$bench" "$width" "$height" "$refresh" "${quality:-}"
+  printf '[unigine-result] dry-run cwd=%s cmd=%s\n' "$install_dir/bin" "${cmd[*]}"
+  exit 0
+fi
+
+# --- gamescope: the Wayland -> X11/GLX bridge --------------------------------
+# GOW-pattern ready-socket handshake, same as images/quasar-steam/quasar-steam:
+# gamescope runs WITHOUT a client argument and reports its actual X display
+# through -R, so DISPLAY is what gamescope says it is rather than a guessed ":0".
+# Running the benchmark as a SIBLING (not gamescope's child) is what lets this
+# launcher restart it for each pass without tearing the X server down.
+gs_tmpdir="$(mktemp -p "$XDG_RUNTIME_DIR" -d -t gamescope.XXXXXXX)"
+gs_socket="$gs_tmpdir/startup.socket"
+mkfifo -- "$gs_socket"
+
+gs_pid=""
+bench_pid=""
+shutting_down=0
+
+on_term() {
+  [[ "$shutting_down" == "1" ]] && return
+  shutting_down=1
+  log "shutdown requested; relaying to benchmark and gamescope"
+  if [[ -n "$bench_pid" ]] && kill -0 "$bench_pid" 2>/dev/null; then
+    kill -TERM "$bench_pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do kill -0 "$bench_pid" 2>/dev/null || break; sleep 0.25 || true; done
+  fi
+  if [[ -n "$gs_pid" ]] && kill -0 "$gs_pid" 2>/dev/null; then
+    kill -TERM "$gs_pid" 2>/dev/null || true
+  fi
+}
+trap on_term TERM INT
+
+log "starting gamescope (${width}x${height}@${refresh}) for bench=$bench"
+gamescope ${GAMESCOPE_MODE:--b} -R "$gs_socket" \
+  -W "$width" -H "$height" -r "$refresh" &
+gs_pid=$!
+
+if read -r -t "$gs_ready_timeout" gs_x_display gs_wl_display <> "$gs_socket"; then
+  export DISPLAY="$gs_x_display"
+  export GAMESCOPE_WAYLAND_DISPLAY="$gs_wl_display"
+  unset WAYLAND_DISPLAY
+  log "gamescope ready: DISPLAY=$DISPLAY nested_wayland=$gs_wl_display"
+elif [[ "$shutting_down" == "1" ]]; then
+  log "shutdown requested during startup; exiting without launching the benchmark"
+  exit 143
+else
+  fail "gamescope did not report ready within ${gs_ready_timeout}s"
+fi
+
+# The benchmarks are X11/GLX clients: SDL/GLFW are not involved, but forcing the
+# X11 path everywhere avoids any bundled Qt component trying (and failing) to
+# reach the outer Wayland socket we just unset.
+export QT_QPA_PLATFORM=xcb
+export SDL_VIDEODRIVER=x11
+export LD_LIBRARY_PATH="$install_dir/bin/x64:$install_dir/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# --- Result extraction -------------------------------------------------------
+# With PHORONIX defined the automation script prints its summary to stdout. Tee
+# every pass's full output to the managed home AND echo the score lines back to
+# the container's stdout with a grep-able prefix, so `docker logs` of the session
+# container is a sufficient (if lossy) result channel on its own.
+
+# `wait PID` returns EARLY (status >128) the instant a trapped signal is caught
+# — bash runs the trap synchronously and hands control back to the statement
+# after wait whether or not PID has exited. Re-wait until `kill -0` confirms the
+# pid is really gone; only that final status is real. (Same trap, same fix, as
+# images/quasar-steam/quasar-steam's wait_for_exit.)
+wait_for_exit() {
+  local pid="$1" rc=0
+  while :; do
+    if wait "$pid"; then rc=0; else rc=$?; fi
+    kill -0 "$pid" 2>/dev/null || break
+  done
+  return "$rc"
+}
+
+emit_results() {
+  local pass_log="$1" pass_no="$2" rc="$3" started="$4" ended="$5"
+  local line found=0
+  while IFS= read -r line; do
+    printf '[unigine-result] pass=%s %s\n' "$pass_no" "$line"
+    found=1
+  done < <(grep -aE '^[[:space:]]*(FPS|Score|Scores|Min FPS|Max FPS|Average FPS)[[:space:]]*:' "$pass_log" || true)
+  if [[ "$found" == 0 ]]; then
+    log "pass $pass_no produced no parsable score lines; full log at $pass_log"
+    # Last 5 non-empty lines are the best available diagnostic on a failed pass.
+    grep -av '^[[:space:]]*$' "$pass_log" | tail -5 | while IFS= read -r line; do
+      printf '[unigine-result] pass=%s tail: %s\n' "$pass_no" "$line"
+    done
+  fi
+  printf '{"pass":%s,"bench":"%s","width":%s,"height":%s,"quality":"%s","rc":%s,"started":"%s","ended":"%s","log":"%s"}\n' \
+    "$pass_no" "$bench" "$width" "$height" "${quality:-}" "$rc" "$started" "$ended" "$pass_log" >> "$summary"
+}
+
+log "results directory: $run_dir"
+log "command: (cd $install_dir/bin && ${cmd[*]})"
+printf '[unigine-result] run=%s bench=%s mode=%sx%s@%s quality=%s cmd=%s\n' \
+  "$run_id" "$bench" "$width" "$height" "$refresh" "${quality:-}" "${cmd[*]}"
+
+pass=0
+rc=0
+while :; do
+  if [[ "$shutting_down" == "1" ]]; then break; fi
+  pass=$((pass + 1))
+  pass_log="$run_dir/pass-$(printf '%03d' "$pass").log"
+  started="$(date -Iseconds)"
+  log "pass $pass starting (log: $pass_log)"
+  printf '[unigine-result] pass=%s state=start t=%s\n' "$pass" "$started"
+
+  ( cd "$install_dir/bin" && exec "${cmd[@]}" ) > "$pass_log" 2>&1 &
+  bench_pid=$!
+  if wait_for_exit "$bench_pid"; then rc=0; else rc=$?; fi
+  bench_pid=""
+  ended="$(date -Iseconds)"
+  log "pass $pass finished rc=$rc"
+  emit_results "$pass_log" "$pass" "$rc" "$started" "$ended"
+  printf '[unigine-result] pass=%s state=end rc=%s t=%s\n' "$pass" "$rc" "$ended"
+
+  # UNIGINE's own user config/results (~/.Heaven, ~/.Superposition) already live
+  # in the managed home; nothing to copy, just say where they are once.
+  if [[ "$pass" == 1 ]]; then
+    for d in "$HOME/.Heaven" "$HOME/.Superposition"; do
+      [[ -d "$d" ]] && log "benchmark wrote its own state to $d"
+    done
+  fi
+
+  if [[ "$loop" != "1" ]]; then break; fi
+  if (( max_passes > 0 && pass >= max_passes )); then
+    log "reached UNIGINE_MAX_PASSES=$max_passes; stopping"
+    break
+  fi
+  if [[ "$shutting_down" == "1" ]]; then break; fi
+  log "restarting in ${loop_gap}s"
+  sleep "$loop_gap" || true
+done
+
+on_term
+exit "$rc"
