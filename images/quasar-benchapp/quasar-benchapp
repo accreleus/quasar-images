@@ -73,6 +73,20 @@ duration_s="${BENCHAPP_DURATION_S:-0}"   # 0 = run until the session ends
 # valid CRC after a 1080p->720p downscale at 2 Mbps (verified, confidence 0.97).
 marker_scale="${BENCHAPP_MARKER_SCALE:-0.5}"
 
+# Surface size. Quasar's compositor (gst-wayland-display) does NOT drive client
+# size through xdg_toplevel.configure and does not honour set_fullscreen -- it
+# tells apps their size out of band, which is why every other image in this repo
+# reads QUASAR_STREAM_WIDTH/HEIGHT (quasar#384) instead of asking the compositor.
+# Without this the probe comes up at winit's 800x600 default in the corner of the
+# output, and ~79% of every encoded frame is static black: the marker still
+# decodes, but the scene-vs-scene encoder comparison this image exists for goes
+# completely flat (live-measured 2026-08-18: 1.00/1.00/1.01/1.12/1.01x).
+# BENCHAPP_SURFACE is the escape hatch; it is the surface, NOT --render.
+surface="${BENCHAPP_SURFACE:-}"
+if [[ -z "$surface" && -n "${QUASAR_STREAM_WIDTH:-}" && -n "${QUASAR_STREAM_HEIGHT:-}" ]]; then
+  surface="${QUASAR_STREAM_WIDTH}x${QUASAR_STREAM_HEIGHT}"
+fi
+
 case "$scene" in static|pan|swarm|flythrough|ui) ;; *) fail "BENCHAPP_SCENE must be static|pan|swarm|flythrough|ui (got '$scene')";; esac
 [[ "$load"   =~ ^([0-9]|10)$ ]] || fail "BENCHAPP_LOAD must be 0..10 (got '$load')"
 [[ "$motion" =~ ^([0-9]|10)$ ]] || fail "BENCHAPP_MOTION must be 0..10 (got '$motion')"
@@ -93,6 +107,7 @@ args=(
 )
 
 # Optional knobs: only passed when set, so the app's own defaults stay authoritative.
+[[ -n "$surface"                   ]] && args+=(--surface "$surface")
 [[ -n "${BENCHAPP_RENDER:-}"       ]] && args+=(--render "$BENCHAPP_RENDER")
 [[ -n "${BENCHAPP_LOOP_SCRIPT:-}"  ]] && args+=(--loop-script "$BENCHAPP_LOOP_SCRIPT")
 [[ -n "${BENCHAPP_CUT_EVERY_S:-}"  ]] && args+=(--cut-every-s "$BENCHAPP_CUT_EVERY_S")
@@ -101,8 +116,8 @@ args=(
 [[ -n "${BENCHAPP_MARKER_X:-}"     ]] && args+=(--marker-x "$BENCHAPP_MARKER_X")
 [[ -n "${BENCHAPP_MARKER_Y:-}"     ]] && args+=(--marker-y "$BENCHAPP_MARKER_Y")
 
-printf '[benchapp-launch] run=%s scene=%s load=%s motion=%s fps=%s marker_scale=%s out=%s control=%s\n' \
-  "$run_id" "$scene" "$load" "$motion" "$fps" "$marker_scale" "$out_dir" "$control_file"
+printf '[benchapp-launch] run=%s scene=%s load=%s motion=%s fps=%s surface=%s marker_scale=%s out=%s control=%s\n' \
+  "$run_id" "$scene" "$load" "$motion" "$fps" "${surface:-compositor}" "$marker_scale" "$out_dir" "$control_file"
 
 if [[ "${BENCHAPP_DRY_RUN:-0}" = "1" ]]; then
   printf 'benchapp %s\n' "${args[*]}"
