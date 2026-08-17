@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# quasar-benchapp — launcher for the instrumented streaming probe.
+#
+# What this image is for: quasar-unigine gives us a *workload* (a real 3D scene
+# that costs the encoder something), but it is opaque — nothing in a Heaven frame
+# tells you which rendered frame you are looking at. benchapp is the *instrument*:
+# every frame carries a luma marker with its frame index and CLOCK_REALTIME
+# submission time, so a decoder running on the browser-received video can
+# attribute each received frame to a rendered one and measure the whole
+# glass-to-glass path.
+#
+# This launcher does the Quasar-specific wiring only; all rendering knobs stay in
+# the app's own BENCHAPP_* surface (see quasar-benchgame README).
+
+log()  { printf '%s quasar-benchapp: %s\n' "$(date -Iseconds)" "$*" >&2; }
+fail() { log "FATAL: $*"; exit 1; }
+
+# --- Wayland socket ----------------------------------------------------------
+# NOTE the difference from quasar-steam/quasar-unigine: those repoint
+# XDG_RUNTIME_DIR because a nested gamescope needs a private, user-owned runtime
+# dir for its own sockets. benchapp is a plain Wayland client with no nested
+# compositor, so it must keep the node-agent's XDG_RUNTIME_DIR exactly as handed
+# over — repointing it here would orphan WAYLAND_DISPLAY and the probe would come
+# up headless (or not at all).
+[[ -n "${WAYLAND_DISPLAY:-}" ]] || fail "WAYLAND_DISPLAY is unset — the node-agent did not hand over a compositor socket"
+if [[ "${WAYLAND_DISPLAY}" != /* ]]; then
+  sock="${XDG_RUNTIME_DIR:-/run/quasar-wayland}/${WAYLAND_DISPLAY}"
+else
+  sock="${WAYLAND_DISPLAY}"
+fi
+[[ -S "$sock" ]] || fail "no Wayland socket at $sock"
+
+# --- Output locations (managed home) -----------------------------------------
+# Everything the harness collects has to survive the container, so it lands in
+# the managed home, which the host exposes at
+# /var/lib/quasar/homes/<user>/<app>/.
+root="${BENCHAPP_ROOT:-$HOME/benchapp}"
+run_id="$(date -u +%Y%m%dT%H%M%SZ)"
+out_dir="${BENCHAPP_OUT:-$root/run-$run_id}"
+control_file="${BENCHAPP_CONTROL_FILE:-$root/control.jsonl}"
+control_sock="${BENCHAPP_CONTROL_SOCK:-$root/control.sock}"
+mkdir -p "$out_dir" "$(dirname "$control_file")"
+
+# The control file must EXIST before benchapp starts: the reader opens it, keeps a
+# byte offset, and only replays from zero on truncation. Recreating it per run
+# also stops a previous session's queued commands from being replayed into this
+# one — a stale `{"scene":"swarm"}` silently invalidating a static-scene
+# measurement is exactly the kind of bug that is invisible in the results.
+: > "$control_file"
+rm -f "$control_sock"
+
+# A stable symlink so a collector does not have to glob for the newest run.
+ln -sfn "$out_dir" "$root/latest"
+
+# --- Knobs -------------------------------------------------------------------
+scene="${BENCHAPP_SCENE:-flythrough}"
+load="${BENCHAPP_LOAD:-5}"
+motion="${BENCHAPP_MOTION:-5}"
+# The session's negotiated refresh (quasar#384) is the right pacing target; an
+# explicit BENCHAPP_FPS wins so a run can deliberately under/over-drive it.
+fps="${BENCHAPP_FPS:-${QUASAR_STREAM_FPS:-60}}"
+seed="${BENCHAPP_SEED:-1}"
+duration_s="${BENCHAPP_DURATION_S:-0}"   # 0 = run until the session ends
+
+# Marker scale 0.5, not the app default of 1.0. The marker canvas is 30x19 cells
+# at max(16, floor(surface_h * 0.03 * scale)) px per cell, so scale 1.0 at 1080p
+# is a 960x608 block — 28% of the frame area — of per-frame-changing high-contrast
+# black and white. That is a large, codec-hostile constant added to every
+# encoder-difficulty measurement this image is used for. At 0.5 the cell hits its
+# 16 px floor and the block is 480x304 (7% of area), and it still decodes with a
+# valid CRC after a 1080p->720p downscale at 2 Mbps (verified, confidence 0.97).
+marker_scale="${BENCHAPP_MARKER_SCALE:-0.5}"
+
+case "$scene" in static|pan|swarm|flythrough|ui) ;; *) fail "BENCHAPP_SCENE must be static|pan|swarm|flythrough|ui (got '$scene')";; esac
+[[ "$load"   =~ ^([0-9]|10)$ ]] || fail "BENCHAPP_LOAD must be 0..10 (got '$load')"
+[[ "$motion" =~ ^([0-9]|10)$ ]] || fail "BENCHAPP_MOTION must be 0..10 (got '$motion')"
+[[ "$fps"    =~ ^[0-9]+$ ]]     || fail "BENCHAPP_FPS must be numeric (got '$fps')"
+[[ "$duration_s" =~ ^[0-9]+$ ]] || fail "BENCHAPP_DURATION_S must be numeric (got '$duration_s')"
+
+args=(
+  --scene "$scene"
+  --load "$load"
+  --motion "$motion"
+  --fps "$fps"
+  --seed "$seed"
+  --out "$out_dir"
+  --control-file "$control_file"
+  --control-sock "$control_sock"
+  --marker-scale "$marker_scale"
+  --duration-s "$duration_s"
+)
+
+# Optional knobs: only passed when set, so the app's own defaults stay authoritative.
+[[ -n "${BENCHAPP_RENDER:-}"       ]] && args+=(--render "$BENCHAPP_RENDER")
+[[ -n "${BENCHAPP_LOOP_SCRIPT:-}"  ]] && args+=(--loop-script "$BENCHAPP_LOOP_SCRIPT")
+[[ -n "${BENCHAPP_CUT_EVERY_S:-}"  ]] && args+=(--cut-every-s "$BENCHAPP_CUT_EVERY_S")
+[[ -n "${BENCHAPP_DROP_EVERY:-}"   ]] && args+=(--drop-every "$BENCHAPP_DROP_EVERY")
+[[ -n "${BENCHAPP_PULSE_FRAMES:-}" ]] && args+=(--pulse-frames "$BENCHAPP_PULSE_FRAMES")
+[[ -n "${BENCHAPP_MARKER_X:-}"     ]] && args+=(--marker-x "$BENCHAPP_MARKER_X")
+[[ -n "${BENCHAPP_MARKER_Y:-}"     ]] && args+=(--marker-y "$BENCHAPP_MARKER_Y")
+
+printf '[benchapp-launch] run=%s scene=%s load=%s motion=%s fps=%s marker_scale=%s out=%s control=%s\n' \
+  "$run_id" "$scene" "$load" "$motion" "$fps" "$marker_scale" "$out_dir" "$control_file"
+
+if [[ "${BENCHAPP_DRY_RUN:-0}" = "1" ]]; then
+  printf 'benchapp %s\n' "${args[*]}"
+  exit 0
+fi
+
+# --- Graceful shutdown -------------------------------------------------------
+# benchapp installs no SIGTERM handler (quasar-benchgame src/main.rs — the only
+# graceful exits are --duration-s and a `{"quit":true}` command), so a plain
+# `docker stop` kills it mid-write and no final summary.json is ever produced.
+# Rather than run it under exec, supervise it: on SIGTERM, append the quit command
+# it *does* understand and give it the stop grace period to flush.
+#
+# frames.jsonl/events.jsonl are flushed at least once per second regardless, so
+# only the final summary and the last sub-second of frames are at risk — but the
+# summary is the cheapest thing for a harness to read, so it is worth this trap.
+term_grace="${BENCHAPP_TERM_GRACE_S:-8}"
+child=0
+on_term() {
+  log "SIGTERM — requesting graceful quit (grace ${term_grace}s)"
+  printf '%s\n' '{"quit":true}' >> "$control_file" 2>/dev/null || true
+  for _ in $(seq 1 "$((term_grace * 10))"); do
+    kill -0 "$child" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  log "grace expired — killing $child"
+  kill -TERM "$child" 2>/dev/null || true
+}
+trap on_term TERM INT
+
+# benchapp-run.sh is the upstream repo's own env->CLI entrypoint, kept in the
+# image so the app's documented interface still exists; explicit flags above
+# always win over its env mapping (it skips any option already present).
+/usr/local/bin/benchapp-run.sh "${args[@]}" "$@" &
+child=$!
+wait "$child" || rc=$?
+rc="${rc:-0}"
+log "benchapp exited rc=$rc; artefacts in $out_dir"
+exit "$rc"
