@@ -23,6 +23,54 @@
 
 Host requirements for `quasar-kde`: the parent Wayland compositor socket must be handed off (`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`), same as other Quasar desktop sessions. A persistent `/home/quasar` volume is required (image carries `org.quasar.image.persist=/home/quasar`; one session per home volume) and the image carries `org.quasar.image.session=desktop`. Same `--shm-size` requirement as `quasar-steam`. `no_new_privileges` must stay `false` (Steam's startup re-escalation, same reason as `quasar-steam`). User-level Flatpak (Discover, `flatpak install`/`flatpak run`) needs an unprivileged user namespace — the agent must run the container with a seccomp profile permitting `clone(CLONE_NEWUSER)` — **and** the container's default `/proc` masking disabled (`docker run --security-opt systempaths=unconfined`): without it, `flatpak install` succeeds but `flatpak run`'s bwrap sandbox fails to mount `/proc` (live-verified 2026-08-13). Mounting `/run/quasar/share` for agent-provided game-menu entries is optional.
 
+### `quasar-unigine` — the benchmark workload
+
+`quasar-unigine` builds on `quasar-app` and carries **UNIGINE Heaven 4.0** and **UNIGINE Superposition 1.1** as an autonomous, deterministic GPU load for Quasar streaming tests. It is not a game tile; it exists so that encoder, ABR, and latency work has a repeatable workload that drives itself.
+
+**Why these benchmarks and not a game.** The previous candidate (Redout, via Steam) stopped at a photosensitivity gate that needed a scripted keypress, and once past it the ship sat stationary on the grid. UNIGINE's benchmarks take **no input at all**: the `PHORONIX` token in `-extern_define` selects the automation branch of the system script, which runs the full scene sequence unattended, prints a score, and exits. The launcher then restarts it. That gives a genuinely moving flythrough with no harness-side input plumbing.
+
+**Why gamescope is in this image.** The benchmarks are X11/GLX clients and Quasar hands a session a Wayland socket, so something has to bridge. Stock Fedora `gamescope` is used, not the patched build `quasar-steam` carries — that patch exists only for Big Picture's Passthrough pointer routing, and a benchmark that takes no input does not need it. Installing the RPM also drags in Xwayland and gamescope's library closure, which is what makes it the lightest working route; a hand-rolled rootless Xwayland would still need a window manager to size and map the benchmark window. The launcher uses the same ready-socket handshake as `quasar-steam` (gamescope runs with no client argument and reports its real `DISPLAY` through `-R`), and runs the benchmark as a **sibling** so each pass can be restarted without tearing the X server down.
+
+**Configuration** (all env, all optional):
+
+| var | default | meaning |
+|---|---|---|
+| `UNIGINE_BENCH` | `heaven` | `heaven` or `superposition` |
+| `UNIGINE_WIDTH` / `UNIGINE_HEIGHT` | `QUASAR_STREAM_WIDTH/HEIGHT`, else `1920x1080` | render size |
+| `UNIGINE_REFRESH` | `QUASAR_STREAM_FPS`, else `60` | gamescope output refresh |
+| `UNIGINE_QUALITY` | `high` (heaven) / `medium` (superposition) | heaven: `low\|medium\|high\|ultra`; superposition: `low\|medium\|high\|extreme` |
+| `UNIGINE_TESSELLATION` | `normal` | heaven only: `disabled\|moderate\|normal\|extreme` |
+| `UNIGINE_PRESET` | `1080p_medium` | superposition only, becomes `PRESET_<upper>` |
+| `UNIGINE_FULLSCREEN` | `1` | `-video_fullscreen` |
+| `UNIGINE_LOOP` | `1` | restart the run when it exits |
+| `UNIGINE_LOOP_GAP` | `5` | seconds between passes |
+| `UNIGINE_MAX_PASSES` | `0` | `0` = unbounded |
+| `UNIGINE_SOUND` | `null` | `-sound_app` |
+| `UNIGINE_EXTRA_ARGS` | — | appended verbatim |
+| `UNIGINE_DRY_RUN` | `0` | print the resolved command and exit; needs no GPU/X server |
+
+**No baked resolution.** `UNIGINE_WIDTH`/`HEIGHT` are deliberately unset in the image: a baked value is non-empty and would shadow the session mode Quasar injects as `QUASAR_STREAM_*` (quasar#384), pinning every session to it. The same applies to an app row's `env` — leave resolution out of it unless you specifically want to decouple render size from stream size.
+
+**Where results land.** Everything goes to the managed home (`org.quasar.image.persist=/home/quasar`), so the host can collect it from `/var/lib/quasar/homes/<user>/<app>/`:
+
+- `~/unigine-bench/run-<UTC timestamp>/pass-NNN.log` — the pass's full stdout+stderr
+- `~/unigine-bench/run-<UTC timestamp>/summary.jsonl` — one JSON object per pass
+- `~/.Heaven/` and `~/.Superposition/` — the engine's own state
+
+Every score line is *also* teed to the container's stdout prefixed `[unigine-result]`, so `docker logs` of the session container is a sufficient result channel on its own.
+
+The engine rewrites its `engine_config` on exit, so `/opt/unigine/*/data` is world-writable in the image. That write lands in the container's ephemeral upper layer rather than the managed home, so every session starts from the pristine baked config — deliberate, and the reason runs are comparable.
+
+**Building.** `WITH_SUPERPOSITION=1` is the default and adds ~1.7 GB extracted:
+
+```sh
+./scripts/build.sh quasar-unigine                       # Heaven + Superposition
+WITH_SUPERPOSITION=0 ./scripts/build.sh quasar-unigine  # Heaven only, disk-constrained hosts
+./scripts/verify-unigine.sh
+```
+
+The installers are pulled from `assets.unigine.com` at build time with pinned sha256 sums, into a BuildKit cache mount so a rebuild does not re-pull 1.9 GB. **This image is deliberately not published to GHCR** — it redistributes third-party binaries under their own EULAs — which is why its `quasar-manifest.json` entry is `kind: template` rather than `prebuilt`.
+
 ### Patched KWin (nested mode ladder)
 
 `quasar-kde` does **not** ship Fedora's stock `kwin`. It rebuilds the distro source package with `images/quasar-kde/kwin/0001-nested-backend-mode-ladder.patch` applied, in a discarded `kwin-build` Dockerfile stage (`images/quasar-kde/kwin/build-kwin.sh`).

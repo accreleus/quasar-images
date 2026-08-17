@@ -67,6 +67,38 @@
         "mounts": []
       },
       "notes": "Template mechanism proof for image-management P4. Not launchable as a game; exists to exercise download-context -> docker build -> host_images building->ready."
+    },
+    {
+      "id": "unigine-bench",
+      "display_name": "UNIGINE Benchmark",
+      "description": "UNIGINE Heaven 4.0 and Superposition 1.1 as a self-driving, looping GPU benchmark workload for Quasar streaming tests. Takes no input: the PHORONIX automation define runs the full scene sequence unattended, prints a score, exits, and the launcher restarts it. Bridges Quasar's Wayland session to the benchmarks' X11/GLX with stock gamescope.",
+      "kind": "template",
+      "version": "2026.08.17",
+      "dockerfile": "images/quasar-unigine/Dockerfile",
+      "build_args": {
+        "WITH_HEAVEN": "1",
+        "WITH_SUPERPOSITION": "1"
+      },
+      "runtime": {
+        "preset_name": "UNIGINE Benchmark",
+        "gpu": true,
+        "no_new_privileges": true,
+        "managed_home": true,
+        "home_container_path": "/home/quasar",
+        "network": "none",
+        "args": [],
+        "env": {
+          "UNIGINE_BENCH": "heaven",
+          "UNIGINE_QUALITY": "high",
+          "UNIGINE_TESSELLATION": "normal",
+          "UNIGINE_FULLSCREEN": "1",
+          "UNIGINE_LOOP": "1",
+          "UNIGINE_LOOP_GAP": "5",
+          "UNIGINE_SOUND": "null"
+        },
+        "mounts": []
+      },
+      "notes": "kind=template on purpose: the UNIGINE installers are ~1.9 GB of third-party downloads with their own EULAs, so this image is deliberately NOT published to ghcr and has no registry_ref to pin. Unlike steam/kde this image needs no security relaxations — no_new_privileges stays true and network stays none (the benchmarks are fully self-contained; the only network traffic is at BUILD time). Resolution is deliberately absent from env: the launcher takes the session mode from QUASAR_STREAM_WIDTH/HEIGHT (quasar#384), and a pinned UNIGINE_WIDTH/HEIGHT here would shadow it for every session. Results land in the managed home under ~/unigine-bench/run-<ts>/ and are also teed to stdout with a [unigine-result] prefix."
     }
   ]
 }
