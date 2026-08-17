@@ -99,6 +99,19 @@ pass "launcher: QUASAR_STREAM_FPS + BENCHAPP_* overrides honoured"
     --entrypoint /bin/bash "$image" -c 'exec /usr/local/bin/quasar-benchapp' >/dev/null 2>&1
 pass "launcher fails closed on bad scene and on missing Wayland socket"
 
+# --- the launcher must hand over, not supervise ------------------------------
+# benchapp handles SIGTERM itself (quasar-benchgame 6effb6c). A shell left sitting
+# between PID 1 and the app would have to forward the signal correctly, and a
+# missed forward costs the final summary.json on every `docker stop` -- silently,
+# since frames.jsonl/events.jsonl still look fine.
+docker run --rm --entrypoint /bin/bash "$image" -lc '
+  set -e
+  grep -qE "^exec /usr/local/bin/benchapp-run.sh" /usr/local/bin/quasar-benchapp
+  grep -qE "^exec /usr/local/bin/benchapp"        /usr/local/bin/benchapp-run.sh
+  ! grep -q "trap .* TERM" /usr/local/bin/quasar-benchapp
+'
+pass "launcher execs through to benchapp (no supervising shell, no TERM trap)"
+
 # --- the actual render + marker path, on llvmpipe -----------------------------
 # The most valuable GPU-less assertion available: render real frames offscreen,
 # prove they are deterministic by frame index, and prove the marker still carries

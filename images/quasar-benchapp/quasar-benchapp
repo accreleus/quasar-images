@@ -124,36 +124,16 @@ if [[ "${BENCHAPP_DRY_RUN:-0}" = "1" ]]; then
   exit 0
 fi
 
-# --- Graceful shutdown -------------------------------------------------------
-# benchapp installs no SIGTERM handler (quasar-benchgame src/main.rs — the only
-# graceful exits are --duration-s and a `{"quit":true}` command), so a plain
-# `docker stop` kills it mid-write and no final summary.json is ever produced.
-# Rather than run it under exec, supervise it: on SIGTERM, append the quit command
-# it *does* understand and give it the stop grace period to flush.
+# --- Handover ----------------------------------------------------------------
+# exec, deliberately. An earlier revision supervised benchapp as a child and
+# trapped SIGTERM to append the `{"quit":true}` command, because the app had no
+# signal handler and a plain `docker stop` killed it mid-write with no final
+# summary.json. quasar-benchgame 6effb6c fixed that at the source: SIGTERM/SIGINT
+# now drive the same graceful path as --duration-s, so the workaround is not just
+# unnecessary, it is worse than nothing -- a shell between PID 1 and the app is
+# one more process that has to forward the signal correctly.
 #
-# frames.jsonl/events.jsonl are flushed at least once per second regardless, so
-# only the final summary and the last sub-second of frames are at risk — but the
-# summary is the cheapest thing for a harness to read, so it is worth this trap.
-term_grace="${BENCHAPP_TERM_GRACE_S:-8}"
-child=0
-on_term() {
-  log "SIGTERM — requesting graceful quit (grace ${term_grace}s)"
-  printf '%s\n' '{"quit":true}' >> "$control_file" 2>/dev/null || true
-  for _ in $(seq 1 "$((term_grace * 10))"); do
-    kill -0 "$child" 2>/dev/null || return 0
-    sleep 0.1
-  done
-  log "grace expired — killing $child"
-  kill -TERM "$child" 2>/dev/null || true
-}
-trap on_term TERM INT
-
 # benchapp-run.sh is the upstream repo's own env->CLI entrypoint, kept in the
 # image so the app's documented interface still exists; explicit flags above
 # always win over its env mapping (it skips any option already present).
-/usr/local/bin/benchapp-run.sh "${args[@]}" "$@" &
-child=$!
-wait "$child" || rc=$?
-rc="${rc:-0}"
-log "benchapp exited rc=$rc; artefacts in $out_dir"
-exit "$rc"
+exec /usr/local/bin/benchapp-run.sh "${args[@]}" "$@"

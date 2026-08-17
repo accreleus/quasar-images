@@ -117,13 +117,15 @@ Two channels, both real:
 
   Glob for a collector: `benchapp/run-*/{frames,events}.jsonl`.
 
-### Graceful shutdown is supervised, not exec'd
+### Graceful shutdown
 
-The app installs no `SIGTERM` handler — its only graceful exits are `--duration-s`
-elapsing and a `{"quit":true}` command. A plain `docker stop` would therefore kill it
-mid-write with no final `summary.json`. The launcher runs it as a child and, on
-`SIGTERM`, appends the quit command it *does* understand, then waits
-`BENCHAPP_TERM_GRACE_S` (default 8 s) before escalating. `frames.jsonl` and
-`events.jsonl` flush at least once per second regardless, so only the final summary and
-the last sub-second of frames were ever at risk — but the summary is the cheapest thing
-for a harness to read.
+The launcher `exec`s the app; `benchapp-run.sh` `exec`s in turn, so `benchapp` is the
+only process left and `SIGTERM` from `docker stop` reaches it directly.
+
+An earlier revision of this launcher supervised the app as a child and trapped `SIGTERM`
+to append the `{"quit":true}` command, because the app had no signal handler and a plain
+`docker stop` killed it mid-write with no final `summary.json`. `quasar-benchgame`
+`6effb6c` fixed that at the source — `SIGTERM`/`SIGINT` now drive the same graceful path
+as `--duration-s`: final flush, `summary.json`, `[benchapp-result]`, exit 0 — so the
+workaround is gone. A shell sitting between PID 1 and the app is one more process that
+has to forward the signal correctly, which is a liability once the app handles it itself.
