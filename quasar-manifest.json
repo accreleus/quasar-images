@@ -37,6 +37,7 @@
         "preset_name": "KDE Desktop",
         "gpu": true,
         "no_new_privileges": false,
+        "systempaths_unconfined": true,
         "managed_home": true,
         "home_container_path": "/home/quasar",
         "network": "bridge",
@@ -44,7 +45,7 @@
         "env": {},
         "mounts": []
       },
-      "notes": "no_new_privileges MUST be false: the bundled Steam desktop client's startup re-escalates via sudo, same as the steam image. network MUST be \"bridge\" (Steam sign-in/downloads). Desktop-session host requirements beyond the preset (agent-side, not yet preset-mappable): unprivileged user namespaces (seccomp permitting CLONE_NEWUSER — the agent's seccomp=unconfined covers it) AND unmasked /proc (--security-opt systempaths=unconfined) for user Flatpak's bwrap; without the latter flatpak install works but flatpak run fails mounting /proc (live-verified 2026-08-13). One running session per home volume (org.quasar.image.session=desktop)."
+      "notes": "no_new_privileges MUST be false: the bundled Steam desktop client's startup re-escalates via sudo, same as the steam image. network MUST be \"bridge\" (Steam sign-in/downloads). systempaths_unconfined MUST be true: user Flatpak's bwrap mounts a fresh /proc inside its own mount namespace, and Docker's masked paths block that mount even with seccomp=unconfined already in place — flatpak install works but flatpak run fails mounting /proc without it (live-verified 2026-08-13). Desktop-session host requirements beyond the preset (agent-side, not yet preset-mappable): unprivileged user namespaces (seccomp permitting CLONE_NEWUSER — the agent's seccomp=unconfined covers it). One running session per home volume (org.quasar.image.session=desktop)."
     },
     {
       "id": "quasar-probe",
