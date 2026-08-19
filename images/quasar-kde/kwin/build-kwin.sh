@@ -13,10 +13,13 @@ set -euo pipefail
 #
 # Output: /tmp/kwin-rpms/*.rpm  (binary RPMs only, Release suffixed .quasar1)
 #
-# See ../README notes and 0001-nested-backend-mode-ladder.patch for WHY the
-# patch exists and what re-diffing costs on a Fedora kwin update.
+# See ../README notes and kwin/*.patch for WHY the patches exist and what
+# re-diffing costs on a Fedora kwin update.
 
-patch_file="${QUASAR_KWIN_PATCH:-/tmp/kwin-patches/0001-nested-backend-mode-ladder.patch}"
+# EVERY *.patch in the directory is applied, in sorted (NNNN-) order: the
+# patches build on each other (0002 edits code 0001 introduced), so the order is
+# load-bearing and adding one is just dropping a file in.
+patch_dir="${QUASAR_KWIN_PATCH_DIR:-/tmp/kwin-patches}"
 out_dir="${QUASAR_KWIN_RPM_DIR:-/tmp/kwin-rpms}"
 topdir="${QUASAR_KWIN_TOPDIR:-/tmp/kwin-build}"
 # Marks every artifact this script produces, so verify-kde.sh can assert that
@@ -25,7 +28,9 @@ dist_suffix="${QUASAR_KWIN_DIST_SUFFIX:-.quasar1}"
 
 log() { printf '%s build-kwin: %s\n' "$(date -Iseconds)" "$*" >&2; }
 
-test -f "$patch_file" || { log "FATAL: patch not found at $patch_file"; exit 1; }
+mapfile -t patches < <(find "$patch_dir" -maxdepth 1 -name '*.patch' | sort)
+test "${#patches[@]}" -gt 0 || { log "FATAL: no *.patch found in $patch_dir"; exit 1; }
+log "patches to apply: ${patches[*]##*/}"
 
 log "installing build tooling"
 dnf --setopt=install_weak_deps=False -y install \
@@ -68,26 +73,34 @@ log "source package NVR matches the pin: ${srpm_nvr}"
 log "installing build dependencies (this is the slow part)"
 dnf builddep -y --setopt=install_weak_deps=False "$spec" >/dev/null
 
-log "wiring the patch into the spec"
-cp "$patch_file" "$topdir/SOURCES/quasar-kwin-mode-ladder.patch"
-# %autosetup -p1 applies every PatchN in order, so declaring it is enough --
-# there is no %patch line to add. Insert after the last existing Patch/Source
-# line so the numbering cannot collide with a distro patch added later.
-python3 - "$spec" <<'PY'
-import re, sys
+log "wiring the patches into the spec"
+for patch in "${patches[@]}"; do
+  cp "$patch" "$topdir/SOURCES/quasar-$(basename "$patch")"
+done
+# %autosetup -p1 applies every PatchN in ascending order, so declaring them is
+# enough -- there is no %patch line to add. They are declared in sorted filename
+# order, which is the order they must apply in. Insert after the last existing
+# Patch/Source line so the numbering cannot collide with a distro patch added
+# later.
+python3 - "$spec" "${patches[@]}" <<'PY'
+import os, re, sys
 path = sys.argv[1]
+names = ['quasar-' + os.path.basename(p) for p in sys.argv[2:]]
 text = open(path).read()
-if 'quasar-kwin-mode-ladder.patch' in text:
-    sys.exit(0)
-nums = [int(m) for m in re.findall(r'^Patch(\d+)\s*:', text, re.M)]
-n = max(nums) + 1 if nums else 1000
-anchor = list(re.finditer(r'^(?:Patch\d*|Source\d*)\s*:.*$', text, re.M))
-if not anchor:
-    sys.exit('no Source:/Patch: line found in the spec')
-last = anchor[-1]
-text = text[:last.end()] + f'\nPatch{n}:  quasar-kwin-mode-ladder.patch' + text[last.end():]
+declared = []
+for name in names:
+    if name in text:
+        continue
+    nums = [int(m) for m in re.findall(r'^Patch(\d+)\s*:', text, re.M)]
+    n = max(nums) + 1 if nums else 1000
+    anchor = list(re.finditer(r'^(?:Patch\d*|Source\d*)\s*:.*$', text, re.M))
+    if not anchor:
+        sys.exit('no Source:/Patch: line found in the spec')
+    last = anchor[-1]
+    text = text[:last.end()] + f'\nPatch{n}:  {name}' + text[last.end():]
+    declared.append(f'Patch{n}={name}')
 open(path, 'w').write(text)
-print(f'declared Patch{n}')
+print('declared ' + ', '.join(declared) if declared else 'nothing to declare')
 PY
 
 # The build is marked through %dist (below), not by rewriting Release: -- so

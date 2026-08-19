@@ -24,6 +24,15 @@ if [[ ! -s "$build_context_patch" ]]; then
 fi
 grep -q "src/backends/wayland/wayland_output.cpp" "$build_context_patch"
 grep -q "src/backends/wayland/wayland_display.cpp" "$build_context_patch"
+# 0002 is what makes the Display KCM's SCALE slider work under a host that
+# implements wp_fractional_scale_v1 -- which Quasar's compositor does, so
+# without it the slider is inert in exactly the environment that matters.
+scale_patch="images/quasar-kde/kwin/0002-nested-backend-kscreen-scale.patch"
+if [[ ! -s "$scale_patch" ]]; then
+  echo "FAIL: $scale_patch is missing or empty in the build context" >&2
+  exit 1
+fi
+grep -q "src/backends/wayland/wayland_output.cpp" "$scale_patch"
 if [[ ! -x images/quasar-kde/kwin/build-kwin.sh ]]; then
   echo "FAIL: images/quasar-kde/kwin/build-kwin.sh is missing or not executable" >&2
   exit 1
@@ -77,7 +86,7 @@ docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc '
 # kwin is a Wayland CLIENT of another compositor. So an outer --virtual kwin
 # plays the host and the inner one is the nested session under test.
 # Hard time-box: every wait is bounded and the container is --rm.
-echo "running the nested mode-ladder smoke (time-boxed)"
+echo "running the nested mode-ladder + scale smoke (time-boxed)"
 smoke="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -c '
   export XDG_RUNTIME_DIR=/tmp/rt HOME=/tmp/h
   mkdir -p "$XDG_RUNTIME_DIR" "$HOME"; chmod 0700 "$XDG_RUNTIME_DIR"
@@ -111,11 +120,35 @@ smoke="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -c '
   geom=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Geometry: //p" | sed "s/\[[0-9;]*m//g" | head -1)
   echo "GEOMETRY=$geom"
   case "$geom" in
-    *"0,0 1280x720"*) echo "SMOKE-OK" ;;
+    *"0,0 1280x720"*) : ;;
     *) echo "SMOKE-FAIL: applying 1280x720 left the output at [$geom]"; exit 1 ;;
   esac
+
+  # 0002: the SCALE slider. The host here is kwin_wayland --virtual, which DOES
+  # implement wp_fractional_scale_v1 -- the same situation as Quasar, and the
+  # exact case 0001 refused to apply a scale in.
+  #
+  # Assert on the LOGICAL geometry, not on the reported scale: 1280x720 at
+  # scale 1.5 is a 853x480 desktop, and the mode must NOT have moved (the buffer
+  # the host sees stays 1280x720, which is what keeps the streamed resolution
+  # pinned).
+  kscreen-doctor output.1.scale.1.5 >/dev/null 2>&1
+  sleep 2
+  sgeom=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Geometry: //p" | sed "s/\[[0-9;]*m//g" | head -1)
+  smode=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Modes: //p" | tr -d "\033" | sed "s/\[[0-9;]*m//g" | grep -oE "[0-9]+x[0-9]+@[0-9.]+\*" | head -1)
+  echo "SCALED-GEOMETRY=$sgeom"
+  echo "SCALED-CURRENT-MODE=$smode"
+  case "$sgeom" in
+    *"0,0 853x480"*) : ;;
+    *) echo "SMOKE-FAIL: scale 1.5 over a 1280x720 mode left the desktop at [$sgeom], expected 853x480"; exit 1 ;;
+  esac
+  case "$smode" in
+    1280x720@*) : ;;
+    *) echo "SMOKE-FAIL: setting the scale moved the current MODE to [$smode]; it must stay 1280x720"; exit 1 ;;
+  esac
+  echo "SMOKE-OK"
 ' 2>&1)" || { echo "$smoke" >&2; echo "FAIL: nested mode-ladder smoke failed" >&2; exit 1; }
-printf '%s\n' "$smoke" | grep -E '^(MODES|GEOMETRY|SMOKE-OK)'
+printf '%s\n' "$smoke" | grep -E '^(MODES|GEOMETRY|SCALED-GEOMETRY|SCALED-CURRENT-MODE|SMOKE-OK)'
 grep -q 'SMOKE-OK' <<<"$smoke"
 
 # gamescope must be ABSENT from this image (quasar-kde carries zero gamescope/
