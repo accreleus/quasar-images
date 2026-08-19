@@ -129,9 +129,9 @@ smoke="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -c '
   # exact case 0001 refused to apply a scale in.
   #
   # Assert on the LOGICAL geometry, not on the reported scale: 1280x720 at
-  # scale 1.5 is a 853x480 desktop, and the mode must NOT have moved (the buffer
-  # the host sees stays 1280x720, which is what keeps the streamed resolution
-  # pinned).
+  # scale 1.5 is an 854x480 desktop (kwin rounds the logical size UP), and the
+  # mode must NOT have moved -- the buffer the host sees stays 1280x720, which is
+  # what keeps the streamed resolution pinned.
   kscreen-doctor output.1.scale.1.5 >/dev/null 2>&1
   sleep 2
   sgeom=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Geometry: //p" | sed "s/\[[0-9;]*m//g" | head -1)
@@ -139,8 +139,8 @@ smoke="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -c '
   echo "SCALED-GEOMETRY=$sgeom"
   echo "SCALED-CURRENT-MODE=$smode"
   case "$sgeom" in
-    *"0,0 853x480"*) : ;;
-    *) echo "SMOKE-FAIL: scale 1.5 over a 1280x720 mode left the desktop at [$sgeom], expected 853x480"; exit 1 ;;
+    *"0,0 854x480"*) : ;;
+    *) echo "SMOKE-FAIL: scale 1.5 over a 1280x720 mode left the desktop at [$sgeom], expected 854x480"; exit 1 ;;
   esac
   case "$smode" in
     1280x720@*) : ;;
