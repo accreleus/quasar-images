@@ -49,14 +49,24 @@ the build is two steps:
 docker build -t quasar-benchapp:src .
 
 # 2. here
-QUASAR_IMAGE_TAG=dev ./scripts/build.sh quasar-benchapp
+BENCHAPP_GIT_SHA="$(git -C /path/to/quasar-benchgame rev-parse --short HEAD)" \
+  QUASAR_IMAGE_TAG=dev ./scripts/build.sh quasar-benchapp
 ./scripts/verify-benchapp.sh --no-build
 ```
 
 `BENCHAPP_SRC_IMAGE` overrides the source-stage image; `BENCHAPP_GIT_SHA` is recorded in
 the `org.quasar.benchapp.git-sha` label. This is why the manifest entry is
 `kind: template` with no `registry_ref` — nothing to pin until the source repo is
-published.
+published. **Always pass `BENCHAPP_GIT_SHA` explicitly** — a build without it embeds
+`unknown` in the label, and `docker inspect` becomes the only way to tell which
+benchgame commit is actually running.
+
+### Known builds
+
+| quasar-images | quasar-benchgame | notes |
+|---|---|---|
+| `0.1.0` | (unlabelled, pre-`commit_ms`) | first cut of the image; `org.quasar.benchapp.git-sha=unknown` |
+| `0.1.1` | `946da34` | adds the `commit_ms` (`CLOCK_REALTIME` immediately after `wl_surface.commit`) that lets the quasar harness split `stage_host_to_receive` into `app.render_*` / `app.repaint_wait_*` — see quasar's `docs/reports/2026-08-19-latency-budget/REPORT.md` section 5 and `docs/testing-bench-mode.md` |
 
 ## Knobs
 
