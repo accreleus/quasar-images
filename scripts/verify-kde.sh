@@ -4,8 +4,18 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# The image under test. `scripts/build.sh` tags what it builds with
+# $QUASAR_IMAGE_TAG (default `dev`), so a verify script that hardcodes `:dev`
+# silently checks a DIFFERENT image than the one just built -- which is exactly
+# what happened on 2026-08-20: a freshly built quasar-steam passed every
+# assertion while this script reported a failure, because it was reading a
+# months-old `:dev` left on the box by another branch. Honour the same variable
+# the builder uses, and allow an explicit override.
+TAG="${QUASAR_IMAGE_TAG:-dev}"
+KDE_IMAGE="${QUASAR_KDE_IMAGE:-quasar-kde:$TAG}"
+
 for executable in startplasma-wayland kwin_wayland dbus-run-session flatpak steam bwrap quasar-kde xdg-user-dirs-update firefox; do
-  docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc "command -v $executable >/dev/null"
+  docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "command -v $executable >/dev/null"
 done
 
 # --- Patched KWin (nested mode ladder) --------------------------------------
@@ -49,9 +59,9 @@ if [[ ! -x images/quasar-kde/kwin/build-kwin.sh ]]; then
 fi
 grep -q "FROM fedora:43 AS kwin-build" images/quasar-kde/Dockerfile
 
-kwin_nvr="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc 'rpm -q kwin')"
+kwin_nvr="$(docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc 'rpm -q kwin')"
 if [[ "$kwin_nvr" != *".quasar"* ]]; then
-  echo "FAIL: quasar-kde:dev runs an UNPATCHED kwin ($kwin_nvr); expected a .quasar release marker" >&2
+  echo "FAIL: "$KDE_IMAGE" runs an UNPATCHED kwin ($kwin_nvr); expected a .quasar release marker" >&2
   echo "      the nested mode ladder / Display Settings resolution change will not work" >&2
   exit 1
 fi
@@ -60,9 +70,9 @@ echo "patched kwin present: $kwin_nvr"
 # The org.quasar.kde.kwin label records WHICH kwin was patched, so a deployed
 # image can be identified without running it. It must agree with what is
 # actually installed, otherwise the label is worse than no label at all.
-kwin_label="$(docker image inspect quasar-kde:dev --format '{{index .Config.Labels "org.quasar.kde.kwin"}}')"
+kwin_label="$(docker image inspect "$KDE_IMAGE" --format '{{index .Config.Labels "org.quasar.kde.kwin"}}')"
 if [[ -z "$kwin_label" || "$kwin_label" == "<no value>" ]]; then
-  echo "FAIL: org.quasar.kde.kwin label missing from quasar-kde:dev" >&2
+  echo "FAIL: org.quasar.kde.kwin label missing from "$KDE_IMAGE"" >&2
   exit 1
 fi
 # rpm -q prints kwin-<version>-<release>.<arch>; the label is <version>-<release>.
@@ -73,7 +83,7 @@ fi
 echo "kwin label agrees with the installed package: $kwin_label"
 
 # The builder stage must not have leaked into the shipped image.
-docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc '
+docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc '
   set -e
   if [[ -e /tmp/kwin-rpms ]]; then
     echo "FAIL: /tmp/kwin-rpms left behind in the shipped image" >&2
@@ -97,7 +107,7 @@ docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc '
 # plays the host and the inner one is the nested session under test.
 # Hard time-box: every wait is bounded and the container is --rm.
 echo "running the nested mode-ladder + scale smoke (time-boxed)"
-smoke="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -c '
+smoke="$(docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -c '
   export XDG_RUNTIME_DIR=/tmp/rt HOME=/tmp/h
   mkdir -p "$XDG_RUNTIME_DIR" "$HOME"; chmod 0700 "$XDG_RUNTIME_DIR"
   export KWIN_COMPOSE=Q QT_FORCE_STDERR_LOGGING=1
@@ -202,12 +212,12 @@ grep -q 'SMOKE-OK' <<<"$smoke"
 # exit status is inverted by !, so "! command -v gamescope" would silently
 # PASS (never even print a failure) if gamescope were reintroduced -- the same
 # lesson verify-steam.sh's setsid/setpgid checks are built around.
-if docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc 'command -v gamescope' >/dev/null 2>&1; then
-  echo "FAIL: gamescope present in quasar-kde:dev (this image must carry zero gamescope/BPM weight)" >&2
+if docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc 'command -v gamescope' >/dev/null 2>&1; then
+  echo "FAIL: gamescope present in "$KDE_IMAGE" (this image must carry zero gamescope/BPM weight)" >&2
   exit 1
 fi
 
-docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc '
+docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc '
   set -e
   kde=/usr/local/bin/quasar-kde
 
@@ -317,7 +327,7 @@ docker run --rm --entrypoint /bin/bash quasar-kde:dev -lc '
   test -f /usr/share/applications/steam.desktop
 '
 
-labels="$(docker image inspect quasar-kde:dev --format '{{json .Config.Labels}}')"
+labels="$(docker image inspect "$KDE_IMAGE" --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "required" and .["org.quasar.image.persist"] == "/home/quasar" and .["org.quasar.image.session"] == "desktop"' <<<"$labels" >/dev/null
 
 echo "quasar-kde structural checks passed"
