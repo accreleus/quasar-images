@@ -73,7 +73,12 @@ The installers are pulled from `assets.unigine.com` at build time with pinned sh
 
 ### Patched KWin (nested mode ladder)
 
-`quasar-kde` does **not** ship Fedora's stock `kwin`. It rebuilds the distro source package with `images/quasar-kde/kwin/0001-nested-backend-mode-ladder.patch` applied, in a discarded `kwin-build` Dockerfile stage (`images/quasar-kde/kwin/build-kwin.sh`).
+`quasar-kde` does **not** ship Fedora's stock `kwin`. It rebuilds the distro source package with every `images/quasar-kde/kwin/*.patch` applied — in sorted `NNNN-` order, which is load-bearing because the patches build on each other — in a discarded `kwin-build` Dockerfile stage (`images/quasar-kde/kwin/build-kwin.sh`). Adding a patch is dropping a file in that directory; the Dockerfile copies the whole glob and the build script declares each one in the spec.
+
+| Patch | Makes work |
+|-------|------------|
+| `0001-nested-backend-mode-ladder.patch` | Display Settings → **Resolution** (a real mode ladder, and applying a pick) |
+| `0002-nested-backend-kscreen-scale.patch` | Display Settings → **Scale** (the slider, under a host that implements `wp_fractional_scale_v1` — which Quasar's compositor does) |
 
 **Why.** KWin runs nested here: it is a Wayland client of Quasar's compositor, and its output size comes from the host's `xdg_toplevel.configure`. Upstream's nested backend therefore synthesises exactly one output mode and throws the rest away (`src/backends/wayland/wayland_output.cpp`, in `init()`, `applyConfigure()` and `framePresented()`), and `applyChanges()` never reads `OutputConfiguration`'s `currentMode` at all. The visible result inside a Quasar session is that System Settings → Display lists a single resolution and choosing anything does nothing. Since this nested session *is* the desktop the user streams, "pick your internal resolution" has to work, so the backend is patched to advertise the host compositor's own `wl_output` mode ladder, honour a picked mode, and keep filling the host's area by scaling the content through `wp_viewport` (aspect-preserving, letterboxed). The patch header documents each change and the reasoning; read it before touching any of this.
 
@@ -82,15 +87,17 @@ The installers are pulled from `assets.unigine.com` at build time with pinned sh
 Re-diffing on a kwin update:
 
 1. Fetch the new source: `dnf download --source kwin` in a `fedora:43` container, then `rpm -i` it and unpack `SOURCES/kwin-<version>.tar.xz`.
-2. Apply the current patch: `patch -p1 --dry-run < 0001-nested-backend-mode-ladder.patch`. If it applies clean, only the version bump is needed — rebuild and re-run `scripts/verify-kde.sh`.
-3. If it rejects, port the hunks by hand against `src/backends/wayland/`. The patch touches seven files; `wayland_output.cpp` carries the real logic (mode ladder, sticky user mode, `contentScale()`), and the other six are the mechanical consequences (host `wl_output` binding, layer/cursor placement, pointer mapping).
-4. Regenerate the patch, keeping the prose header, and rebuild.
+2. Apply the current patches **in order**: `patch -p1 --dry-run < 0001-...patch` then `0002-...patch`. If they apply clean, only the version bump is needed — rebuild and re-run `scripts/verify-kde.sh`.
+3. If one rejects, port the hunks by hand against `src/backends/wayland/`. 0001 touches seven files; `wayland_output.cpp` carries the real logic (mode ladder, sticky user mode, `contentScale()`), and the other six are the mechanical consequences (host `wl_output` binding, layer/cursor placement, pointer mapping). 0002 touches only `wayland_output.{cpp,h}` and is three small hunks.
+4. Regenerate the patch(es), keeping the prose headers, and rebuild. To re-diff cleanly, keep an `a/` tree with the preceding patches applied and a `b/` tree with the one being re-diffed on top, then `diff -uNr a b`.
 
-`scripts/verify-kde.sh` asserts `rpm -q kwin` carries the `.quasar` release marker, so a base-image refresh that quietly reinstates the stock package fails the build rather than shipping an inert Display KCM.
+`scripts/verify-kde.sh` asserts `rpm -q kwin` carries the `.quasar` release marker, so a base-image refresh that quietly reinstates the stock package fails the build rather than shipping an inert Display KCM. It also runs a **functional** smoke — a nested `kwin_wayland` under a `--virtual` one — that changes the resolution *and* the scale and asserts both took effect, so a patch that applies with fuzz but no longer does anything fails the build too.
 
 **Where the rungs come from.** The host compositor's own `wl_output` ladder is read and offered first. It is only a hint, though: the patched backend always commits a surface covering the host's configured area and scales the content into it, so any size at or below that is presentable against *any* host — which matters, because every headless parent advertises exactly one mode (KWin's own Wayland server included: `OutputInterfacePrivate::sendMode` only ever sends the current mode). The standard rungs in the host-configured size's aspect family are therefore offered as well, which is what makes the list useful today rather than after `gst-wayland-display` grows a ladder. `KWIN_NESTED_EXTRA_MODES=0` in the session environment restricts the list to the host's own ladder.
 
 **Known limitation.** Rungs are only ever offered at or below the size the host configured the session at; the session cannot be made *larger* than its streamed resolution from inside. Changing the streamed resolution stays a Quasar-side control.
+
+**Scale vs. the host's `wp_fractional_scale_v1` hint.** Precedence is *user pick > host hint, until the host hint moves*: a scale set in Display Settings sticks across the configures the host sends (Quasar sends one on every live render-resolution change), and is handed back only when the host announces a genuinely different preferred scale. Setting the scale never touches the output **mode** — the buffer keeps the host-configured pixel size and the root `wp_viewport` destination is unchanged, so the streamed resolution does not move; only the logical desktop (`mode / scale`) shrinks, which is what makes Plasma redraw bigger. Note that the host's hint has the standard meaning (render *crisper*, same apparent size: the mode grows with the scale), so it is not a substitute for the slider — Quasar's per-session `ui_scale` is a sharpness/bandwidth knob, and "make the UI bigger" is either this slider or Quasar's render-resolution control.
 
 ## Published images
 

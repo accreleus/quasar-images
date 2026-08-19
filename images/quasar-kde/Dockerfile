@@ -12,10 +12,13 @@ ARG KWIN_NVR=6.7.4-1.fc43
 # wayland backend advertises a real mode ladder and applies a resolution picked
 # in System Settings -> Display. Upstream's nested backend synthesises exactly
 # one mode from the host's xdg_toplevel.configure size and ignores
-# OutputConfiguration::currentMode entirely, so the Display KCM is inert inside a
-# Quasar session -- see kwin/0001-nested-backend-mode-ladder.patch for the full
-# problem statement, and the README section "Patched KWin (nested mode ladder)"
-# for the recurring re-diff cost on a Fedora kwin update.
+# OutputConfiguration::currentMode entirely (and its scale), so the Display KCM
+# is inert inside a Quasar session -- see kwin/0001-nested-backend-mode-ladder.patch
+# (resolution) and kwin/0002-nested-backend-kscreen-scale.patch (scale) for the
+# full problem statements, and the README section "Patched KWin (nested mode
+# ladder)" for the recurring re-diff cost on a Fedora kwin update.
+#
+# Every kwin/*.patch is copied in and applied in sorted order by build-kwin.sh.
 #
 # This stage is DISCARDED and its RPMs are never copied into a layer -- the
 # install below bind-mounts them instead -- so neither the ~1.5 GB of build
@@ -28,7 +31,7 @@ ARG KWIN_NVR=6.7.4-1.fc43
 FROM fedora:43 AS kwin-build
 ARG KWIN_NVR
 ENV QUASAR_KWIN_NVR=${KWIN_NVR}
-COPY images/quasar-kde/kwin/0001-nested-backend-mode-ladder.patch /tmp/kwin-patches/
+COPY images/quasar-kde/kwin/*.patch /tmp/kwin-patches/
 COPY images/quasar-kde/kwin/build-kwin.sh /usr/local/bin/build-kwin.sh
 RUN chmod 0755 /usr/local/bin/build-kwin.sh && /usr/local/bin/build-kwin.sh
 
