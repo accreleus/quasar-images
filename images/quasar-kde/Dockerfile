@@ -1,5 +1,25 @@
 ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
 
+# WHERE THE PATCHED KWIN RPMS COME FROM.
+#
+#   KWIN_RPMS_IMAGE=kwin-rpms                        (default) build them here
+#   KWIN_RPMS_IMAGE=ghcr.io/<owner>/quasar-kwin-rpms:<tag>     pull the artefact
+#
+# `FROM ${KWIN_RPMS_IMAGE} AS kwin-artifact` resolves against this file's stage
+# names FIRST, so the default names the local `kwin-rpms` stage and the build is
+# exactly what it always was. Anything else is a registry reference, and BuildKit
+# only instantiates the stages a target needs -- so pointing this at a published
+# artefact means the 27-minute rpmbuild below is never run.
+#
+# 27 minutes is not an estimate: run 31920375541 logged `[kwin-build 4/4] …
+# DONE 1613.4s`, out of 2098s for the whole image hierarchy. Runs that touch no
+# kwin input take 5-8 minutes total. Paying the 27 minutes on a benchapp change
+# is the single largest avoidable cost in this repo's CI.
+#
+# <tag> is scripts/kwin-artifact-tag.sh: a content hash over KWIN_NVR, every
+# kwin/*.patch, and build-kwin.sh. Nothing else invalidates it.
+ARG KWIN_RPMS_IMAGE=kwin-rpms
+
 # Exact kwin source package the patch is written against. PINNED, not "whatever
 # dnf has today": a Fedora kwin update needs the patch re-diffed (see the README,
 # "Patched KWin (nested mode ladder)"), and a floating version would apply the
@@ -31,9 +51,27 @@ ARG KWIN_NVR=6.7.4-1.fc43
 FROM fedora:43 AS kwin-build
 ARG KWIN_NVR
 ENV QUASAR_KWIN_NVR=${KWIN_NVR}
+ENV QUASAR_KWIN_RPM_DIR=/kwin-rpms
 COPY images/quasar-kde/kwin/*.patch /tmp/kwin-patches/
 COPY images/quasar-kde/kwin/build-kwin.sh /usr/local/bin/build-kwin.sh
 RUN chmod 0755 /usr/local/bin/build-kwin.sh && /usr/local/bin/build-kwin.sh
+
+# The PUBLISHABLE artefact: the RPMs and nothing else. FROM scratch, so what gets
+# pushed to GHCR is ~12 MB of packages rather than a 200 MB Fedora rootfs that
+# happens to have some RPMs in it. It has no shell and no entrypoint on purpose --
+# it is a file bundle, not an image anyone should run.
+#
+# Build and publish it with:  ./scripts/build.sh quasar-kwin-rpms
+FROM scratch AS kwin-rpms
+ARG KWIN_NVR
+LABEL org.opencontainers.image.title="Quasar patched KWin RPMs" \
+      org.quasar.kwin.nvr="${KWIN_NVR}.quasar1" \
+      org.quasar.artifact="kwin-rpms"
+COPY --from=kwin-build /kwin-rpms /kwin-rpms
+
+# Resolves to the local stage above, or to a published artefact. The alias keeps
+# the bind mount below referring to one stable name either way.
+FROM ${KWIN_RPMS_IMAGE} AS kwin-artifact
 
 FROM ${STEAM_RUNTIME_IMAGE}
 
@@ -96,7 +134,7 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
 # would persist the packages in a layer forever (11.9 MB, measured), and a
 # `rm -rf` in a later layer cannot reclaim it. Nothing from the builder stage
 # ends up in the image.
-RUN --mount=type=bind,from=kwin-build,source=/tmp/kwin-rpms,target=/tmp/kwin-rpms \
+RUN --mount=type=bind,from=kwin-artifact,source=/kwin-rpms,target=/tmp/kwin-rpms \
     set -eu; \
     installed="$(rpm -qa --qf '%{NAME}\n' 'kwin*' | sort -u)"; \
     test -n "$installed"; \

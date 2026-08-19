@@ -19,6 +19,20 @@ RUN dnf --setopt=install_weak_deps=False -y install \
       tini tzdata util-linux \
     && groupadd --gid 1000 quasar \
     && useradd --no-log-init --uid 1000 --gid 1000 --home-dir /home/quasar --create-home --shell /bin/bash quasar \
+    # Non-English locales, ~53 MB, in the SAME layer as the install that brought
+    # them -- an overlay delete in a later RUN hides bytes but never reclaims them,
+    # so a tidier separate layer would save exactly nothing.
+    #
+    # This is the base of the whole family, so the saving lands in quasar-app,
+    # quasar-steam-runtime, quasar-steam, quasar-kde, quasar-diagnostics,
+    # quasar-benchapp and quasar-unigine alike -- roughly 0.5 GB across the set.
+    #
+    # `glibc-langpack-en` above is what provides en_US.UTF-8, which is what LANG and
+    # LC_ALL are set to below; keeping `en*` keeps that intact. A session that needs
+    # another language wants its own langpack installed, not 200 of them shipped on
+    # the chance one is used. Verified with `locale -a` after the change.
+    && find /usr/share/locale -mindepth 1 -maxdepth 1 -type d ! -name 'en*' -exec rm -rf {} + \
+    && locale -a | grep -q '^en_US.utf8$' \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 

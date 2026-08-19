@@ -31,8 +31,73 @@ on:
 permissions: {}
 
 jobs:
+  # ── The patched-KWin RPMs, built once and reused ───────────────────────────
+  #
+  # Rebuilding Fedora's kwin from source with images/quasar-kde/kwin/*.patch is 27
+  # of the 35 minutes of a full run (run 31920375541: `[kwin-build 4/4] … DONE
+  # 1613.4s`). It was a stage inside quasar-kde's Dockerfile, so EVERY run paid it
+  # -- including runs that changed only a launcher script or the benchapp.
+  #
+  # The RPMs are bit-identical whenever their inputs are, so they are an artefact.
+  # This job computes the content tag (scripts/kwin-artifact-tag.sh over KWIN_NVR,
+  # the patches, and build-kwin.sh), asks the registry whether that tag already
+  # exists, and builds only if it does not. Everything downstream consumes
+  # quasar-kwin-rpms:<tag> through the KWIN_RPMS_IMAGE build arg.
+  #
+  # A kwin re-diff therefore costs 27 minutes ONCE and nothing thereafter; every
+  # other change costs zero.
+  kwin-artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      built: ${{ steps.resolve.outputs.built }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the artefact tag, and build it only if it is missing
+        id: resolve
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          tag="$(./scripts/kwin-artifact-tag.sh)"
+          image="ghcr.io/${OWNER}/quasar-kwin-rpms:${tag}"
+          echo "tag=$tag"     >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          ./scripts/kwin-artifact-tag.sh --explain
+
+          # `docker manifest inspect` is the whole optimisation. A hit skips 27
+          # minutes; a miss is a deliberate, explained 27 minutes.
+          if docker manifest inspect "$image" >/dev/null 2>&1; then
+            echo "built=false" >> "$GITHUB_OUTPUT"
+            echo "REUSING $image -- kwin inputs are unchanged, skipping the ~27 min rpmbuild"
+            exit 0
+          fi
+
+          echo "built=true" >> "$GITHUB_OUTPUT"
+          echo "BUILDING $image -- KWIN_NVR, a patch, or build-kwin.sh changed"
+          docker build --progress=plain \
+            -f images/quasar-kde/Dockerfile --target kwin-rpms \
+            -t "$image" .
+          docker push "$image"
+
   # ── Validation: no credentials, no publishing. Runs for PRs into stable. ────
   validate:
+    needs: kwin-artifact
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -47,6 +112,15 @@ jobs:
         run: ./scripts/verify.sh
 
       - name: Build the complete image hierarchy
+        # KWIN_RPMS_IMAGE swaps quasar-kde's 27-minute in-Dockerfile rpmbuild for a
+        # pull of the artefact the kwin-artifact job resolved. QUASAR_CACHE_REGISTRY
+        # turns on registry layer cache: unlike the GHA cache it does not expire
+        # after 7 days idle, is not capped at 10 GB, and is shared with the dev
+        # boxes. Validation READS the cache and never writes it (QUASAR_CACHE_WRITE
+        # unset) -- a PR must not be able to poison what stable builds from.
+        env:
+          KWIN_RPMS_IMAGE: ${{ needs.kwin-artifact.outputs.image }}
+          QUASAR_CACHE_REGISTRY: ghcr.io/${{ github.repository_owner }}
         run: ./scripts/build.sh all
 
       - name: Verify Steam launcher wiring
@@ -57,6 +131,7 @@ jobs:
 
   # ── Publish: stable pushes, release tags, and explicit dispatches. ──────────
   publish:
+    needs: kwin-artifact
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -90,6 +165,13 @@ jobs:
         run: ./scripts/verify.sh
 
       - name: Build the complete image hierarchy
+        # Same as validation, plus QUASAR_CACHE_WRITE: this job has packages:write
+        # and is building a reviewed ref, so it is the one that refreshes the shared
+        # layer cache.
+        env:
+          KWIN_RPMS_IMAGE: ${{ needs.kwin-artifact.outputs.image }}
+          QUASAR_CACHE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+          QUASAR_CACHE_WRITE: "1"
         run: ./scripts/build.sh all
 
       - name: Verify Steam launcher wiring
