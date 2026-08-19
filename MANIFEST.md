@@ -38,14 +38,24 @@ different places:
   CLOSED set (`none` | `bridge` | `host`; absent = inherit the host default) — Quasar rejects the
   install on any other value, because the string ends up as `docker run --network <value>` on a
   host (first-run-experience spec §S2, quasar#463).
-- `no_new_privileges` (and other future security knobs) ride the app's **`runtime_spec`** JSONB
-  blob, NOT the preset columns. Quasar resolves the split when it installs an image; the
-  manifest states the whole intended runtime and lets Quasar place each field correctly.
+- `no_new_privileges` and `systempaths_unconfined` (and other future security knobs) ride the
+  app's **`runtime_spec`** JSONB blob, NOT the preset columns. Quasar resolves the split when it
+  installs an image; the manifest states the whole intended runtime and lets Quasar place each
+  field correctly.
 
 `no_new_privileges` is **security-relevant and load-bearing**: Steam must have it `false`
 (its startup re-escalates via `sudo`; the default hardened `--security-opt no-new-privileges`
 otherwise yields a black bare compositor). Because this file is fetched and applied by every
 syncing deployment, treat any change to a security knob here as a reviewed change.
+
+`systempaths_unconfined` (bool, default `false` when absent) is the same kind of knob: it
+widens what the app container can read under `/proc`/`/sys` (`--security-opt
+systempaths=unconfined`), so it is opt-in per image rather than a host-wide default. It exists
+for **desktop-session images** (KDE Plasma with a user Flatpak install): Flatpak's sandbox
+helper (`bwrap`) mounts a fresh `/proc` inside the app's own mount namespace, and Docker's
+masked paths (the `systempaths=masked` default) block that mount even with `seccomp=unconfined`
+already in place — so `flatpak install` works but `flatpak run` fails without it
+(live-verified 2026-08-13). Set it `true` only on images that actually need it.
 
 ## Pinning discipline
 
