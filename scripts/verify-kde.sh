@@ -33,6 +33,16 @@ if [[ ! -s "$scale_patch" ]]; then
   exit 1
 fi
 grep -q "src/backends/wayland/wayland_output.cpp" "$scale_patch"
+# 0003 is what makes a CHANGED host wp_fractional_scale_v1 hint move the nested
+# output's scale -- i.e. what makes Quasar's per-session ui_scale knob do
+# anything. Without it the hint is applied and then immediately overwritten by
+# KWin's own OutputConfigurationStore re-asserting its remembered scale.
+hint_patch="images/quasar-kde/kwin/0003-nested-backend-host-scale-hint.patch"
+if [[ ! -s "$hint_patch" ]]; then
+  echo "FAIL: $hint_patch is missing or empty in the build context" >&2
+  exit 1
+fi
+grep -q "src/backends/wayland/wayland_output.cpp" "$hint_patch"
 if [[ ! -x images/quasar-kde/kwin/build-kwin.sh ]]; then
   echo "FAIL: images/quasar-kde/kwin/build-kwin.sh is missing or not executable" >&2
   exit 1
@@ -146,9 +156,40 @@ smoke="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -c '
     1280x720@*) : ;;
     *) echo "SMOKE-FAIL: setting the scale moved the current MODE to [$smode]; it must stay 1280x720"; exit 1 ;;
   esac
+  # 0003: a CHANGED host fractional-scale hint takes the wheel back from the
+  # user pick above. That is the path Quasar drives with its per-session
+  # ui_scale knob: the host announces a new wp_fractional_scale_v1 preferred
+  # scale and configures the toplevel at the matching, smaller logical size.
+  # Here the host is the outer kwin, so setting ITS output scale is exactly the
+  # same wire traffic.
+  #
+  # The user MODE pick (1280x720) is deliberately independent of the scale and
+  # must survive, so the expected desktop is 1280x720 / 2 = 640x360.
+  WAYLAND_DISPLAY=wl-host DBUS_SESSION_BUS_ADDRESS="$(head -1 /tmp/busA)" \
+    kscreen-doctor output.1.scale.2 >/dev/null 2>&1
+  sleep 3
+  hscale=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Scale: //p" | sed "s/\[[0-9;]*m//g" | head -1)
+  hgeom=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Geometry: //p" | sed "s/\[[0-9;]*m//g" | head -1)
+  hmode=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Modes: //p" | tr -d "\033" | sed "s/\[[0-9;]*m//g" | grep -oE "[0-9]+x[0-9]+@[0-9.]+\*" | head -1)
+  echo "HINT-SCALE=$hscale"
+  echo "HINT-GEOMETRY=$hgeom"
+  echo "HINT-CURRENT-MODE=$hmode"
+  case "$hscale" in
+    2|2.0) : ;;
+    *) echo "SMOKE-FAIL: a changed host fractional-scale hint left the nested scale at [$hscale], expected 2"; exit 1 ;;
+  esac
+  case "$hgeom" in
+    *"0,0 640x360"*) : ;;
+    *) echo "SMOKE-FAIL: host hint 2 over a 1280x720 mode left the desktop at [$hgeom], expected 640x360"; exit 1 ;;
+  esac
+  case "$hmode" in
+    1280x720@*) : ;;
+    *) echo "SMOKE-FAIL: the host hint moved the current MODE to [$hmode]; it must stay 1280x720"; exit 1 ;;
+  esac
+
   echo "SMOKE-OK"
 ' 2>&1)" || { echo "$smoke" >&2; echo "FAIL: nested mode-ladder smoke failed" >&2; exit 1; }
-printf '%s\n' "$smoke" | grep -E '^(MODES|GEOMETRY|SCALED-GEOMETRY|SCALED-CURRENT-MODE|SMOKE-OK)'
+printf '%s\n' "$smoke" | grep -E '^(MODES|GEOMETRY|SCALED-GEOMETRY|SCALED-CURRENT-MODE|HINT-SCALE|HINT-GEOMETRY|HINT-CURRENT-MODE|SMOKE-OK)'
 grep -q 'SMOKE-OK' <<<"$smoke"
 
 # gamescope must be ABSENT from this image (quasar-kde carries zero gamescope/
