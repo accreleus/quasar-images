@@ -168,7 +168,10 @@ smoke="$(docker run --rm --entrypoint /bin/bash quasar-kde:dev -c '
   WAYLAND_DISPLAY=wl-host DBUS_SESSION_BUS_ADDRESS="$(head -1 /tmp/busA)" \
     kscreen-doctor output.1.scale.2 >/dev/null 2>&1
   sleep 3
-  hscale=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Scale: //p" | sed "s/\[[0-9;]*m//g" | head -1)
+  # tr -d "\033" as well as the SGR bodies: sed strips "[0m" but leaves the ESC
+  # itself, and unlike the geometry checks below this one compares the WHOLE
+  # value rather than matching a substring, so a stray ESC fails it.
+  hscale=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Scale: //p" | tr -d "\033" | sed "s/\[[0-9;]*m//g" | tr -d " \t\r" | head -1)
   hgeom=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Geometry: //p" | sed "s/\[[0-9;]*m//g" | head -1)
   hmode=$(kscreen-doctor -o 2>/dev/null | sed -n "s/.*Modes: //p" | tr -d "\033" | sed "s/\[[0-9;]*m//g" | grep -oE "[0-9]+x[0-9]+@[0-9.]+\*" | head -1)
   echo "HINT-SCALE=$hscale"
