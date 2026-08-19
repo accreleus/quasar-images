@@ -51,7 +51,6 @@ ARG KWIN_NVR=6.7.4-1.fc43
 FROM fedora:43 AS kwin-build
 ARG KWIN_NVR
 ENV QUASAR_KWIN_NVR=${KWIN_NVR}
-ENV QUASAR_KWIN_RPM_DIR=/kwin-rpms
 COPY images/quasar-kde/kwin/*.patch /tmp/kwin-patches/
 COPY images/quasar-kde/kwin/build-kwin.sh /usr/local/bin/build-kwin.sh
 RUN chmod 0755 /usr/local/bin/build-kwin.sh && /usr/local/bin/build-kwin.sh
@@ -67,7 +66,11 @@ ARG KWIN_NVR
 LABEL org.opencontainers.image.title="Quasar patched KWin RPMs" \
       org.quasar.kwin.nvr="${KWIN_NVR}.quasar1" \
       org.quasar.artifact="kwin-rpms"
-COPY --from=kwin-build /kwin-rpms /kwin-rpms
+# build-kwin.sh's own default output dir, left alone deliberately: overriding it
+# with QUASAR_KWIN_RPM_DIR would change the builder RUN's cache key and force a
+# 27-minute rebuild on every box that already has the old one cached, for no
+# reason other than a tidier path.
+COPY --from=kwin-build /tmp/kwin-rpms /kwin-rpms
 
 # Resolves to the local stage above, or to a published artefact. The alias keeps
 # the bind mount below referring to one stable name either way.
