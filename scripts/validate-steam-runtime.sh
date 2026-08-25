@@ -3,7 +3,7 @@
 # display/GPU/audio. Stubs `gamescope` so the launcher's computed argv + env are
 # captured instead of actually starting a compositor.
 set -euo pipefail
-IMG="${1:-quasar-steam:dev}"
+IMG="${1:-quasar-steam:${QUASAR_IMAGE_TAG:-dev}}"
 
 # Stub gamescope: print its argv + the env the launcher computed, then exit
 # (do not run the real Steam client).

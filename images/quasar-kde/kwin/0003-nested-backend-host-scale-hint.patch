@@ -1,0 +1,202 @@
+Subject: [PATCH] nested wayland backend: adopt the host's fractional-scale hint
+ as the output scale
+
+Quasar patch against kwin 6.7.4 (Fedora 43: kwin-6.7.4-1.fc43).
+Applies on top of 0001-nested-backend-mode-ladder.patch and
+0002-nested-backend-kscreen-scale.patch.
+
+PROBLEM
+-------
+Quasar's per-session `ui_scale` knob (`PATCH /v1/sessions/{id}/display
+{"ui_scale":1.5}`) is delivered to the nested KWin as a
+`wp_fractional_scale_v1::preferred_scale` hint plus an `xdg_toplevel.configure`
+at the matching, SMALLER logical size. The intended effect is "Plasma draws
+bigger, the streamed resolution does not move". Nothing happened: the desktop
+kept its size, `kscreen-doctor -o` kept reporting `Scale: 1`.
+
+The host side was not the problem, and neither was delivery. Measured live on
+the devbox (2026-08-19), the nested KWin's own `WAYLAND_DEBUG` shows both
+events arriving together:
+
+    wp_fractional_scale_v1#22.preferred_scale(180)          <- 1.5
+    xdg_toplevel#19.configure(1707, 960, array[8])          <- 2560/1.5
+    xdg_surface#18.configure(4520)                          <- ack'd
+
+and this backend applied them: the output's mode became 2561x1440, which is
+exactly `configure size * hint` from `applyConfigure()`. Only the SCALE was
+back at 1 by the time anything could observe it.
+
+The overwriter is KWin core, not this backend. `applyConfigure()` ends with
+`Q_EMIT m_backend->outputsQueried()`;
+`Workspace::slotOutputBackendOutputsQueried()` answers that by asking
+`OutputConfigurationStore::queryConfig()` for this output's REMEMBERED
+configuration and applying it - which comes straight back into
+`applyChanges()` carrying the stored scale. In the session that was measured,
+`~/.config/kwinoutputconfig.json` held `"scale": 1` for `WL-0`, and that is the
+value that kept winning. 0002 then makes it worse in the only way it could: it
+treats every `props->scale` as a deliberate user pick, so the store's echo is
+latched into `m_userScale` and becomes sticky.
+
+That is also why the KScreen slider works while the host hint does not. A
+slider pick goes through `Workspace::applyOutputConfiguration()`, which ends in
+`OutputConfigurationStore::storeConfig()` - so the store remembers it and
+re-asserts the SAME value on every subsequent configure. The host hint was
+never written there.
+
+WHAT THIS PATCH DOES
+--------------------
+Adopts a changed host hint into the stored configuration, through the same
+path a user's pick takes.
+
+1. `handleFractionalScaleChanged()`: a hint whose VALUE changes now also sets
+   `m_hostScalePending` (it already cleared `m_userScale`, 0002 hunk 3).
+
+2. `applyConfigure()`: after the state is applied and `outputsQueried` has been
+   emitted, a pending host scale schedules `adoptHostScale()` on the event loop.
+   Queued deliberately: the store's own re-apply runs first and synchronously,
+   from that emit, so adopting inline would be undone a moment later.
+
+3. `adoptHostScale()` (new): applies an `OutputConfiguration` carrying only
+   `scale`/`scaleSetting` via `Workspace::applyOutputConfiguration()`. That call
+   ends in `storeConfig()`, so the host's value becomes the remembered one and
+   survives every later configure. `applyChanges()` records it in `m_userScale`
+   on the way through, which is correct: from that point it IS the configured
+   scale, a later pick in Display Settings overrides it, and a later host hint
+   with a new value clears it and adopts that one instead.
+
+Precedence, extending 0002's one-liner: host hint > previous state on a hint
+CHANGE; user pick > host hint until the hint changes again.
+
+THE STREAM DOES NOT MOVE
+------------------------
+The change set carries `scale` and `scaleSetting` only - never a mode - so
+`m_nativeSize` (the buffer/mode size) is still the host's configure size times
+the host's hint, `m_parentLogicalSize` is untouched, and the root surface's
+`wp_viewport` destination stays pinned to it (0001). The host sees a surface of
+unchanged size and the encoded resolution is unaffected. Only the logical size
+(`mode / scale`) shrinks, which is what makes Plasma draw bigger.
+
+`Workspace::self()` is null-checked: the first configure can arrive before the
+workspace exists, and the initial scale is applied through
+`init()`/`applyConfigure()` anyway.
+
+UPSTREAMABILITY
+---------------
+Better than 0002's, and it stands alone from the mode ladder. Upstream's nested
+backend has the same latent behaviour - a host that changes its
+`wp_fractional_scale_v1` hint mid-session cannot move a nested KWin's output
+scale, because the store re-asserts its own - and "adopt a changed host hint
+into the stored configuration" is the whole fix. It does depend on 0002's
+`m_userScale` for the precedence rule, so the two would go upstream together.
+
+diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+--- a/src/backends/wayland/wayland_output.cpp	2026-08-20 01:59:38
++++ b/src/backends/wayland/wayland_output.cpp	2026-08-20 02:00:25
+@@ -18,6 +18,10 @@
+ #include "wayland_display.h"
+ #include "wayland_layer.h"
+ #include "wayland_logging.h"
++// Quasar: adopting the host's fractional-scale hint has to go through
++// Workspace::applyOutputConfiguration(), so KWin's OutputConfigurationStore
++// records it - see WaylandOutput::adoptHostScale().
++#include "workspace.h"
+ 
+ #include <KWayland/Client/compositor.h>
+ #include <KWayland/Client/pointer.h>
+@@ -123,6 +127,9 @@
+     // clobber the user's pick.
+     if (output->m_pendingScale != scale) {
+         output->m_userScale.reset();
++        // Quasar: and it has to be ADOPTED into KWin's stored output
++        // configuration, not just written into State - see adoptHostScale().
++        output->m_hostScalePending = true;
+     }
+     output->m_pendingScale = scale;
+ }
+@@ -726,6 +733,64 @@
+         setState(next);
+ 
+         Q_EMIT m_backend->outputsQueried();
++
++        // Quasar: that signal is what makes writing the scale into State above
++        // insufficient on its own. Workspace::slotOutputBackendOutputsQueried()
++        // answers it by re-applying the OutputConfigurationStore's REMEMBERED
++        // configuration for this output - scale included - which lands back in
++        // applyChanges() and overwrites the hint (kwinoutputconfig.json,
++        // "scale": 1, is the value that was winning). A host hint therefore has
++        // to be adopted INTO that stored configuration, which is what
++        // adoptHostScale() does. Queued: the store's own apply runs first,
++        // synchronously, from the emit above.
++        if (m_hostScalePending) {
++            m_hostScalePending = false;
++            QMetaObject::invokeMethod(
++                this, [this]() {
++                    adoptHostScale();
++                },
++                Qt::QueuedConnection);
++        }
++    }
++}
++
++// Quasar: make the host's wp_fractional_scale_v1 hint the output's configured
++// scale, the same way a pick in Display Settings becomes one.
++//
++// Quasar's per-session `ui_scale` knob is delivered as that hint (the host,
++// gst-wayland-display, shrinks the LOGICAL size it configures this toplevel at
++// and announces the matching preferred_scale). The point of it is "draw the
++// desktop bigger at an unchanged streamed resolution", so the hint must move
++// the output's scale, and it must survive the store re-applying its own idea of
++// the configuration on every subsequent configure.
++//
++// Going through Workspace rather than writing State directly is what achieves
++// that: applyOutputConfiguration() ends in OutputConfigurationStore::storeConfig(),
++// so the adopted value becomes the remembered one. applyChanges() then records it
++// in m_userScale, which is correct - from here on it IS the configured scale, a
++// later pick in Display Settings overrides it, and a later host hint with a NEW
++// value clears it and adopts that one (handleFractionalScaleChanged).
++//
++// The mode is untouched: only scale/scaleSetting are in the change set, so the
++// buffer keeps the host-configured pixel size and the streamed resolution does
++// not move. Only the logical size (mode / scale) shrinks.
++void WaylandOutput::adoptHostScale()
++{
++    Workspace *ws = Workspace::self();
++    if (!ws) {
++        // Too early (the first configure can arrive before the workspace exists).
++        // The initial scale is applied through init()/applyConfigure() anyway.
++        return;
++    }
++    if (m_state.scale == m_pendingScale && m_userScale.value_or(m_pendingScale) == m_pendingScale) {
++        return;
++    }
++    OutputConfiguration config;
++    const auto changeSet = config.changeSet(this);
++    changeSet->scale = m_pendingScale;
++    changeSet->scaleSetting = m_pendingScale;
++    if (ws->applyOutputConfiguration(config) != OutputConfigurationError::None) {
++        qCWarning(KWIN_WAYLAND_BACKEND) << "could not adopt the host's fractional scale" << m_pendingScale;
+     }
+ }
+ 
+diff -uNr a/src/backends/wayland/wayland_output.h b/src/backends/wayland/wayland_output.h
+--- a/src/backends/wayland/wayland_output.h	2026-08-20 01:59:38
++++ b/src/backends/wayland/wayland_output.h	2026-08-20 02:01:20
+@@ -151,6 +151,8 @@
+     std::shared_ptr<OutputMode> modeFor(const QSize &size, bool preferred);
+     void rebuildModes(State &next, const QSize &nativeSize, const QSize &currentSize);
+     void refreshModeLadder();
++    // Quasar: adopt the host's fractional-scale hint as the configured scale
++    void adoptHostScale();
+ 
+     static const wp_fractional_scale_v1_listener s_fractionalScaleListener;
+     static void handleFractionalScaleChanged(void *data, struct wp_fractional_scale_v1 *wp_fractional_scale_v1, uint32_t scale120);
+@@ -204,6 +206,9 @@
+     std::optional<qreal> m_userScale;
+     /// stable OutputMode identities, so KScreen does not see the ladder churn
+     std::map<std::pair<int, int>, std::shared_ptr<OutputMode>> m_modeCache;
++    /// a host wp_fractional_scale_v1 hint changed value and has not been adopted
++    /// into KWin's stored output configuration yet - see adoptHostScale()
++    bool m_hostScalePending = false;
+ };
+ 
+ } // namespace Wayland

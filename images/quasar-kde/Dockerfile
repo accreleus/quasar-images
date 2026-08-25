@@ -1,8 +1,116 @@
 ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
+
+# WHERE THE PATCHED KWIN RPMS COME FROM.
+#
+#   KWIN_RPMS_IMAGE=kwin-rpms                              (default) build here
+#   KWIN_RPMS_IMAGE=ghcr.io/<owner>/quasar-kwin-rpms:<tag>  pull the artefact
+#
+# `FROM ${KWIN_RPMS_IMAGE} AS kwin-artifact` resolves against this file's stage
+# names FIRST, so the default names the local `kwin-rpms` stage and the build is
+# exactly what it always was. Anything else is a registry reference, and BuildKit
+# only instantiates the stages a target needs -- so pointing this at a published
+# artefact means the 27-minute rpmbuild below is never run.
+#
+# 27 minutes is not an estimate: run 31920375541 logged `[kwin-build 4/4] …
+# DONE 1613.4s`, out of 2098s for the whole image hierarchy. Runs that touch no
+# kwin input take 5-8 minutes total. Paying the 27 minutes on a benchapp change
+# is the single largest avoidable cost in this repo's CI.
+#
+# <tag> is scripts/kwin-artifact-tag.sh: a content hash over KWIN_NVR,
+# KWIN_BUILDER_BASE, every kwin/*.patch and every kwin/build-kwin*.sh. Nothing
+# else invalidates it.
+ARG KWIN_RPMS_IMAGE=kwin-rpms
+
+# Exact kwin source package the patch is written against. PINNED, not "whatever
+# dnf has today": a Fedora kwin update needs the patch re-diffed (see the README,
+# "Patched KWin (nested mode ladder)"), and a floating version would apply the
+# patch to a moving target and fail -- or worse, apply with fuzz. Bumping this
+# ARG is the deliberate act that says "the re-diff was done".
+ARG KWIN_NVR=6.7.4-1.fc43
+
+# The image the RPMs are COMPILED in. Digest-pinned, and the same Fedora 43
+# index quasar-base is built from, so the RPMs are compiled against the same
+# snapshot of Fedora the runtime image installs from.
+#
+# It used to be a bare `FROM fedora:43`, which was a hole in two places at once:
+# `dnf builddep` would resolve against whatever Fedora 43 looked like on the day,
+# so the same patches could silently produce differently-linked RPMs; and the
+# artefact tag that claims to content-address those RPMs could not see the
+# difference. scripts/kwin-artifact-tag.sh now hashes this line and REFUSES a
+# tag if it is not digest-pinned.
+ARG KWIN_BUILDER_BASE=registry.fedoraproject.org/fedora@sha256:711261231459f5ebc6694f7eb2b4b427b87fb6272df8b6663cb4bcbdbb220e9f
+
+# --- Patched KWin ------------------------------------------------------------
+# Fedora's kwin, rebuilt with images/quasar-kde/kwin/*.patch, so the NESTED
+# wayland backend advertises a real mode ladder and applies a resolution picked
+# in System Settings -> Display. Upstream's nested backend synthesises exactly
+# one mode from the host's xdg_toplevel.configure size and ignores
+# OutputConfiguration::currentMode entirely (and its scale), so the Display KCM
+# is inert inside a Quasar session -- see kwin/0001-nested-backend-mode-ladder.patch
+# (resolution) and kwin/0002-nested-backend-kscreen-scale.patch (scale) for the
+# full problem statements, and the README section "Patched KWin (nested mode
+# ladder)" for the recurring re-diff cost on a Fedora kwin update.
+#
+# Every kwin/*.patch is copied in and applied in sorted order by build-kwin.sh.
+#
+# This stage is DISCARDED and its RPMs are never copied into a layer -- the
+# install below bind-mounts them instead -- so neither the ~1.5 GB of build
+# dependencies nor the RPMs themselves reach the shipped image (measured: the
+# bind-mount saves 11.9 MB over a COPY, which a later rm could not reclaim).
+#
+# Base is pinned to the same Fedora release the runtime family is built from --
+# an RPM built against a different release would not be interchangeable with the
+# kwin it replaces.
+# TWO STAGES, NOT ONE, AND THE ORDER OF THE COPYs IS THE WHOLE POINT.
+#
+# kwin-deps fetches the pinned src.rpm and installs ~1.5 GB of Qt/KF6 build
+# dependencies. Its cache key is KWIN_BUILDER_BASE + KWIN_NVR + build-kwin-deps.sh
+# and NOTHING ELSE -- in particular not the patches, which is what changed.
+#
+# Before the split the patches were COPYed in before builddep ran, so a one-line
+# patch edit invalidated the dependency install too. Re-diffing a patch (the
+# recurring cost this image is knowingly signed up for on every Fedora kwin
+# update) therefore re-bought 1.5 GB of -devel packages every time, on every box,
+# on top of the rpmbuild it genuinely had to redo.
+FROM ${KWIN_BUILDER_BASE} AS kwin-deps
+ARG KWIN_NVR
+ENV QUASAR_KWIN_NVR=${KWIN_NVR}
+COPY images/quasar-kde/kwin/build-kwin-deps.sh /usr/local/bin/build-kwin-deps.sh
+RUN chmod 0755 /usr/local/bin/build-kwin-deps.sh && /usr/local/bin/build-kwin-deps.sh
+
+# The cheap half: apply the patches to the already-unpacked spec and rpmbuild.
+FROM kwin-deps AS kwin-build
+COPY images/quasar-kde/kwin/*.patch /tmp/kwin-patches/
+COPY images/quasar-kde/kwin/build-kwin.sh /usr/local/bin/build-kwin.sh
+RUN chmod 0755 /usr/local/bin/build-kwin.sh && /usr/local/bin/build-kwin.sh
+
+# The PUBLISHABLE artefact: the RPMs and nothing else. FROM scratch, so what gets
+# pushed to GHCR is ~12 MB of packages rather than a 200 MB Fedora rootfs that
+# happens to have some RPMs in it. It has no shell and no entrypoint on purpose --
+# it is a file bundle, not an image anyone should run.
+#
+# Build it with:  ./scripts/build.sh quasar-kwin-rpms
+FROM scratch AS kwin-rpms
+ARG KWIN_NVR
+LABEL org.opencontainers.image.title="Quasar patched KWin RPMs" \
+      org.quasar.kwin.nvr="${KWIN_NVR}.quasar1" \
+      org.quasar.artifact="kwin-rpms"
+# build-kwin.sh's own default output dir, left alone deliberately: overriding it
+# with QUASAR_KWIN_RPM_DIR would change the builder RUN's cache key and force a
+# 27-minute rebuild on every box that already has the old one cached, for no
+# reason other than a tidier path.
+COPY --from=kwin-build /tmp/kwin-rpms /kwin-rpms
+
+# Resolves to the local stage above, or to a published artefact. The alias keeps
+# the bind mount below referring to one stable name either way.
+FROM ${KWIN_RPMS_IMAGE} AS kwin-artifact
+
 FROM ${STEAM_RUNTIME_IMAGE}
 
 ARG VERSION=0.1.0-dev
+ARG KWIN_NVR
 LABEL org.opencontainers.image.title="Quasar KDE Plasma desktop" \
+      org.quasar.kde.kwin="${KWIN_NVR}.quasar1" \
       org.quasar.image.contract="1" \
       org.quasar.image.family="fedora" \
       org.quasar.image.base.version="${VERSION}" \
@@ -16,9 +124,9 @@ LABEL org.opencontainers.image.title="Quasar KDE Plasma desktop" \
 # inherited from quasar-steam-runtime). Portal: xdg-desktop-portal-kde. Apps:
 # kscreen: the Display Configuration KCM (System Settings -> Display) — the
 # scaling and per-output settings UI; without it there is no way to change
-# display scaling from inside the session (operator report 2026-08-15). The
-# nested output offers a single mode = the streamed resolution (quasar#384),
-# so the resolution list is one entry by design; scaling is what this buys.
+# display scaling from inside the session (operator report 2026-08-15). With
+# the patched kwin installed below the resolution list is a real ladder too
+# (it used to be a single entry = the streamed resolution, quasar#384).
 # konsole dolphin firefox (a desktop without a browser gives the user no way
 # to even confirm networking works — operator request 2026-08-14; native
 # package, not a flatpak, so it exists before any per-home flatpak state and
@@ -40,6 +148,41 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
       xdg-user-dirs \
     && dnf clean all \
     && rm -rf /var/cache/dnf
+
+# Install the patched kwin over the distro package. Same N-V-R plus a .quasar1
+# %dist suffix, so this is an ordinary upgrade of the same package, not a
+# replacement by a different one -- every other Plasma package's `Requires:
+# kwin = 6.7.4-1.fc43` style dependency still resolves.
+#
+# ONLY the subpackages already installed above are upgraded. `install *.rpm`
+# would drag in every subpackage the SRPM produces (kwin-x11, -devel, ...) and
+# silently fatten the image with things the session never runs; kwin's
+# subpackages are mutually version-locked, so a partial set that does NOT match
+# what is installed would break deps -- hence the explicit intersection.
+# --allowerasing covers a subpackage split changing between Fedora rebuilds
+# (dnf5 wants it AFTER the subcommand).
+#
+# The RPMs are BIND-MOUNTED from the builder stage rather than COPYed: a COPY
+# would persist the packages in a layer forever (11.9 MB, measured), and a
+# `rm -rf` in a later layer cannot reclaim it. Nothing from the builder stage
+# ends up in the image.
+RUN --mount=type=bind,from=kwin-artifact,source=/kwin-rpms,target=/tmp/kwin-rpms \
+    set -eu; \
+    installed="$(rpm -qa --qf '%{NAME}\n' 'kwin*' | sort -u)"; \
+    test -n "$installed"; \
+    rpms=""; \
+    for name in $installed; do \
+      for rpm in /tmp/kwin-rpms/*.rpm; do \
+        if [ "$(rpm -qp --qf '%{NAME}' "$rpm" 2>/dev/null)" = "$name" ]; then rpms="$rpms $rpm"; fi; \
+      done; \
+    done; \
+    test -n "$rpms"; \
+    echo "upgrading to patched kwin:$rpms"; \
+    dnf -y --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+      install --allowerasing $rpms; \
+    rpm -q kwin | grep -q '\.quasar'; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf
 
 # Two post-install fixups (live-verified 2026-08-15):
 # 1. Discover ships a firmware (fwupd) backend as a hard dependency; there is
