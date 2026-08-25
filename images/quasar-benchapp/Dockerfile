@@ -7,15 +7,15 @@
 # add a second compositor's pacing and scaling between the probe and the encoder,
 # which is exactly the signal this image exists to measure.
 #
-# The payload is built from the separate `quasar-benchgame` repo. That repo is
-# not published, so its build is not reproducible from this context alone; the
-# binary is lifted from a locally built image instead:
+# The payload is built from the separate `quasar-benchgame` repo, now published
+# at https://github.com/accretion-io/quasar-mark (private). The binary is
+# lifted from a locally built image rather than fetched at build time:
 #
-#   (in quasar-benchgame)  docker build -t quasar-benchapp:src .
-#   (here)                 QUASAR_IMAGE_TAG=dev ./scripts/build.sh quasar-benchapp
+#   (in a quasar-mark checkout)  docker build -t quasar-benchapp:src .
+#   (here)                       QUASAR_IMAGE_TAG=dev ./scripts/build.sh quasar-benchapp
 #
-# BENCHAPP_SRC_IMAGE names that stage image so a future published source repo can
-# be swapped in by overriding one build arg.
+# BENCHAPP_SRC_IMAGE names that stage image so a future registry-published
+# source image can be swapped in by overriding one build arg.
 
 ARG APP_IMAGE=quasar-app:dev
 ARG BENCHAPP_SRC_IMAGE=quasar-benchapp:src

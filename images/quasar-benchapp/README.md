@@ -41,25 +41,27 @@ images do — it keeps the node-agent's handover exactly as given.
 
 ## Build
 
-The payload comes from the separate, currently unpublished `quasar-benchgame` repo, so
-the build is two steps:
+The payload comes from the separate `quasar-benchgame` repo, published (private) at
+https://github.com/accretion-io/quasar-mark, so the build is two steps:
 
 ```sh
-# 1. in the quasar-benchgame checkout
+# 1. in a quasar-mark checkout
 docker build -t quasar-benchapp:src .
 
 # 2. here
-BENCHAPP_GIT_SHA="$(git -C /path/to/quasar-benchgame rev-parse --short HEAD)" \
+BENCHAPP_GIT_SHA="$(git -C /path/to/quasar-mark rev-parse --short HEAD)" \
   QUASAR_IMAGE_TAG=dev ./scripts/build.sh quasar-benchapp
 ./scripts/verify-benchapp.sh --no-build
 ```
 
 `BENCHAPP_SRC_IMAGE` overrides the source-stage image; `BENCHAPP_GIT_SHA` is recorded in
 the `org.quasar.benchapp.git-sha` label. This is why the manifest entry is
-`kind: template` with no `registry_ref` — nothing to pin until the source repo is
-published. **Always pass `BENCHAPP_GIT_SHA` explicitly** — a build without it embeds
-`unknown` in the label, and `docker inspect` becomes the only way to tell which
-benchgame commit is actually running.
+`kind: template` with no `registry_ref` — the source is now published but still not
+built as part of this repo's own pipeline, so there is nothing to pin here yet
+(TODO: revisit once/if the CI build fetches `quasar-mark` directly instead of relying
+on a locally built `quasar-benchapp:src`). **Always pass `BENCHAPP_GIT_SHA` explicitly**
+— a build without it embeds `unknown` in the label, and `docker inspect` becomes the
+only way to tell which benchgame commit is actually running.
 
 ### Known builds
 
