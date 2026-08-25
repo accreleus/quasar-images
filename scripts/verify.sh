@@ -34,7 +34,7 @@ refute_grep_text '(^|[^[:alnum:]_-])(gcc|gcc-c\+\+|make|cmake|clang|rustc|cargo|
   'images/quasar-base/Dockerfile (instructions)' \
   "$(qv_dockerfile_instructions images/quasar-base/Dockerfile)" \
   "no compiler or build toolchain belongs in the runtime base; build it in a discarded stage"
-./scripts/build.sh quasar-base
+qv_ensure_built quasar-base "$@"
 labels="$(docker image inspect "$BASE_IMAGE" --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "optional"' <<<"$labels" >/dev/null
 docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'

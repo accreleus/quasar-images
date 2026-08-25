@@ -77,6 +77,30 @@ QV_GUARD='trap '\''printf "FAIL: in-image assertion at line %s exited %s\n      
 qv_say()  { printf '  %s\n' "$*"; }
 qv_pass() { printf 'PASS  %s\n' "$*"; }
 
+# --- who builds the image under test ------------------------------------------
+#
+# Three of these scripts double as standalone entry points (`./scripts/
+# verify-benchapp.sh`) and build the image themselves so that works. But
+# `build.sh verify <image>` has ALREADY built it, so under CI that self-build was
+# a second, differently-parameterised entry into the builder inside the Verify
+# step -- and, worse, it let a verify quietly REPAIR a stale image mid-check
+# rather than failing on it. build.sh sets QUASAR_VERIFY_ASSUME_BUILT=1 so the
+# rule is stated once: the caller builds, the verify checks.
+#
+#   qv_ensure_built <image> ["$@"]   # honours a --no-build first argument too
+qv_ensure_built() {
+  local image="$1"; shift
+  if [ "${QUASAR_VERIFY_ASSUME_BUILT:-0}" = 1 ]; then
+    qv_say "not rebuilding $image -- build.sh built it"
+    return 0
+  fi
+  if [ "${1:-}" = --no-build ]; then
+    qv_say "not rebuilding $image -- --no-build"
+    return 0
+  fi
+  ./scripts/build.sh "$image"
+}
+
 # --- probes ------------------------------------------------------------------
 
 # Every executable that must be on PATH inside the image, named as it is checked.

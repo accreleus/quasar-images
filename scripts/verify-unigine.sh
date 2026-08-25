@@ -17,7 +17,7 @@ cd "$root"
 qv_init
 
 image="${IMAGE:-quasar-unigine:${QUASAR_IMAGE_TAG:-dev}}"
-[[ "${1:-}" == "--no-build" ]] || ./scripts/build.sh quasar-unigine
+qv_ensure_built quasar-unigine "$@"
 
 pass() { qv_pass "$@"; }
 

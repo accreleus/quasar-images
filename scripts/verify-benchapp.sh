@@ -18,7 +18,7 @@ cd "$root"
 qv_init
 
 image="${IMAGE:-quasar-benchapp:${QUASAR_IMAGE_TAG:-dev}}"
-[[ "${1:-}" == "--no-build" ]] || ./scripts/build.sh quasar-benchapp
+qv_ensure_built quasar-benchapp "$@"
 
 pass() { qv_pass "$@"; }
 
