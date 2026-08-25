@@ -4,6 +4,10 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# shellcheck source=scripts/lib/verify-lib.sh
+. "$root/scripts/lib/verify-lib.sh"
+qv_init
+
 # The image under test. `scripts/build.sh` tags what it builds with
 # $QUASAR_IMAGE_TAG (default `dev`), so a verify script that hardcodes `:dev`
 # silently checks a DIFFERENT image than the one just built -- which is exactly
@@ -14,12 +18,11 @@ cd "$root"
 TAG="${QUASAR_IMAGE_TAG:-dev}"
 STEAM_IMAGE="${QUASAR_STEAM_IMAGE:-quasar-steam:$TAG}"
 
-for executable in steam gamescope bwrap quasar-steam quasar-steam-client dbus-daemon NetworkManager; do
-  docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "command -v $executable >/dev/null"
-done
+echo "checking the session executables in $STEAM_IMAGE"
+qv_image_has "$STEAM_IMAGE" \
+  steam gamescope bwrap quasar-steam quasar-steam-client dbus-daemon NetworkManager
 
-docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc '
-  set -e
+docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   steam=/usr/local/bin/quasar-steam
   client=/usr/local/bin/quasar-steam-client
 
@@ -138,13 +141,12 @@ jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleratio
 # reshaped process group -- the reconstructed 6551fe8 regression. Graceful
 # shutdown is the launcher's job now (on_term() above), not tini's group-kill.
 base_dockerfile="$root/images/quasar-base/Dockerfile"
-test -f "$base_dockerfile"
-# Same explicit if/exit form as the setsid check above -- "!"-inverted grep is
-# inert under set -e and would silently pass if -g were reintroduced.
-if grep -q '^ENTRYPOINT \["/usr/bin/tini", "-g"' "$base_dockerfile"; then
-  echo "FAIL: tini -g present in $base_dockerfile" >&2
-  exit 1
-fi
-grep -q '^ENTRYPOINT \["/usr/bin/tini", "--", "/usr/local/bin/quasar-entrypoint"\]' "$base_dockerfile"
+assert_file "$base_dockerfile" "the base Dockerfile is what defines the ENTRYPOINT under test"
+# refute_grep, not "!"-inverted grep: the inverted form is inert under errexit
+# and would silently pass if -g were reintroduced.
+refute_grep '^ENTRYPOINT \["/usr/bin/tini", "-g"' "$base_dockerfile" \
+  "tini -g forwards signals by group-kill, which is EPERM-fatal without CAP_KILL"
+assert_grep '^ENTRYPOINT \["/usr/bin/tini", "--", "/usr/local/bin/quasar-entrypoint"\]' "$base_dockerfile" \
+  "the base entrypoint must be tini exec-ing quasar-entrypoint directly"
 
 echo "quasar-steam structural checks passed"
