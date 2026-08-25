@@ -198,7 +198,12 @@ verify_one() {
     [ -n "$script" ] || continue
     found=1
     echo "==> verify $image: $script" >&2
-    QUASAR_IMAGE_TAG="$tag" "$REPO_ROOT/$script"
+    # QUASAR_VERIFY_ASSUME_BUILT: the image was just built by this script, so the
+    # verify must CHECK it, not rebuild it. Three of the verify scripts double as
+    # standalone entry points and build the image themselves; without this they
+    # re-enter the builder from inside the Verify step, and a stale image gets
+    # quietly repaired instead of failing the check.
+    QUASAR_IMAGE_TAG="$tag" QUASAR_VERIFY_ASSUME_BUILT=1 "$REPO_ROOT/$script"
   done < <(graph verify "$image")
   [ "$found" = 1 ] || echo "build.sh: $image declares no verify script" >&2
 }

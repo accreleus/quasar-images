@@ -4,6 +4,10 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# shellcheck source=scripts/lib/verify-lib.sh
+. "$root/scripts/lib/verify-lib.sh"
+qv_init
+
 # The image under test. `scripts/build.sh` tags what it builds with
 # $QUASAR_IMAGE_TAG (default `dev`), so a verify script that hardcodes `:dev`
 # silently checks a DIFFERENT image than the one just built -- which is exactly
@@ -14,9 +18,10 @@ cd "$root"
 TAG="${QUASAR_IMAGE_TAG:-dev}"
 KDE_IMAGE="${QUASAR_KDE_IMAGE:-quasar-kde:$TAG}"
 
-for executable in startplasma-wayland kwin_wayland dbus-run-session flatpak steam bwrap quasar-kde xdg-user-dirs-update firefox; do
-  docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "command -v $executable >/dev/null"
-done
+echo "checking the session executables in $KDE_IMAGE"
+qv_image_has "$KDE_IMAGE" \
+  startplasma-wayland kwin_wayland dbus-run-session flatpak steam bwrap \
+  quasar-kde xdg-user-dirs-update firefox
 
 # --- Patched KWin (nested mode ladder) --------------------------------------
 # The image MUST run the kwin rebuilt from images/quasar-kde/kwin/*.patch, not
@@ -28,36 +33,49 @@ done
 # rather than a comment. Re-diff instructions: README, "Patched KWin (nested
 # mode ladder)".
 build_context_patch="images/quasar-kde/kwin/0001-nested-backend-mode-ladder.patch"
-if [[ ! -s "$build_context_patch" ]]; then
-  echo "FAIL: $build_context_patch is missing or empty in the build context" >&2
-  exit 1
-fi
-grep -q "src/backends/wayland/wayland_output.cpp" "$build_context_patch"
-grep -q "src/backends/wayland/wayland_display.cpp" "$build_context_patch"
+assert_file "$build_context_patch" "the nested mode ladder is not in the build context"
+assert_grep "src/backends/wayland/wayland_output.cpp" "$build_context_patch" \
+  "0001 no longer touches the nested output; re-diff it"
+assert_grep "src/backends/wayland/wayland_display.cpp" "$build_context_patch" \
+  "0001 no longer touches the nested display; re-diff it"
 # 0002 is what makes the Display KCM's SCALE slider work under a host that
 # implements wp_fractional_scale_v1 -- which Quasar's compositor does, so
 # without it the slider is inert in exactly the environment that matters.
 scale_patch="images/quasar-kde/kwin/0002-nested-backend-kscreen-scale.patch"
-if [[ ! -s "$scale_patch" ]]; then
-  echo "FAIL: $scale_patch is missing or empty in the build context" >&2
-  exit 1
-fi
-grep -q "src/backends/wayland/wayland_output.cpp" "$scale_patch"
+assert_file "$scale_patch" "the Display KCM scale slider would be inert"
+assert_grep "src/backends/wayland/wayland_output.cpp" "$scale_patch" \
+  "0002 no longer touches the nested output; re-diff it"
 # 0003 is what makes a CHANGED host wp_fractional_scale_v1 hint move the nested
 # output's scale -- i.e. what makes Quasar's per-session ui_scale knob do
 # anything. Without it the hint is applied and then immediately overwritten by
 # KWin's own OutputConfigurationStore re-asserting its remembered scale.
 hint_patch="images/quasar-kde/kwin/0003-nested-backend-host-scale-hint.patch"
-if [[ ! -s "$hint_patch" ]]; then
-  echo "FAIL: $hint_patch is missing or empty in the build context" >&2
-  exit 1
-fi
-grep -q "src/backends/wayland/wayland_output.cpp" "$hint_patch"
-if [[ ! -x images/quasar-kde/kwin/build-kwin.sh ]]; then
-  echo "FAIL: images/quasar-kde/kwin/build-kwin.sh is missing or not executable" >&2
-  exit 1
-fi
-grep -q "FROM fedora:43 AS kwin-build" images/quasar-kde/Dockerfile
+assert_file "$hint_patch" "the per-session ui_scale knob would do nothing"
+assert_grep "src/backends/wayland/wayland_output.cpp" "$hint_patch" \
+  "0003 no longer touches the nested output; re-diff it"
+assert_exec images/quasar-kde/kwin/build-kwin-deps.sh "the kwin builddep stage has no script"
+assert_exec images/quasar-kde/kwin/build-kwin.sh "the kwin rpmbuild stage has no script"
+
+# The RPMs must still be built HERE, from a digest-pinned Fedora.
+#
+# This assertion used to read `grep -q "FROM fedora:43 AS kwin-build"`, and it is
+# why run 32863290838 failed: the builder base legitimately became a
+# digest-pinned ARG and the stage was split in two, so the literal it matched no
+# longer existed. It was a bare `grep -q`, so it took the whole script down with
+# no output at all -- see scripts/lib/verify-lib.sh.
+#
+# Two lessons are encoded in the replacement. First, assert the STRUCTURE (a
+# stage named kwin-build, fed by a builder-base ARG) rather than one exact FROM
+# line, so an equivalent refactor does not read as a regression. Second, do not
+# restate the digest-pin rule: scripts/kwin-artifact-tag.sh OWNS it and REFUSES
+# to emit a tag for an unpinned base, so calling it is both the check and the
+# guarantee that the two can never disagree. Restating it here is precisely how
+# the previous assertion drifted.
+assert_grep '^FROM +\$\{KWIN_BUILDER_BASE\} +AS +kwin-deps' images/quasar-kde/Dockerfile \
+  "the kwin builddep stage must come from the pinned builder base"
+assert_grep '^FROM +kwin-deps +AS +kwin-build' images/quasar-kde/Dockerfile \
+  "the rpmbuild stage must reuse the builddep stage, not re-install 1.5 GB of -devel"
+./scripts/kwin-artifact-tag.sh --tag >/dev/null
 
 kwin_nvr="$(docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc 'rpm -q kwin')"
 if [[ "$kwin_nvr" != *".quasar"* ]]; then
@@ -83,8 +101,7 @@ fi
 echo "kwin label agrees with the installed package: $kwin_label"
 
 # The builder stage must not have leaked into the shipped image.
-docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc '
-  set -e
+docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "$QV_GUARD"'
   if [[ -e /tmp/kwin-rpms ]]; then
     echo "FAIL: /tmp/kwin-rpms left behind in the shipped image" >&2
     exit 1
@@ -207,18 +224,13 @@ grep -q 'SMOKE-OK' <<<"$smoke"
 
 # gamescope must be ABSENT from this image (quasar-kde carries zero gamescope/
 # BPM weight by construction -- it inherits from quasar-steam-runtime, not
-# quasar-steam). NOTE: negative assertions must use explicit if/exit, not
-# "! command -v ...". bash's errexit (set -e) does not fire on a command whose
-# exit status is inverted by !, so "! command -v gamescope" would silently
-# PASS (never even print a failure) if gamescope were reintroduced -- the same
-# lesson verify-steam.sh's setsid/setpgid checks are built around.
-if docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc 'command -v gamescope' >/dev/null 2>&1; then
-  echo "FAIL: gamescope present in $KDE_IMAGE (this image must carry zero gamescope/BPM weight)" >&2
-  exit 1
-fi
+# quasar-steam). qv_image_lacks, not "! command -v ...": bash's errexit does not
+# fire on a command whose exit status is inverted by !, so the inverted form
+# would silently PASS if gamescope were reintroduced -- the same lesson
+# verify-steam.sh's setsid/setpgid checks are built around.
+qv_image_lacks "$KDE_IMAGE" gamescope
 
-docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc '
-  set -e
+docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "$QV_GUARD"'
   kde=/usr/local/bin/quasar-kde
 
   # Launcher-owned graceful shutdown (quasar-images#1), same contract as the

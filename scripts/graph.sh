@@ -179,6 +179,35 @@ case "$cmd" in
           echo "$n: ci=true but its dependency '$d' is ci=false" >&2; fail=1
         fi
       done
+      # `args` and `needs` state the SAME dependency twice -- an arg resolving to
+      # `@tag:quasar-app` is a `FROM` on quasar-app, and `needs` is what makes
+      # build.sh build it first. They can drift, and the failure is a build that
+      # dies on a missing parent tag several minutes in. So: every @tag: target
+      # must be a real image AND must be declared in `needs`.
+      #
+      # Unknown `@resolvers` are rejected here too. _resolve() falls through to
+      # "treat it as a literal", so `@tags:quasar-app` (a plausible typo) would
+      # become the build arg value `@tags:quasar-app` and be passed to docker
+      # without complaint.
+      while IFS= read -r k; do
+        [ -n "$k" ] || continue
+        raw="$(_image "$n" | jq -r --arg k "$k" '.args[$k]')"
+        case "$raw" in
+          '@version'|'@env:'*) ;;
+          '@tag:'*)
+            dep="${raw#@tag:}"
+            if ! _exists "$dep"; then
+              echo "$n: arg $k is '@tag:$dep', which is not an image in this graph" >&2; fail=1
+            elif ! _image "$n" | jq -e --arg d "$dep" '[.needs[]?] | index($d)' >/dev/null; then
+              echo "$n: arg $k builds FROM '$dep' but does not list it in needs" >&2; fail=1
+            fi
+            ;;
+          '@'*)
+            echo "$n: arg $k uses unknown resolver '$raw' (want @version, @tag:<image>, @env:NAME=DEFAULT, or a literal)" >&2
+            fail=1
+            ;;
+        esac
+      done < <(_image "$n" | jq -r '.args // {} | keys_unsorted[]')
       for v in $(_image "$n" | jq -r '.verify[]?'); do
         [ -x "$REPO_ROOT/$v" ] || { echo "$n: verify script '$v' missing or not executable" >&2; fail=1; }
       done
