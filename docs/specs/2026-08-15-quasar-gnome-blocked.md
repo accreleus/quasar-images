@@ -1,11 +1,12 @@
-# quasar-gnome: blocked on Fedora 43 — investigation and decision
+# Decision record: quasar-gnome blocked on Fedora 43
 
 Date: 2026-08-15
 Status: decided — **do not ship `quasar-gnome` on Fedora 43** (user decision,
-2026-08-15). This document is the deliverable.
+2026-08-15). This document is the deliverable; no Dockerfile or image exists
+for `quasar-gnome` and none is planned unless §3's revisit trigger fires.
 Scope: this repository. Companion to
-`2026-08-13-quasar-kde-implementation.md`, whose conventions the abandoned
-implementation was following.
+`docs/specs/2026-08-13-quasar-kde-implementation.md`, whose conventions the
+abandoned implementation was following.
 
 ## 1. Finding
 
