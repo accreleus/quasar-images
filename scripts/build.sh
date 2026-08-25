@@ -10,6 +10,37 @@
 # WHAT IS BUILT AND IN WHAT ORDER IS NOT IN THIS FILE. It is in
 # build-graph.json, read through scripts/graph.sh. This script only knows how to
 # turn one graph entry into a `docker build` invocation. See AGENTS.md.
+#
+# ── Layer cache (off by default) ──────────────────────────────────────────────
+#
+# With no QUASAR_CACHE_* set this runs exactly the `DOCKER_BUILDKIT=1 docker
+# build` it always did: same driver, same local image store, no network. That is
+# the devbox default on purpose -- a devbox already has a warm local layer cache
+# and gains nothing from an external one. CI is the opposite case: every runner
+# is cold, which is the whole reason this exists.
+#
+#   QUASAR_CACHE_REGISTRY=ghcr.io/accretion-io   import <image>:buildcache
+#   QUASAR_CACHE_DIR=/path                       import a local cache directory
+#   QUASAR_CACHE_WRITE=1                         also EXPORT (mode=max)
+#   QUASAR_BUILDER=quasar-images                 buildx builder name
+#   QUASAR_BUILDX=1                              use buildx even with no cache
+#
+# Either cache knob switches the build to `docker buildx build` on a
+# docker-container builder, because `--cache-to type=registry|local` is not
+# supported by the default `docker` driver AT ALL (it fails the build; it does
+# not degrade). The docker-container driver in turn does not write to the local
+# image store, so every build gets an explicit `--load` -- without it
+# `./scripts/build.sh quasar-base && ./scripts/verify.sh` would pass the build
+# and then fail on `docker image inspect quasar-base:dev`, because the image
+# would exist only inside the builder. That combination (container driver +
+# registry cache + no --load) is the trap this replaces: PR #25 wired the cache
+# flags into a `docker build` that could never accept them, from a function
+# nothing called.
+#
+# mode=max exports intermediate stage layers, not just the final image's. For
+# this repo that IS the point: every expensive layer -- the Steam 32-bit
+# closure, the bwrap and gamescope source builds, the kwin rpmbuild -- lives in
+# a stage that mode=min would not export.
 
 set -euo pipefail
 
@@ -20,6 +51,42 @@ cd "$REPO_ROOT"
 graph() { "$SCRIPT_DIR/graph.sh" "$@"; }
 
 tag="${QUASAR_IMAGE_TAG:-dev}"
+builder="${QUASAR_BUILDER:-quasar-images}"
+
+cache_active() { [ -n "${QUASAR_CACHE_REGISTRY:-}${QUASAR_CACHE_DIR:-}" ]; }
+use_buildx()   { cache_active || [ "${QUASAR_BUILDX:-0}" = 1 ]; }
+
+ensure_builder() {
+  if docker buildx inspect "$builder" >/dev/null 2>&1; then return 0; fi
+  echo "build.sh: creating docker-container buildx builder '$builder'" >&2
+  docker buildx create --name "$builder" --driver docker-container --bootstrap >/dev/null
+}
+
+# Cache refs are PER IMAGE, not one shared ref. With a single shared ref each
+# image's export overwrites the previous one's manifest, so the last image built
+# would be the only one with a usable cache -- the failure mode that makes a "we
+# added caching" change quietly do nothing.
+cache_flags() {
+  local image="$1"
+  if [ -n "${QUASAR_CACHE_REGISTRY:-}" ]; then
+    printf -- '--cache-from\ntype=registry,ref=%s/%s:buildcache\n' "$QUASAR_CACHE_REGISTRY" "$image"
+    if [ "${QUASAR_CACHE_WRITE:-0}" = 1 ]; then
+      printf -- '--cache-to\ntype=registry,ref=%s/%s:buildcache,mode=max\n' "$QUASAR_CACHE_REGISTRY" "$image"
+    fi
+  fi
+  if [ -n "${QUASAR_CACHE_DIR:-}" ]; then
+    # Importing a local cache dir that does not exist yet is a hard BuildKit
+    # error, not a miss -- so the first ever run must not pass --cache-from.
+    if [ -d "$QUASAR_CACHE_DIR/$image" ]; then
+      printf -- '--cache-from\ntype=local,src=%s/%s\n' "$QUASAR_CACHE_DIR" "$image"
+    fi
+    if [ "${QUASAR_CACHE_WRITE:-0}" = 1 ]; then
+      mkdir -p "$QUASAR_CACHE_DIR/$image"
+      printf -- '--cache-to\ntype=local,dest=%s/%s,mode=max\n' "$QUASAR_CACHE_DIR" "$image"
+    fi
+  fi
+  return 0
+}
 
 # ── The benchapp payload ──────────────────────────────────────────────────────
 #
@@ -52,13 +119,13 @@ resolve_benchapp_src() {
 
 build_one() {
   local image="$1" df target
-  [ "$image" = quasar-benchapp ] && resolve_benchapp_src
+  if [ "$image" = quasar-benchapp ]; then resolve_benchapp_src; fi
 
   df="$(graph field "$image" dockerfile)"
   target="$(graph field "$image" target)"
 
   local flags=(-f "$df" -t "$image:$tag")
-  [ -n "$target" ] && flags+=(--target "$target")
+  if [ -n "$target" ]; then flags+=(--target "$target"); fi
 
   local kv
   while IFS= read -r kv; do
@@ -66,7 +133,18 @@ build_one() {
     flags+=(--build-arg "$kv")
   done < <(graph args "$image")
 
-  DOCKER_BUILDKIT=1 docker build --progress=plain "${flags[@]}" .
+  if use_buildx; then
+    ensure_builder
+    local cf=()
+    while IFS= read -r kv; do
+      if [ -n "$kv" ]; then cf+=("$kv"); fi
+    done < <(cache_flags "$image")
+    echo "build.sh: buildx $image:$tag ${cf[*]:-(no cache)}" >&2
+    docker buildx build --builder "$builder" --load --progress=plain \
+      ${cf[@]+"${cf[@]}"} "${flags[@]}" .
+  else
+    DOCKER_BUILDKIT=1 docker build --progress=plain "${flags[@]}" .
+  fi
 }
 
 build_set() {
@@ -96,6 +174,9 @@ usage() {
   exit 64
 }
 
+# graph.sh emits one image name per line and an image name can never contain
+# whitespace, so the unquoted expansions below are the intended word split.
+# shellcheck disable=SC2046
 case "${1:-all}" in
   check)  graph check ;;
   verify)

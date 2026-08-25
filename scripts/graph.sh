@@ -55,7 +55,7 @@ _closure() {
         case "$wanted" in *" $d "*) ;; *) wanted="$wanted$d "; grew=1 ;; esac
       done
     done
-    [ "$grew" = 0 ] && break
+    if [ "$grew" = 0 ]; then break; fi
   done
   for n in $(_names); do
     case "$wanted" in *" $n "*) out+=("$n") ;; esac
@@ -88,7 +88,11 @@ _resolve() {
     '@version')  tr -d '[:space:]' < "$REPO_ROOT/VERSION" ;;
     '@tag:'*)    printf '%s:%s' "${raw#@tag:}" "$tag" ;;
     '@env:'*)
-      local spec="${raw#@env:}" name="${spec%%=*}" default="" v
+      # Separate `local`s deliberately: within ONE `local a=... b=$a`, $a is not
+      # yet in scope when b is expanded (shellcheck SC2318).
+      local spec="${raw#@env:}"
+      local name="${spec%%=*}"
+      local default="" v
       case "$spec" in *=*) default="${spec#*=}" ;; esac
       v="$(printf '%s' "${!name:-}")"
       printf '%s' "${v:-$default}"
@@ -152,7 +156,7 @@ case "$cmd" in
     for n in $(_names); do
       case " $seen " in *" $n "*) echo "duplicate image: $n" >&2; fail=1 ;; esac
       df="$("$0" field "$n" dockerfile)"
-      [ -n "$df" ] && [ -f "$REPO_ROOT/$df" ] || { echo "$n: dockerfile '$df' missing" >&2; fail=1; }
+      if [ -z "$df" ] || [ ! -f "$REPO_ROOT/$df" ]; then echo "$n: dockerfile '$df' missing" >&2; fail=1; fi
       case "$("$0" field "$n" tier)" in
         spine|leaf|artifact) ;;
         *) echo "$n: tier must be spine|leaf|artifact" >&2; fail=1 ;;
@@ -173,7 +177,7 @@ case "$cmd" in
       done
       seen="$seen $n"
     done
-    [ "$fail" = 0 ] && echo "build-graph.json OK ($(_names | wc -l | tr -d ' ') images)"
+    if [ "$fail" = 0 ]; then echo "build-graph.json OK ($(_names | wc -l | tr -d ' ') images)"; fi
     exit "$fail"
     ;;
 
