@@ -56,7 +56,11 @@ for local builds, where a BuildKit cache mount makes the download a one-off.
 3. If it has a verify script, list it in `verify` and make the script
    executable. It will then run locally *and* in CI. Nothing else to wire.
 4. `./scripts/build.sh check` — validates dockerfile paths, tiers, dependency
-   ordering, a `ci: true` image on a `ci: false` parent, and verify scripts.
+   ordering, a `ci: true` image on a `ci: false` parent, verify scripts, and the
+   `args` vocabulary: an unknown `@resolver`, an `@tag:` naming an image that is
+   not in the graph, or an `@tag:` whose target is missing from `needs` (the two
+   fields state the same dependency, and drift between them is a build that dies
+   minutes in on a parent that was never built).
 5. `./scripts/build.sh <name>` — builds it and its ancestors.
 
 Arg values in the graph use four forms and nothing else: `@version` (the
@@ -257,6 +261,40 @@ entrypoints, launcher wiring, package markers, and a few genuinely runnable
 smokes (the KDE one starts a nested `kwin_wayland` and changes resolution and
 scale). They do not need a GPU.
 
-Which ones run is `build-graph.json`'s `verify` field, so a script that exists is
-a script that runs. `verify-benchapp.sh` and `verify-unigine.sh` sat unrun for
-months because nothing referenced them; wiring is now a data edit.
+Which ones run is `build-graph.json`'s `verify` field, so a wired script is a
+script that runs. `verify-benchapp.sh` and `verify-unigine.sh` sat unrun for
+months because nothing referenced them; wiring is now a data edit. One script is
+deliberately *not* wired: `scripts/validate-steam-runtime.sh` prints Steam
+launcher behaviour for a human to read rather than asserting anything, so it is a
+manual tool, not a gate. Run it by hand after touching the launcher.
+
+**The caller builds; the verify checks.** `build.sh verify <image>` has already
+built the image, and sets `QUASAR_VERIFY_ASSUME_BUILT=1` so the verify does not
+build it again. A verify that rebuilds is a verify that can quietly repair a
+stale image instead of failing on it. Standalone (`./scripts/verify-kde.sh`) it
+still builds; `--no-build` skips that.
+
+### Writing an assertion
+
+Source `scripts/lib/verify-lib.sh` and call `qv_init`. Two rules, both paid for:
+
+1. **An assertion must say what it checked.** A bare `grep -q` under `set -e`
+   exits 1 having printed nothing at all. That is what stalled the stable
+   promotion on 2026-08-25: `verify-kde.sh` asserted a `FROM fedora:43 AS
+   kwin-build` line that a legitimate refactor had removed, and the whole script
+   died in silence after 2.1 seconds. Use `assert_grep` / `assert_file` /
+   `assert_exec` with a `why`, and prefix in-image `docker run` bodies with
+   `"$QV_GUARD"` so a failure inside the container reports its line too. `qv_init`
+   installs an ERR trap, so even an assertion written the old way now names
+   itself.
+2. **Never write `! cmd`.** bash does not apply `set -e` to a `!`-inverted
+   command, so `! grep -q setsid "$launcher"` can *never* fail — it reads as a
+   guard and is a no-op. Seven such lines were live in this repo, including both
+   of `verify-benchapp.sh`'s fail-closed checks. Use `refute_grep`,
+   `refute_grep_text`, `refute_cmd`, `qv_image_lacks`, or an explicit
+   `if ...; then echo FAIL >&2; exit 1; fi`.
+
+Prefer asserting *structure* over an exact line, and never restate a rule another
+script owns — `verify-kde.sh` calls `kwin-artifact-tag.sh` for the digest-pin
+check rather than re-grepping for it, because restating it is how the previous
+assertion drifted.
