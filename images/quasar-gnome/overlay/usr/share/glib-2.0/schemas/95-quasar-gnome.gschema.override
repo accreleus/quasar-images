@@ -1,0 +1,55 @@
+# Baked GNOME defaults for a container-streamed session. Every key below was
+# verified to EXIST on this build (GNOME 49 / gnome-shell-49.9 / mutter-49.7 /
+# gnome-software-49.4, Fedora 43) with `gsettings range <schema> <key>` on the
+# dev box -- glib-compile-schemas fails the build on an override for a key that
+# does not exist, so an unverified key here is a build break, not a silent no-op.
+#
+# This is a DEFAULTS layer only: per-user dconf in $HOME still wins, so a user
+# who turns any of this back on keeps that choice across restarts (the
+# /home/quasar volume is the persistence contract).
+
+# No local display to lock, and the node-agent -- not gnome-screensaver -- owns
+# session access control. A lock screen here would strand the user behind a
+# password prompt with no local input path.
+[org.gnome.desktop.screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+
+# Idle is meaningless for a streamed session: the user can be actively watching
+# while sending no input at all. 0 disables the idle timer entirely.
+[org.gnome.desktop.session]
+idle-delay=uint32 0
+
+# Suspending the "machine" would suspend the container's session out from under
+# the stream. Dimming would just darken the encoded picture.
+[org.gnome.settings-daemon.plugins.power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+idle-dim=false
+
+# gnome-tour is not installed, but gnome-shell shows its own welcome dialog on a
+# first-run $HOME whenever this is older than the running shell. Pinning it high
+# suppresses that dialog on every fresh home volume without shipping the tour.
+[org.gnome.shell]
+welcome-dialog-last-shown-version='99.0'
+
+# Software: Flatpak is the supported install path for this image (user-level,
+# Flathub added by the launcher). first-run=false skips the intro pane;
+# download-updates=false keeps a desktop session from spending the user's
+# bandwidth on background RPM metadata it cannot usefully apply to an image.
+[org.gnome.software]
+first-run=false
+download-updates=false
+
+# localsearch (formerly tracker-miners) arrives as a hard dependency of
+# nautilus. It is not force-removed -- an indexer crawling a game library volume
+# is pure overhead in a streamed session, so it is neutered here instead.
+[org.freedesktop.Tracker3.Miner.Files]
+index-recursive-directories=[]
+index-single-directories=[]
+enable-monitors=false
+
+# Shell search that shells out to external providers has nothing useful to reach
+# in this image and adds startup cost to every search.
+[org.gnome.desktop.search-providers]
+disable-external=true
