@@ -20,8 +20,40 @@ cd "$REPO_ROOT"
 graph() { "$SCRIPT_DIR/graph.sh" "$@"; }
 
 tag="${QUASAR_IMAGE_TAG:-dev}"
+
+# ── The benchapp payload ──────────────────────────────────────────────────────
+#
+# images/quasar-benchapp/Dockerfile lifts its binary from another image. That
+# image's source is github.com/accretion-io/quasar-mark, a SEPARATE (private)
+# repo, so `build.sh all` on a clean runner had no way to produce it and failed
+# on `FROM quasar-benchapp:src` -- which is why CI never built this image.
+#
+# Resolution order, most specific first:
+#   1. $BENCHAPP_SRC_IMAGE            an explicit override, always wins
+#   2. quasar-benchapp:src            a local build, if one is present. This is
+#                                     the devbox loop: build it in a quasar-mark
+#                                     checkout, then build here. Preserved
+#                                     deliberately -- a devbox iterating on the
+#                                     probe must not be forced through a publish.
+#   3. the registry image quasar-mark publishes. The clean-runner path.
+#
+# See AGENTS.md, "The benchapp payload", for the GHCR package-read prerequisite
+# on (3).
+BENCHAPP_SRC_FALLBACK="${BENCHAPP_SRC_FALLBACK:-ghcr.io/accretion-io/quasar-benchapp-src:latest}"
+resolve_benchapp_src() {
+  [ -z "${BENCHAPP_SRC_IMAGE:-}" ] || return 0
+  if docker image inspect quasar-benchapp:src >/dev/null 2>&1; then
+    export BENCHAPP_SRC_IMAGE="quasar-benchapp:src"
+  else
+    export BENCHAPP_SRC_IMAGE="$BENCHAPP_SRC_FALLBACK"
+  fi
+  echo "build.sh: benchapp payload -> $BENCHAPP_SRC_IMAGE" >&2
+}
+
 build_one() {
   local image="$1" df target
+  [ "$image" = quasar-benchapp ] && resolve_benchapp_src
+
   df="$(graph field "$image" dockerfile)"
   target="$(graph field "$image" target)"
 

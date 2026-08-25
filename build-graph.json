@@ -136,13 +136,13 @@
       "args": {
         "APP_IMAGE": "@tag:quasar-app",
         "VERSION": "@version",
-        "BENCHAPP_SRC_IMAGE": "@env:BENCHAPP_SRC_IMAGE=quasar-benchapp:src",
+        "BENCHAPP_SRC_IMAGE": "@env:BENCHAPP_SRC_IMAGE=",
         "BENCHAPP_GIT_SHA": "@env:BENCHAPP_GIT_SHA=unknown"
       },
       "verify": ["scripts/verify-benchapp.sh"],
-      "ci": false,
+      "ci": true,
       "publish": false,
-      "notes": "ci=false for now: FROM quasar-benchapp:src names a LOCALLY built image whose source is a separate repo, so a clean runner cannot produce it. Fixed in the commit that gives it a registry source."
+      "notes": "kind=template in quasar-manifest.json, so nothing pulls it from a registry -- built and VERIFIED in CI (verify-benchapp.sh, which nothing ran before), not published. BENCHAPP_SRC_IMAGE is left empty here on purpose: scripts/build.sh resolves it (explicit override > a local quasar-benchapp:src > the registry image quasar-mark publishes). See AGENTS.md, 'The benchapp payload'."
     },
     {
       "name": "quasar-test-vulkan",
