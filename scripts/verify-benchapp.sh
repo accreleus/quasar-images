@@ -13,10 +13,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# shellcheck source=scripts/lib/verify-lib.sh
+. "$root/scripts/lib/verify-lib.sh"
+qv_init
+
 image="${IMAGE:-quasar-benchapp:${QUASAR_IMAGE_TAG:-dev}}"
 [[ "${1:-}" == "--no-build" ]] || ./scripts/build.sh quasar-benchapp
 
-pass() { printf 'PASS  %s\n' "$*"; }
+pass() { qv_pass "$@"; }
 
 # --- image metadata ----------------------------------------------------------
 labels="$(docker image inspect "$image" --format '{{json .Config.Labels}}')"
@@ -31,18 +35,14 @@ pass "labels: contract=1 acceleration=required persist=/home/quasar apis=vulkan"
 # benchapp measures the compositor->encoder path; a gamescope smuggled in by a
 # base-image change would insert a second compositor's pacing and scaling into
 # every measurement and silently invalidate the results.
-docker run --rm --entrypoint /bin/bash "$image" -lc '
-  ! command -v gamescope >/dev/null || { echo "gamescope present — this image must talk to the Quasar compositor directly"; exit 1; }
-  ! command -v Xwayland  >/dev/null || { echo "Xwayland present — benchapp is a native Wayland client"; exit 1; }
-'
+qv_image_lacks "$image" gamescope Xwayland
 pass "no nested compositor: gamescope/Xwayland absent"
 
 # --- payload + dynamic-link closure ------------------------------------------
 # quasar-app carries vulkan-loader and libwayland-client but not libwayland-cursor
 # (winit dlopens it for pointer themes); a base refresh that drops any of the
 # closure must fail here rather than at first launch on a live host.
-docker run --rm --entrypoint /bin/bash "$image" -lc '
-  set -e
+docker run --rm --entrypoint /bin/bash "$image" -lc "$QV_GUARD"'
   [[ -x /usr/local/bin/benchapp ]]
   [[ -x /usr/local/bin/benchapp-run.sh ]]
   [[ -x /usr/local/bin/quasar-benchapp ]]
@@ -78,7 +78,11 @@ grep -q -- '--fps 60'           <<<"$dry"
 grep -q -- '--marker-scale 0.5' <<<"$dry"
 # --render must be ABSENT by default so the probe follows the compositor's
 # configure size and the live resolution-change path (quasar#384) is exercised.
-! grep -q -- '--render' <<<"$dry"
+# refute_grep_text, not `! grep`: errexit does not apply to a `!`-inverted
+# command, so the previous form could never have failed -- a pinned --render
+# would have shipped with this assertion still reading as green.
+refute_grep_text '--render' 'the launcher default command' "$dry" \
+  "a pinned --render stops the probe following the compositor's configure size"
 pass "launcher defaults: flythrough/5/5/60, marker-scale 0.5, no pinned --render"
 
 # QUASAR_STREAM_FPS is the session's negotiated refresh and must reach the pacer.
@@ -92,11 +96,17 @@ pass "launcher: QUASAR_STREAM_FPS + BENCHAPP_* overrides honoured"
 
 # Fail closed: a bad scene must abort, not silently fall back to a different
 # workload and produce results labelled with a scene that never rendered.
-! docker run --rm -e BENCHAPP_DRY_RUN=1 -e BENCHAPP_SCENE=nope \
-    --entrypoint /bin/bash "$image" -c "$mksock; exec /usr/local/bin/quasar-benchapp" >/dev/null 2>&1
+# refute_cmd, not `! docker run`: both of these were inert under errexit, so the
+# two fail-CLOSED assertions -- the ones guarding against results labelled with a
+# scene that never rendered -- could not fail. They are the assertions in this
+# file it would be worst to have wrong.
+refute_cmd "a bad BENCHAPP_SCENE must abort, not fall back to a different workload" \
+  docker run --rm -e BENCHAPP_DRY_RUN=1 -e BENCHAPP_SCENE=nope \
+    --entrypoint /bin/bash "$image" -c "$mksock; exec /usr/local/bin/quasar-benchapp"
 # ...and a missing compositor socket must abort rather than hang.
-! docker run --rm -e BENCHAPP_DRY_RUN=1 \
-    --entrypoint /bin/bash "$image" -c 'exec /usr/local/bin/quasar-benchapp' >/dev/null 2>&1
+refute_cmd "a missing Wayland socket must abort, not hang" \
+  docker run --rm -e BENCHAPP_DRY_RUN=1 \
+    --entrypoint /bin/bash "$image" -c 'exec /usr/local/bin/quasar-benchapp'
 pass "launcher fails closed on bad scene and on missing Wayland socket"
 
 # --- the launcher must hand over, not supervise ------------------------------
@@ -104,11 +114,14 @@ pass "launcher fails closed on bad scene and on missing Wayland socket"
 # between PID 1 and the app would have to forward the signal correctly, and a
 # missed forward costs the final summary.json on every `docker stop` -- silently,
 # since frames.jsonl/events.jsonl still look fine.
-docker run --rm --entrypoint /bin/bash "$image" -lc '
-  set -e
+docker run --rm --entrypoint /bin/bash "$image" -lc "$QV_GUARD"'
   grep -qE "^exec /usr/local/bin/benchapp-run.sh" /usr/local/bin/quasar-benchapp
   grep -qE "^exec /usr/local/bin/benchapp"        /usr/local/bin/benchapp-run.sh
-  ! grep -q "trap .* TERM" /usr/local/bin/quasar-benchapp
+  # explicit if/exit: "! grep" is inert under errexit and would pass silently.
+  if grep -q "trap .* TERM" /usr/local/bin/quasar-benchapp; then
+    echo "FAIL: quasar-benchapp traps TERM; it must exec through so benchapp handles the signal itself" >&2
+    exit 1
+  fi
 '
 pass "launcher execs through to benchapp (no supervising shell, no TERM trap)"
 
@@ -119,8 +132,7 @@ pass "launcher execs through to benchapp (no supervising shell, no TERM trap)"
 # measurement campaign is caught here in ~30 s.
 docker run --rm \
   -e MESA_LOADER_DRIVER_OVERRIDE=llvmpipe -e WGPU_BACKEND=vulkan \
-  --entrypoint /bin/bash "$image" -lc '
-  set -e
+  --entrypoint /bin/bash "$image" -lc "$QV_GUARD"'
   /usr/local/bin/benchapp --offscreen --dump-frames 0-9 --out /tmp/a >/dev/null
   /usr/local/bin/benchapp --offscreen --dump-frames 5-5 --out /tmp/b >/dev/null
   [[ "$(ls /tmp/a/*.png | wc -l)" -eq 10 ]]

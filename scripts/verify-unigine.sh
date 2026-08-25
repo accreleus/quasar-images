@@ -12,10 +12,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# shellcheck source=scripts/lib/verify-lib.sh
+. "$root/scripts/lib/verify-lib.sh"
+qv_init
+
 image="${IMAGE:-quasar-unigine:${QUASAR_IMAGE_TAG:-dev}}"
 [[ "${1:-}" == "--no-build" ]] || ./scripts/build.sh quasar-unigine
 
-pass() { printf 'PASS  %s\n' "$*"; }
+pass() { qv_pass "$@"; }
 
 # --- image metadata ----------------------------------------------------------
 labels="$(docker image inspect "$image" --format '{{json .Config.Labels}}')"
@@ -28,18 +32,14 @@ pass "labels: contract=1 acceleration=required persist=/home/quasar"
 # Without gamescope (and the Xwayland it drags in) an X11/GLX benchmark has no
 # display at all under Quasar's Wayland-only session. This is the single most
 # load-bearing packaging assertion in the image.
-docker run --rm --entrypoint /bin/bash "$image" -lc '
-  command -v gamescope >/dev/null || { echo "gamescope missing"; exit 1; }
-  command -v Xwayland  >/dev/null || { echo "Xwayland missing";  exit 1; }
-'
+qv_image_has "$image" gamescope Xwayland
 pass "gamescope + Xwayland present"
 
 # --- benchmark payloads ------------------------------------------------------
 have_super="$(docker run --rm --entrypoint /bin/bash "$image" -lc \
   '[[ -x /opt/unigine/superposition/bin/superposition ]] && echo 1 || echo 0')"
 
-docker run --rm --entrypoint /bin/bash "$image" -lc '
-  set -e
+docker run --rm --entrypoint /bin/bash "$image" -lc "$QV_GUARD"'
   [[ -x /opt/unigine/heaven/bin/heaven_x64 ]]
   [[ -f /opt/unigine/heaven/data/heaven_4.0.cfg ]]
   # The engine rewrites engine_config on exit; a read-only data dir wedges every
@@ -52,8 +52,7 @@ pass "heaven: binary + config present, data dir writable, x86 stripped"
 
 # Dynamic-link closure: quasar-app does not carry libXinerama/libXrandr/libXrender,
 # so a base-image refresh that drops them must fail here rather than at first launch.
-docker run --rm --entrypoint /bin/bash "$image" -lc '
-  set -e
+docker run --rm --entrypoint /bin/bash "$image" -lc "$QV_GUARD"'
   export LD_LIBRARY_PATH=/opt/unigine/heaven/bin/x64:/opt/unigine/heaven/bin
   missing="$(ldd /opt/unigine/heaven/bin/heaven_x64 | grep -F "not found" || true)"
   if [[ -n "$missing" ]]; then echo "unresolved sonames:"; echo "$missing"; exit 1; fi

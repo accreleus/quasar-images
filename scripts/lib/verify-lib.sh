@@ -150,6 +150,23 @@ refute_grep() {
   return 1
 }
 
+# The same negative assertion against text rather than a file -- for the cases
+# where the thing being asserted about is a FILTERED view of a file (Dockerfile
+# instructions with the comments stripped, a captured command's output).
+refute_grep_text() {
+  local pattern="$1" label="$2" text="$3" why="${4:-}"
+  grep -Eq -- "$pattern" <<<"$text" || return 0
+  printf 'FAIL: %s matches /%s/ and must not%s\n' "$label" "$pattern" "${why:+ -- $why}" >&2
+  grep -En -- "$pattern" <<<"$text" >&2 || true
+  return 1
+}
+
+# A Dockerfile's INSTRUCTIONS, comments stripped. Comments in this repo are long
+# and prose-heavy, and matching a package name inside one is a false positive
+# that costs a real build -- "makes tini signal only its direct child" contains
+# `make`.
+qv_dockerfile_instructions() { grep -vE '^[[:space:]]*#' "$1"; }
+
 refute_cmd() {
   local why="$1"; shift
   "$@" >/dev/null 2>&1 || return 0

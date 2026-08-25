@@ -4,6 +4,10 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# shellcheck source=scripts/lib/verify-lib.sh
+. "$root/scripts/lib/verify-lib.sh"
+qv_init
+
 # The image under test. `scripts/build.sh` tags what it builds with
 # $QUASAR_IMAGE_TAG (default `dev`), so a verify script that hardcodes `:dev`
 # silently checks a DIFFERENT image than the one just built -- which is exactly
@@ -14,12 +18,26 @@ cd "$root"
 TAG="${QUASAR_IMAGE_TAG:-dev}"
 BASE_IMAGE="${QUASAR_BASE_IMAGE_UNDER_TEST:-quasar-base:$TAG}"
 
-grep -q '^FROM registry.fedoraproject.org/fedora@sha256:' images/quasar-base/Dockerfile
-! grep -Eq 'gcc|gcc-c\+\+|make|cmake|clang|rust|golang' images/quasar-base/Dockerfile
+assert_grep '^FROM registry\.fedoraproject\.org/fedora@sha256:' images/quasar-base/Dockerfile \
+  "the base of the whole family must be digest-pinned, not a floating tag"
+# No compiler or build toolchain in the RUNTIME base -- anything that needs one
+# builds in a discarded stage (see quasar-steam-runtime's bwrap build).
+#
+# Two defects, both only visible once the check could fail at all. It was
+# `! grep -Eq ...`, and bash does not apply errexit to a `!`-inverted command, so
+# it could NEVER fail the script: a toolchain landing in the base would have
+# sailed straight through the assertion written to stop it. And its pattern was
+# unanchored against the whole file including comments, so the first thing it did
+# once made live was match the word "makes" in a prose comment about tini. An
+# assertion that is both inert and wrong is worse than none; it reads as cover.
+refute_grep_text '(^|[^[:alnum:]_-])(gcc|gcc-c\+\+|make|cmake|clang|rustc|cargo|golang)([^[:alnum:]_.-]|$)' \
+  'images/quasar-base/Dockerfile (instructions)' \
+  "$(qv_dockerfile_instructions images/quasar-base/Dockerfile)" \
+  "no compiler or build toolchain belongs in the runtime base; build it in a discarded stage"
 ./scripts/build.sh quasar-base
 labels="$(docker image inspect "$BASE_IMAGE" --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "optional"' <<<"$labels" >/dev/null
-docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc '
+docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   getent passwd quasar | grep -q "^quasar:x:1000:1000:"
   getent group quasar | grep -q "^quasar:x:1000:"
 '
@@ -31,7 +49,7 @@ result="$(docker run --rm -e PUID=1234 -e PGID=2345 -e HOME=/home/tester -e UMAS
 # 0666; keyboard/mouse/pointer and record-less nodes stay untouched so the
 # in-container app can never open (and EVIOCGRAB-starve) the compositor-owned
 # virtual keyboard/mouse.
-docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc '
+docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   set -euo pipefail
   mkdir -p /dev/input /run/udev/data
   mknod /dev/input/event5 c 13 69 && chmod 0600 /dev/input/event5
