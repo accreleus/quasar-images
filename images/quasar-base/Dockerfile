@@ -22,6 +22,32 @@ RUN dnf --setopt=install_weak_deps=False -y install \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
+# NOT DONE HERE, AND HERE IS WHY (measured 2026-08-20, so nobody re-tries it).
+#
+# /usr/share/locale is 53 MB in this image and the audit proposed pruning it to
+# `en*` here, on the reasoning that the whole family inherits the saving --
+# "53 MB x every image", ~0.5 GB across the set.
+#
+# It saves NOTHING. The locales are not installed by the dnf layer above; they
+# come with the 191 MB `KIWI 10.3.0` Fedora base layer that this image is FROM.
+# Deleting them in a child layer writes whiteouts over bytes that still travel in
+# the parent: built and measured, this image stayed at 290 MB and its dnf layer
+# grew 22.6 -> 22.7 MB for the whiteout entries. `du /usr/share/locale` inside the
+# container drops to 1.5 MB, which is exactly the misleading part -- the
+# filesystem looks trimmed while the image is not.
+#
+# The same applies to every descendant: quasar-app's own packages add ~0 MB of
+# locale (53 MB in both quasar-base and quasar-app), so pruning in their layers
+# would not help either.
+#
+# The only real fix is to stop the base from carrying them -- `%_install_langs`
+# at Fedora KIWI build time, which is upstream's image, not ours -- or to accept
+# 53 MB. Accepting it.
+#
+# Where a locale prune DOES pay is a layer that installs its own packages: see
+# the runtime trim in the quasar repo's deploy/Dockerfile.vulkan, which prunes in
+# the same RUN as its own dnf install.
+
 COPY overlay/usr/local/bin/quasar-entrypoint /usr/local/bin/quasar-entrypoint
 COPY overlay/etc/quasar/init.d/ /etc/quasar/init.d/
 
