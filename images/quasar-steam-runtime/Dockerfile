@@ -4,6 +4,15 @@ ARG APP_IMAGE=quasar-app:dev
 # capabilities. This follows GOW's narrowly scoped Bubblewrap workaround.
 FROM ${APP_IMAGE} AS bwrap-builder
 
+# PINNED, like every other third-party source this repo builds. It was an
+# unpinned clone of the default branch, so the binary that ends up in every
+# Steam and KDE image was "whatever bubblewrap's main branch was on build day" --
+# unreproducible, and a silent way for an upstream change to reach production
+# without anyone bumping anything. It also made the layer's content depend on the
+# date rather than on the Dockerfile, so two boxes with identical inputs could
+# ship different bwrap binaries. Bumping this is the deliberate act.
+ARG BWRAP_REF=v0.11.2
+
 RUN dnf --setopt=install_weak_deps=False -y install \
       ca-certificates dpkg-dev gcc git meson ninja-build patch \
     && dnf clean all \
@@ -11,7 +20,7 @@ RUN dnf --setopt=install_weak_deps=False -y install \
 
 WORKDIR /build
 COPY images/quasar-steam-runtime/ignore-capabilities.patch /build/ignore-capabilities.patch
-RUN git clone https://github.com/containers/bubblewrap.git \
+RUN git clone --branch "${BWRAP_REF}" --depth 1 https://github.com/containers/bubblewrap.git \
     && cd bubblewrap \
     && ./ci/builddeps.sh \
     && patch -p1 < /build/ignore-capabilities.patch \

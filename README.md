@@ -3,9 +3,18 @@
 `quasar-base` is the shared Fedora 43 runtime for all Quasar application images. It supplies a digest-pinned Fedora base, certificates, timezone/locale support, process and diagnostic tools, a configurable unprivileged user, signal reaping, ordered root init hooks, and managed home/cache/runtime conventions. It intentionally excludes graphics drivers and build toolchains.
 
 ```sh
-./scripts/build.sh
-./scripts/verify.sh
+./scripts/build.sh                    # every image
+./scripts/build.sh quasar-kde         # one image and its ancestors
+./scripts/build.sh verify quasar-kde  # its verify scripts
+./scripts/build.sh check              # validate build-graph.json
 ```
+
+**`build-graph.json` states the build DAG once** — order, build args, verify
+wiring, what CI builds, what gets published — and both `scripts/build.sh` and
+the GitHub Actions workflow read it through `scripts/graph.sh`. Adding an image
+is a Dockerfile plus an entry there. **`AGENTS.md` is the operating guide**: the
+DAG, adding an image, validating locally, the layer cache and its three hard
+constraints, the pin policy, the KWin artefact, and what CI does per event.
 
 ## Image hierarchy
 
@@ -73,7 +82,11 @@ The installers are pulled from `assets.unigine.com` at build time with pinned sh
 
 ### Patched KWin (nested mode ladder)
 
-`quasar-kde` does **not** ship Fedora's stock `kwin`. It rebuilds the distro source package with every `images/quasar-kde/kwin/*.patch` applied — in sorted `NNNN-` order, which is load-bearing because the patches build on each other — in a discarded `kwin-build` Dockerfile stage (`images/quasar-kde/kwin/build-kwin.sh`). Adding a patch is dropping a file in that directory; the Dockerfile copies the whole glob and the build script declares each one in the spec.
+`quasar-kde` does **not** ship Fedora's stock `kwin`. It rebuilds the distro source package with every `images/quasar-kde/kwin/*.patch` applied — in sorted `NNNN-` order, which is load-bearing because the patches build on each other — in discarded Dockerfile stages. Adding a patch is dropping a file in that directory; the Dockerfile copies the whole glob and the build script declares each one in the spec.
+
+The rebuild is split across two stages so a patch edit does not re-buy the build dependencies: `kwin-deps` (`build-kwin-deps.sh`) fetches the pinned source package and installs ~1.5 GB of Qt/KF6 `-devel`, keyed only on `KWIN_BUILDER_BASE` + `KWIN_NVR`; `kwin-build` (`build-kwin.sh`) applies the patches and runs `rpmbuild`.
+
+**The resulting RPMs are a reusable artefact, not just a stage.** The rebuild is 27 of the 35 minutes of a full CI run, and the RPMs are bit-identical whenever their inputs are, so a `FROM scratch AS kwin-rpms` stage carries them (~12 MB) under a content tag from `scripts/kwin-artifact-tag.sh` — a hash over `KWIN_NVR`, the digest-pinned `KWIN_BUILDER_BASE`, every `kwin/*.patch` and every `kwin/build-kwin*.sh`, and nothing else. `KWIN_RPMS_IMAGE` selects the source: its default `kwin-rpms` resolves to the local stage, so an ordinary build is unchanged, while `ghcr.io/accretion-io/quasar-kwin-rpms:<tag>` skips the rpmbuild stages entirely. CI publishes the artefact on a miss (never on a pull request — see `AGENTS.md`, "What CI does, per event") and reuses it thereafter.
 
 | Patch | Makes work |
 |-------|------------|
@@ -91,6 +104,7 @@ Re-diffing on a kwin update:
 2. Apply the current patches **in order**: `patch -p1 --dry-run < 0001-...patch`, then `0002-...patch`, then `0003-...patch`. If they apply clean, only the version bump is needed — rebuild and re-run `scripts/verify-kde.sh`.
 3. If one rejects, port the hunks by hand against `src/backends/wayland/`. 0001 touches seven files; `wayland_output.cpp` carries the real logic (mode ladder, sticky user mode, `contentScale()`), and the other six are the mechanical consequences (host `wl_output` binding, layer/cursor placement, pointer mapping). 0002 and 0003 touch only `wayland_output.{cpp,h}` and are a handful of small hunks each.
 4. Regenerate the patch(es), keeping the prose headers, and rebuild. To re-diff cleanly, keep an `a/` tree with the preceding patches applied and a `b/` tree with the one being re-diffed on top, then `diff -uNr a b`.
+5. The artefact tag moves on its own — `./scripts/kwin-artifact-tag.sh --explain` shows what changed and the new tag. Rebuild it once (`./scripts/build.sh quasar-kwin-rpms`), or let the first publishing CI run build and publish it; every later run reuses it. A pull request that changes a kwin input deliberately pays the 27 minutes inline instead, because it is proving that build still works.
 
 `scripts/verify-kde.sh` asserts `rpm -q kwin` carries the `.quasar` release marker, so a base-image refresh that quietly reinstates the stock package fails the build rather than shipping an inert Display KCM. It also runs a **functional** smoke — a nested `kwin_wayland` under a `--virtual` one — that changes the resolution *and* the scale and asserts both took effect, so a patch that applies with fuzz but no longer does anything fails the build too.
 
@@ -105,6 +119,8 @@ Both halves of that sentence are patched behaviour. The hint half (0003) is what
 ## Published images
 
 Branching model: **`stable` is the default and published branch; `develop` is the persistent integration branch.** Use manual workflow dispatch on `develop` to build and publish each image to `ghcr.io/accretion-io/<image>:develop` and an immutable `sha-<commit>` tag. Pushes to `stable` build and publish `:latest` and the same immutable SHA tag automatically. Pull requests build only; ordinary `develop` pushes do not trigger a workflow.
+
+The workflow fans out over the DAG — a sequential `spine` job (`quasar-base` → `quasar-app` → `quasar-steam-runtime`) followed by the leaves in parallel — and shares one build/verify/publish definition between validation and publishing. **Which images are published is `build-graph.json`'s `publish` flag**, not a list in the workflow. A pull-request run never receives `packages: write`, because it executes the scripts and Dockerfiles from the PR; the full per-event table, and why the jobs are deliberately doubled rather than parameterised, is in `AGENTS.md`.
 
 `quasar-manifest.json` at the repository root is the **app-image catalog manifest** the Quasar control plane consumes (`GET /v1/admin/images`, `POST /v1/admin/images/sync`). It is a contract surface — Quasar refuses a `manifest_version` it does not understand. See `MANIFEST.md` before editing it.
 

@@ -4,11 +4,21 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# The image under test. `scripts/build.sh` tags what it builds with
+# $QUASAR_IMAGE_TAG (default `dev`), so a verify script that hardcodes `:dev`
+# silently checks a DIFFERENT image than the one just built -- which is exactly
+# what happened on 2026-08-20: a freshly built quasar-steam passed every
+# assertion while this script reported a failure, because it was reading a
+# months-old `:dev` left on the box by another branch. Honour the same variable
+# the builder uses, and allow an explicit override.
+TAG="${QUASAR_IMAGE_TAG:-dev}"
+STEAM_IMAGE="${QUASAR_STEAM_IMAGE:-quasar-steam:$TAG}"
+
 for executable in steam gamescope bwrap quasar-steam quasar-steam-client dbus-daemon NetworkManager; do
-  docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc "command -v $executable >/dev/null"
+  docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "command -v $executable >/dev/null"
 done
 
-docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
+docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc '
   set -e
   steam=/usr/local/bin/quasar-steam
   client=/usr/local/bin/quasar-steam-client
@@ -109,7 +119,7 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
 grep -q "^uri=http://nmcheck.gnome.org/check_network_status.txt" /etc/NetworkManager/conf.d/00-quasar.conf
 '
 
-labels="$(docker image inspect quasar-steam:dev --format '{{json .Config.Labels}}')"
+labels="$(docker image inspect "$STEAM_IMAGE" --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "required"' <<<"$labels" >/dev/null
 
 # Base ENTRYPOINT must not run tini with -g: with -g, tini forwards signals

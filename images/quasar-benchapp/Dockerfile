@@ -7,15 +7,25 @@
 # add a second compositor's pacing and scaling between the probe and the encoder,
 # which is exactly the signal this image exists to measure.
 #
-# The payload is built from the separate `quasar-benchgame` repo, now published
-# at https://github.com/accretion-io/quasar-mark (private). The binary is
-# lifted from a locally built image rather than fetched at build time:
+# The payload is built from the separate, private
+# https://github.com/accretion-io/quasar-mark repo (formerly `quasar-benchgame`)
+# and lifted from an image rather than fetched or vendored here.
+#
+# WHERE THAT IMAGE COMES FROM is scripts/build.sh's decision, not this file's --
+# it resolves BENCHAPP_SRC_IMAGE as: an explicit override, else a locally built
+# `quasar-benchapp:src`, else the registry image quasar-mark's own workflow
+# publishes. That is what makes `./scripts/build.sh all` work on a CLEAN runner:
+# the local-tag default used to be the only option, and a runner that had never
+# built quasar-mark simply failed on `FROM quasar-benchapp:src`, which is why CI
+# never built this image at all.
+#
+# The devbox loop is unchanged and still the fast path:
 #
 #   (in a quasar-mark checkout)  docker build -t quasar-benchapp:src .
-#   (here)                       QUASAR_IMAGE_TAG=dev ./scripts/build.sh quasar-benchapp
+#   (here)                       ./scripts/build.sh quasar-benchapp
 #
-# BENCHAPP_SRC_IMAGE names that stage image so a future registry-published
-# source image can be swapped in by overriding one build arg.
+# The ARG default below stays the local tag so a bare `docker build` of this file
+# behaves as it always did.
 
 ARG APP_IMAGE=quasar-app:dev
 ARG BENCHAPP_SRC_IMAGE=quasar-benchapp:src

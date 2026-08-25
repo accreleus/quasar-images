@@ -4,24 +4,34 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# The image under test. `scripts/build.sh` tags what it builds with
+# $QUASAR_IMAGE_TAG (default `dev`), so a verify script that hardcodes `:dev`
+# silently checks a DIFFERENT image than the one just built -- which is exactly
+# what happened on 2026-08-20: a freshly built quasar-steam passed every
+# assertion while this script reported a failure, because it was reading a
+# months-old `:dev` left on the box by another branch. Honour the same variable
+# the builder uses, and allow an explicit override.
+TAG="${QUASAR_IMAGE_TAG:-dev}"
+BASE_IMAGE="${QUASAR_BASE_IMAGE_UNDER_TEST:-quasar-base:$TAG}"
+
 grep -q '^FROM registry.fedoraproject.org/fedora@sha256:' images/quasar-base/Dockerfile
 ! grep -Eq 'gcc|gcc-c\+\+|make|cmake|clang|rust|golang' images/quasar-base/Dockerfile
 ./scripts/build.sh quasar-base
-labels="$(docker image inspect quasar-base:dev --format '{{json .Config.Labels}}')"
+labels="$(docker image inspect "$BASE_IMAGE" --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "optional"' <<<"$labels" >/dev/null
-docker run --rm --entrypoint /bin/bash quasar-base:dev -lc '
+docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc '
   getent passwd quasar | grep -q "^quasar:x:1000:1000:"
   getent group quasar | grep -q "^quasar:x:1000:"
 '
 
-result="$(docker run --rm -e PUID=1234 -e PGID=2345 -e HOME=/home/tester -e UMASK=027 quasar-base:dev /bin/sh -c 'id -u; id -g; printf "%s %s %s\\n" "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"; stat -c %a "$HOME"')"
+result="$(docker run --rm -e PUID=1234 -e PGID=2345 -e HOME=/home/tester -e UMASK=027 "$BASE_IMAGE" /bin/sh -c 'id -u; id -g; printf "%s %s %s\\n" "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"; stat -c %a "$HOME"')"
 [[ "$result" == $'1234\n2345\n/home/tester /home/tester/.config /tmp/quasar-runtime-1234\n750' ]]
 
 # Input-device perms hook: gamepad nodes (udev ID_INPUT_JOYSTICK=1) open to
 # 0666; keyboard/mouse/pointer and record-less nodes stay untouched so the
 # in-container app can never open (and EVIOCGRAB-starve) the compositor-owned
 # virtual keyboard/mouse.
-docker run --rm --entrypoint /bin/bash quasar-base:dev -lc '
+docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc '
   set -euo pipefail
   mkdir -p /dev/input /run/udev/data
   mknod /dev/input/event5 c 13 69 && chmod 0600 /dev/input/event5
