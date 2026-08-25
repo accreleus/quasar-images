@@ -3,13 +3,12 @@ set -euo pipefail
 
 # Build a patched kwin RPM set from the DISTRO's own source package.
 #
-# Runs inside the `kwin-build` stage of images/quasar-kde/Dockerfile (FROM
-# fedora:43). It deliberately starts from `dnf download --source kwin` rather
-# than an upstream tarball: the shipped image installs Fedora's kwin, so the
-# patch has to apply to -- and the resulting RPM has to be
-# interchangeable with -- exactly that build (same %files, same subpackages,
-# same soname, same dependency set). An upstream tarball build would drift from
-# the distro packaging and break `dnf install` over the installed package.
+# Runs inside the `kwin-build` stage of images/quasar-kde/Dockerfile, which is
+# FROM the `kwin-deps` stage -- so the pinned src.rpm is already unpacked into
+# %_topdir and every build dependency is already installed. This script is the
+# CHEAP half: apply the patches, rpmbuild, collect. See build-kwin-deps.sh for
+# why the two are separate stages (a patch edit must not re-buy 1.5 GB of
+# builddeps).
 #
 # Output: /tmp/kwin-rpms/*.rpm  (binary RPMs only, Release suffixed .quasar1)
 #
@@ -32,46 +31,10 @@ mapfile -t patches < <(find "$patch_dir" -maxdepth 1 -name '*.patch' | sort)
 test "${#patches[@]}" -gt 0 || { log "FATAL: no *.patch found in $patch_dir"; exit 1; }
 log "patches to apply: ${patches[*]##*/}"
 
-log "installing build tooling"
-dnf --setopt=install_weak_deps=False -y install \
-  rpm-build rpmdevtools 'dnf-command(builddep)' 'dnf-command(download)' patch >/dev/null
-
-mkdir -p "$topdir" "$out_dir"
-
-nvr="${QUASAR_KWIN_NVR:-}"
-test -n "$nvr" || { log "FATAL: QUASAR_KWIN_NVR is not set (Dockerfile ARG KWIN_NVR)"; exit 1; }
-
-log "downloading the pinned kwin source package: kwin-${nvr}"
-if ! dnf download --source "kwin-${nvr}" --destdir="$topdir" >/dev/null 2>&1; then
-  log "FATAL: kwin-${nvr}.src.rpm is not available in the configured repositories."
-  log "       Fedora has almost certainly moved kwin on. The patch is version-specific:"
-  log "       re-diff it against the new source, then bump ARG KWIN_NVR in"
-  log "       images/quasar-kde/Dockerfile. See the README, 'Patched KWin (nested mode ladder)'."
-  log "       available: $(dnf list --showduplicates kwin 2>/dev/null | awk '/^kwin\./ {print $2}' | tr '\n' ' ')"
-  exit 1
-fi
-srpm="$(find "$topdir" -maxdepth 1 -name 'kwin-*.src.rpm' | head -1)"
-test -n "$srpm" || { log "FATAL: no kwin src.rpm downloaded"; exit 1; }
-log "source package: $(basename "$srpm")"
-
-rpm -i "$srpm" --define "_topdir $topdir" 2>&1 | grep -v '^warning:' || true
 spec="$topdir/SPECS/kwin.spec"
-test -f "$spec" || { log "FATAL: $spec missing after installing the src.rpm"; exit 1; }
-
-# HARD fail on any drift from the pin. The patch is written against one exact
-# source tree; a mismatch means it is being applied to something it was never
-# reviewed against, and `patch` applying with fuzz is a worse outcome than a
-# failed build (see README, "Patched KWin (nested mode ladder)").
-srpm_nvr="$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$srpm" 2>/dev/null)"
-if [[ "$srpm_nvr" != "$nvr" ]]; then
-  log "FATAL: source package is kwin-${srpm_nvr}, but the pin is kwin-${nvr}."
-  log "       Re-diff the patch and bump ARG KWIN_NVR in images/quasar-kde/Dockerfile."
-  exit 1
-fi
-log "source package NVR matches the pin: ${srpm_nvr}"
-
-log "installing build dependencies (this is the slow part)"
-dnf builddep -y --setopt=install_weak_deps=False "$spec" >/dev/null
+# kwin-deps put this here. If it is missing, this stage is not FROM kwin-deps.
+test -f "$spec" || { log "FATAL: $spec missing -- the kwin-deps stage did not run"; exit 1; }
+mkdir -p "$out_dir"
 
 log "wiring the patches into the spec"
 for patch in "${patches[@]}"; do

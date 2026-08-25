@@ -61,9 +61,25 @@ ARG KWIN_BUILDER_BASE=registry.fedoraproject.org/fedora@sha256:711261231459f5ebc
 # Base is pinned to the same Fedora release the runtime family is built from --
 # an RPM built against a different release would not be interchangeable with the
 # kwin it replaces.
-FROM ${KWIN_BUILDER_BASE} AS kwin-build
+# TWO STAGES, NOT ONE, AND THE ORDER OF THE COPYs IS THE WHOLE POINT.
+#
+# kwin-deps fetches the pinned src.rpm and installs ~1.5 GB of Qt/KF6 build
+# dependencies. Its cache key is KWIN_BUILDER_BASE + KWIN_NVR + build-kwin-deps.sh
+# and NOTHING ELSE -- in particular not the patches, which is what changed.
+#
+# Before the split the patches were COPYed in before builddep ran, so a one-line
+# patch edit invalidated the dependency install too. Re-diffing a patch (the
+# recurring cost this image is knowingly signed up for on every Fedora kwin
+# update) therefore re-bought 1.5 GB of -devel packages every time, on every box,
+# on top of the rpmbuild it genuinely had to redo.
+FROM ${KWIN_BUILDER_BASE} AS kwin-deps
 ARG KWIN_NVR
 ENV QUASAR_KWIN_NVR=${KWIN_NVR}
+COPY images/quasar-kde/kwin/build-kwin-deps.sh /usr/local/bin/build-kwin-deps.sh
+RUN chmod 0755 /usr/local/bin/build-kwin-deps.sh && /usr/local/bin/build-kwin-deps.sh
+
+# The cheap half: apply the patches to the already-unpacked spec and rpmbuild.
+FROM kwin-deps AS kwin-build
 COPY images/quasar-kde/kwin/*.patch /tmp/kwin-patches/
 COPY images/quasar-kde/kwin/build-kwin.sh /usr/local/bin/build-kwin.sh
 RUN chmod 0755 /usr/local/bin/build-kwin.sh && /usr/local/bin/build-kwin.sh
