@@ -1,0 +1,6 @@
+# Container-streamed session: no local display to lock, and the node-agent
+# (not kscreenlocker) owns session access control, so autolock/lock-on-resume
+# would just strand the user behind a KDE lock screen with no local input.
+[Daemon]
+Autolock=false
+LockOnResume=false

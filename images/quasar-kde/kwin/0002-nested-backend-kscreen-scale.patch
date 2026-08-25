@@ -1,0 +1,177 @@
+Subject: [PATCH] nested wayland backend: apply the KScreen scale under a
+ fractional-scale host
+
+Quasar patch against kwin 6.7.4 (Fedora 43: kwin-6.7.4-1.fc43).
+Applies on top of 0001-nested-backend-mode-ladder.patch.
+
+PROBLEM
+-------
+Inside a streamed Quasar KDE session, System Settings -> Display Configuration
+-> Scale 100% -> 150% -> Apply does NOTHING. `kscreen-doctor output.<n>.scale
+1.5` is equally inert: `kscreen-doctor -o` keeps reporting `Scale: 1`.
+
+Two layers of "ignore it" stack up:
+
+1. Upstream KWin's nested `wayland` backend never applies the scale at all.
+   `WaylandOutput::applyChanges()` has the assignment commented out
+   (`src/backends/wayland/wayland_output.cpp:378-380` in 6.7.4):
+
+       // intentionally ignored, as it would get overwritten
+       // with the fractional scale protocol anyways
+       // next.scale = props->scale.value_or(m_state.scale);
+
+   so an `OutputConfiguration` carrying a scale from KScreen is silently
+   dropped, and `applyConfigure()` (`:469`) resets `State::scale` to the host's
+   `wp_fractional_scale_v1` preferred scale on every configure.
+
+2. 0001 restored the assignment, but gated it on `!m_fractionalScale` - i.e.
+   only when the host does NOT implement `wp_fractional_scale_v1`, taking
+   upstream's stated reason at face value. Quasar's host compositor
+   (gst-wayland-display) DOES implement it - it is how the per-session
+   `ui_scale` knob is delivered - so `m_fractionalScale` is always non-null in
+   a Quasar session and the whole block was skipped. Net effect for the user:
+   unchanged from upstream.
+
+WHAT THIS PATCH DOES
+--------------------
+1. `applyChanges()`: apply `props->scale` unconditionally. A scale the user
+   picks in Display Settings is recorded in `m_userScale` and written to
+   `State::scale` / `State::scaleSetting`.
+
+2. `applyConfigure()`: the host's `wp_fractional_scale_v1` hint drives the
+   scale only while `m_userScale` is unset. A configure is not a scale
+   decision - the host sends one on every render-size change - so it must not
+   undo the slider.
+
+3. `handleFractionalScaleChanged()`: a host hint whose VALUE actually changes
+   clears `m_userScale`, handing control back to the host. Re-announcing the
+   same value (every re-map, and every gst-wayland-display render-size change)
+   does not.
+
+Precedence, in one line: user pick > host hint, until the host hint moves.
+
+THE STREAM DOES NOT MOVE
+------------------------
+Nothing here touches the output MODE. `m_nativeSize` (the mode/buffer size) is
+still exactly the host's configure size times the host's hint,
+`m_parentLogicalSize` is untouched, and the root surface's `wp_viewport`
+destination stays pinned to `m_parentLogicalSize` (0001,
+`WaylandOutput::present()`). The host therefore sees a surface of unchanged
+size and the encoded stream resolution is unaffected.
+
+Only the LOGICAL size moves: `LogicalOutput::setData()` computes the geometry
+as `modeSize / scale` (`src/core/output.cpp:573`), so scale 1.5 over a
+1920x1080 mode gives a 1280x720 desktop drawn into an unchanged 1920x1080
+buffer - which is precisely "Plasma redraws bigger, the picture stays the same
+size".
+
+Pointer input already goes through `WaylandOutput::mapFromParent()` (0001),
+which divides by `contentScale() * scale()`, so the cursor tracks the new scale
+with no further change.
+
+Interaction with Quasar's live render-resolution feature: unchanged. A render
+resolution change arrives as an xdg_toplevel configure; `applyConfigure()`
+still rebuilds the mode ladder from the new native size, and now simply leaves
+the user's scale alone while doing it.
+
+UPSTREAMABILITY
+---------------
+Point 1 alone - apply `props->scale`, and let the fractional-scale hint win
+again when it actually changes - is a plausible upstream fix: upstream's
+comment describes a real hazard (the hint would clobber the pick), not a
+policy, and the sticky-until-the-hint-moves rule removes the hazard. It does
+not depend on any of 0001's mode-ladder machinery. Points 2 and 3 are the
+mechanism that makes it hold.
+
+diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+--- a/src/backends/wayland/wayland_output.cpp	2026-08-19 00:00:00
++++ b/src/backends/wayland/wayland_output.cpp	2026-08-19 00:00:00
+@@ -114,7 +114,17 @@
+ 
+ void WaylandOutput::handleFractionalScaleChanged(void *data, struct wp_fractional_scale_v1 *wp_fractional_scale_v1, uint32_t scale120)
+ {
+-    reinterpret_cast<WaylandOutput *>(data)->m_pendingScale = scale120 / 120.0;
++    auto *output = reinterpret_cast<WaylandOutput *>(data);
++    const qreal scale = scale120 / 120.0;
++    // Quasar: a host hint whose VALUE actually changes is a deliberate act by the
++    // host compositor, so it takes the wheel back from a scale the user picked in
++    // Display Settings. Re-announcing the same value - which a host does on every
++    // re-map, and gst-wayland-display does on every render-size change - must NOT
++    // clobber the user's pick.
++    if (output->m_pendingScale != scale) {
++        output->m_userScale.reset();
++    }
++    output->m_pendingScale = scale;
+ }
+ 
+ const wp_fractional_scale_v1_listener WaylandOutput::s_fractionalScaleListener{
+@@ -555,17 +565,31 @@
+     next.enabled = props->enabled.value_or(m_state.enabled);
+     next.transform = props->transform.value_or(m_state.transform);
+     next.position = props->pos.value_or(m_state.position);
+-    // Quasar: upstream ignores props->scale because wp_fractional_scale_v1 would
+-    // overwrite it on the next configure. That is only true when the host
+-    // actually implements that protocol; when it does not, honouring the user's
+-    // choice is what makes the KScreen scale slider work at all.
+-    if (!m_fractionalScale) {
+-        if (props->scale) {
+-            m_userScale = *props->scale;
+-        }
+-        next.scale = m_userScale.value_or(m_state.scale);
+-        next.scaleSetting = props->scaleSetting.value_or(next.scale);
++    // Quasar: honour the scale the user picked in Display Settings.
++    //
++    // Upstream drops props->scale on the floor (the assignment is commented out,
++    // wayland_output.cpp:378-380 in 6.7.4) because wp_fractional_scale_v1 would
++    // overwrite it on the next configure. The mode-ladder patch narrowed that to
++    // "only when the host does NOT implement the protocol", which still leaves
++    // the slider inert under Quasar: gst-wayland-display DOES implement
++    // wp_fractional_scale_v1, so m_fractionalScale is always non-null here and
++    // the whole block was skipped. Applying the pick unconditionally is what
++    // makes the KScreen scale slider do anything inside a Quasar session.
++    //
++    // The pick is STICKY: applyConfigure() below no longer overwrites the scale
++    // from the host's hint once m_userScale is set, and only a host hint that
++    // CHANGES VALUE clears it (handleFractionalScaleChanged above).
++    //
++    // Nothing here touches the output MODE: the buffer keeps the host-configured
++    // pixel size, m_parentLogicalSize is unchanged, and the root wp_viewport
++    // destination is pinned to it - so the host sees no resize and the streamed
++    // resolution does not move. Only the LOGICAL size (mode / scale) shrinks,
++    // which is exactly what makes Plasma redraw bigger.
++    if (props->scale) {
++        m_userScale = *props->scale;
+     }
++    next.scale = m_userScale.value_or(m_state.scale);
++    next.scaleSetting = props->scaleSetting.value_or(next.scale);
+     // Quasar: honour the picked resolution. It is remembered so the host's next
+     // configure - which arrives at the SAME size, because the toplevel keeps
+     // filling the host's area - does not snap it back.
+@@ -693,7 +717,10 @@
+ 
+         State next = m_state;
+         rebuildModes(next, m_nativeSize, current);
+-        if (m_fractionalScale || !m_userScale) {
++        // Quasar: the host's hint only drives the scale while the user has not
++        // picked one. A configure is not a scale decision - the host sends one
++        // on every render-size change - so it must not undo the slider.
++        if (!m_userScale) {
+             next.scale = m_pendingScale;
+         }
+         setState(next);
+diff -uNr a/src/backends/wayland/wayland_output.h b/src/backends/wayland/wayland_output.h
+--- a/src/backends/wayland/wayland_output.h	2026-08-19 00:00:00
++++ b/src/backends/wayland/wayland_output.h	2026-08-19 00:00:00
+@@ -197,8 +197,10 @@
+     /// a mode the user picked in Display Settings; sticky until the host's
+     /// configure size actually CHANGES (a genuine external resolution change)
+     std::optional<QSize> m_userMode;
+-    /// a scale the user picked in Display Settings; only honoured when the host
+-    /// does not drive the scale through wp_fractional_scale_v1
++    /// a scale the user picked in Display Settings; authoritative once set, and
++    /// only cleared by a host wp_fractional_scale_v1 hint that changes VALUE.
++    /// Never affects the output mode - the buffer keeps the host-configured
++    /// pixel size, only the logical size (mode / scale) moves.
+     std::optional<qreal> m_userScale;
+     /// stable OutputMode identities, so KScreen does not see the ladder churn
+     std::map<std::pair<int, int>, std::shared_ptr<OutputMode>> m_modeCache;

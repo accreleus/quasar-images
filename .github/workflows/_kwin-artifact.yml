@@ -1,0 +1,89 @@
+name: KWin RPM artefact (reusable)
+
+# Resolve -- and, when allowed, build and publish -- the patched-KWin RPMs.
+#
+# Rebuilding Fedora's kwin from source with images/quasar-kde/kwin/*.patch is 27
+# of the 35 minutes of a full run (run 31920375541: `[kwin-build 4/4] … DONE
+# 1613.4s`). It is a stage inside quasar-kde's Dockerfile, so every run pays it,
+# including runs that change only a launcher script. The RPMs are bit-identical
+# whenever their inputs are, so they are an artefact: build once under a content
+# tag, reuse forever.
+#
+# `may-build` is FALSE on a pull request, and that is a security boundary, not a
+# cost decision -- see the caller.
+on:
+  workflow_call:
+    inputs:
+      may-build:
+        description: Build and push the artefact on a cache miss.
+        required: true
+        type: boolean
+    outputs:
+      image:
+        description: >-
+          The artefact reference, or EMPTY on a miss that this run was not
+          allowed to fill. Empty makes quasar-kde build the RPMs inline, which is
+          the pre-artefact behaviour: correct, just slow.
+        value: ${{ jobs.resolve.outputs.image }}
+      tag:
+        value: ${{ jobs.resolve.outputs.tag }}
+      built:
+        value: ${{ jobs.resolve.outputs.built }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      built: ${{ steps.resolve.outputs.built }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Needed even to LOOK: `docker manifest inspect` against a private package
+      # is a 401 without it, which would read as a permanent cache miss and buy
+      # 27 minutes on every single run.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the artefact tag, and build it only if it is missing
+        id: resolve
+        env:
+          OWNER: ${{ github.repository_owner }}
+          MAY_BUILD: ${{ inputs.may-build }}
+        run: |
+          set -euo pipefail
+          tag="$(./scripts/kwin-artifact-tag.sh)"
+          image="ghcr.io/${OWNER}/quasar-kwin-rpms:${tag}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          ./scripts/kwin-artifact-tag.sh --explain
+
+          if docker manifest inspect "$image" >/dev/null 2>&1; then
+            echo "image=$image" >> "$GITHUB_OUTPUT"
+            echo "built=false"  >> "$GITHUB_OUTPUT"
+            echo "REUSING $image -- kwin inputs are unchanged, skipping the ~27 min rpmbuild"
+            exit 0
+          fi
+
+          if [ "$MAY_BUILD" != true ]; then
+            echo "image="      >> "$GITHUB_OUTPUT"
+            echo "built=false" >> "$GITHUB_OUTPUT"
+            echo "MISS on $image, and this run may not publish packages."
+            echo "quasar-kde will build the RPMs inline (~27 min). A pull request that"
+            echo "changes a kwin input SHOULD pay that: it is proving the build still works."
+            exit 0
+          fi
+
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "built=true"   >> "$GITHUB_OUTPUT"
+          echo "BUILDING $image -- KWIN_NVR, KWIN_BUILDER_BASE, a patch, or a build script changed"
+          QUASAR_IMAGE_TAG="$tag" ./scripts/build.sh quasar-kwin-rpms
+          docker tag "quasar-kwin-rpms:$tag" "$image"
+          docker push "$image"

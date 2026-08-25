@@ -79,7 +79,23 @@ if [[ "$(id -u)" == "0" ]]; then
   fi
 
   printf '{"event":"quasar-base.ready","uid":%s,"gid":%s,"home":"%s"}\n' "$PUID" "$PGID" "$HOME" >&2
-  exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups --inh-caps=-all -- "$@"
+
+  # Grant CAP_SYS_NICE as an AMBIENT capability across the uid/gid drop so
+  # gamescope can raise its compute-thread priority (otherwise it logs
+  # "No CAP_SYS_NICE, falling back to regular-priority compute"). setpriv
+  # requires an ambient cap to also be inheritable, hence both flags below.
+  # This is CONDITIONAL on the container's bounding set actually holding
+  # cap_sys_nice — older node-agents that don't `--cap-add SYS_NICE` won't
+  # have it in CapBnd, and passing --ambient-caps for a cap outside the
+  # bounding set makes setpriv fail outright, so we must not do it unconditionally.
+  inh_caps="-all"
+  ambient_args=()
+  capbnd="$(awk '/^CapBnd:/ {print $2}' /proc/self/status 2>/dev/null || true)"
+  if [[ "$capbnd" =~ ^[0-9a-fA-F]+$ ]] && (( (0x$capbnd >> 23) & 1 )); then
+    inh_caps="-all,+sys_nice"
+    ambient_args=(--ambient-caps=+sys_nice)
+  fi
+  exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups "${ambient_args[@]}" --inh-caps="$inh_caps" -- "$@"
 fi
 
 exec "$@"

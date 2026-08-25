@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# PATH-shadowing wrapper for /usr/bin/kwin_wayland, installed at
+# /usr/local/libexec/quasar-kde/kwin_wayland and reached ONLY through the PATH
+# prepend that /usr/local/bin/quasar-kde performs for the Plasma session.
+#
+# WHY THIS EXISTS (full rationale + the alternatives that were tried and
+# rejected lives in /usr/local/bin/quasar-kde, section "Nested output sizing"):
+# a nested kwin sizes its output from --width/--height, but the kwin that serves
+# the Plasma session is spawned by kwin_wayland_wrapper, which forwards no size
+# and offers no env knob in Plasma 6.7. kwin_wayland_wrapper invokes its
+# compositor by BARE NAME, so shadowing that name is the only supported-ish way
+# to get the session's real mode onto the nested output.
+#
+# This wrapper must stay trivial: append two flags, exec the real binary. It
+# deliberately does NOT live in /usr/local/bin -- shadowing kwin_wayland for
+# every process in the image would be a much wider blast radius than the session.
+set -euo pipefail
+
+exec /usr/bin/kwin_wayland \
+  --width "${QUASAR_KDE_OUTPUT_WIDTH:-1920}" \
+  --height "${QUASAR_KDE_OUTPUT_HEIGHT:-1080}" \
+  "$@"

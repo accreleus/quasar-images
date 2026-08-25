@@ -1,22 +1,5 @@
 ARG APP_IMAGE=quasar-app:dev
-
-# Steam's pressure-vessel sandbox rejects a non-setuid bwrap carrying
-# capabilities. This follows GOW's narrowly scoped Bubblewrap workaround.
-FROM ${APP_IMAGE} AS bwrap-builder
-
-RUN dnf --setopt=install_weak_deps=False -y install \
-      ca-certificates dpkg-dev gcc git meson ninja-build patch \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-WORKDIR /build
-COPY images/quasar-steam/ignore-capabilities.patch /build/ignore-capabilities.patch
-RUN git clone https://github.com/containers/bubblewrap.git \
-    && cd bubblewrap \
-    && ./ci/builddeps.sh \
-    && patch -p1 < /build/ignore-capabilities.patch \
-    && meson setup build --buildtype=release \
-    && meson compile -C build
+ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
 
 # Gamescope with the nested-pointer-warp patch: upstream 3.16.23 (matching the
 # Fedora 43 package) routes the parent compositor's absolute pointer into the
@@ -26,6 +9,9 @@ RUN git clone https://github.com/containers/bubblewrap.git \
 # BPM until a game launch. The one-argument patch makes Passthrough also warp
 # the real cursor (wlserver_mousewarp), so nested pointer input works from
 # session start.
+# Builds from ${APP_IMAGE}, not the Steam runtime: the builder only needs the
+# Fedora toolchain + `dnf builddep gamescope`, so keeping it on quasar-app
+# leaves it independent of the runtime layer (and its build cache).
 FROM ${APP_IMAGE} AS gamescope-builder
 
 RUN dnf --setopt=install_weak_deps=False -y install \
@@ -43,7 +29,7 @@ RUN git clone --branch 3.16.23 --depth 1 --recurse-submodules https://github.com
     && meson setup build --buildtype=release -Denable_openvr_support=false \
     && ninja -C build
 
-FROM ${APP_IMAGE}
+FROM ${STEAM_RUNTIME_IMAGE}
 
 ARG VERSION=0.1.0-dev
 LABEL org.opencontainers.image.title="Quasar Steam application" \
@@ -54,33 +40,21 @@ LABEL org.opencontainers.image.title="Quasar Steam application" \
       org.quasar.image.graphics-apis="vulkan,egl,opengl" \
       org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
 
+# The gamescope RPM stays here rather than moving to quasar-steam-runtime: it is
+# BPM-only weight and the runtime layer is shared with images that carry no
+# gamescope. The patched binary below overwrites /usr/bin/gamescope, but the RPM
+# is what drags in gamescope's shared-library dependencies -- without it the
+# patched binary has 8 unresolved sonames (libSDL2, libseat, libinput, libavif,
+# libXRes, libXmu, libeis, libluajit). Verified with ldd inside the image.
 RUN dnf --setopt=install_weak_deps=False -y install \
-      "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-      "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
-    && dnf --setopt=install_weak_deps=False -y install \
-      dbus-daemon file gamescope ibus lsb-release pciutils steam \
-      NetworkManager \
-      mesa-libGLU mesa-libGLU.i686 \
-      libglvnd-egl.i686 libglvnd-gles.i686 libglvnd-glx.i686 \
-      mesa-dri-drivers.i686 mesa-libEGL.i686 mesa-libGL.i686 mesa-libgbm.i686 \
-      mesa-vulkan-drivers.i686 vulkan-loader.i686 \
+      gamescope \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-COPY --from=bwrap-builder /build/bubblewrap/build/bwrap /usr/bin/bwrap
 COPY --from=gamescope-builder /build/gamescope/build/src/gamescope /usr/bin/gamescope
 COPY images/quasar-steam/quasar-steam /usr/local/bin/quasar-steam
 COPY images/quasar-steam/steam-wrapper /usr/local/bin/quasar-steam-client
-RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client /usr/bin/bwrap
-
-# Steam Big Picture blocks on "Waiting for network" without a D-Bus system bus +
-# NetworkManager to build its libnm client against (quasar-images#4). The hook
-# runs as root from quasar-entrypoint's init.d chain; the conf keeps NM a
-# read-only observer of docker's networking. See the files for the full trace.
-COPY images/quasar-steam/overlay/etc/NetworkManager/conf.d/00-quasar.conf /etc/NetworkManager/conf.d/00-quasar.conf
-COPY images/quasar-steam/overlay/etc/quasar/init.d/20-steam-system-services.sh /etc/quasar/init.d/20-steam-system-services.sh
-RUN chmod 0644 /etc/NetworkManager/conf.d/00-quasar.conf \
-    && chmod 0755 /etc/quasar/init.d/20-steam-system-services.sh
+RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client
 
 # No baked GAMESCOPE_WIDTH/HEIGHT/REFRESH: a baked value is non-empty, so it
 # would shadow the session mode Quasar injects as QUASAR_STREAM_* and pin every

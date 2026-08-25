@@ -9,17 +9,41 @@ name: Image build
 #
 # Nothing on `develop` publishes automatically; develop images ship only by an
 # explicit dispatch. `stable` is reached through a reviewed PR, so a merge into
-# stable is what ships — but the trigger is the resulting PUSH, not the
+# stable is what ships -- but the trigger is the resulting PUSH, not the
 # pull_request.closed event: a push also covers merge queues, direct pushes, and
 # merged fork PRs (a fork's pull_request event gets a read-only token and could
 # never publish).
 #
-# PERMISSIONS ARE PER-JOB, DELIBERATELY. A job-wide `contents: write` would be
-# handed to pull-request validation too, which runs scripts/*.sh FROM THE PR —
-# a same-repo PR could then modify a build script and use the checkout-persisted
-# token to write to the repo or publish packages. Validation therefore gets
-# `contents: read` and `persist-credentials: false`; only publish gets
-# `packages: write`; only the release job gets `contents: write`.
+# ── SECURITY MODEL, STATED ONCE ───────────────────────────────────────────────
+#
+# A pull_request run executes scripts/*.sh, and the Dockerfiles, FROM THE PR. It
+# must therefore hold nothing it could abuse. So EVERY job below appears twice:
+# a `-pr` variant with `packages: read`, and a `-publish` variant with
+# `packages: write`, selected by a static `if:` on github.event_name.
+#
+# That duplication is DELIBERATE and is not the duplication this workflow was
+# rewritten to remove. `permissions:` does not accept expressions -- a single job
+# cannot vary its own token by event -- so the alternative is one job holding
+# `packages: write` on pull requests, which is exactly the hole being closed:
+# packages:write is NOT scoped to one package, so a PR that edits a build script
+# could push over quasar-base:latest. What IS shared is the actual work: both
+# variants call the same _build-images.yml / _kwin-artifact.yml, so the
+# build/verify/publish STEPS exist once. Before this, `validate` and `publish`
+# were two verbatim copies of five steps and had already drifted.
+#
+# The `-pr` and `-publish` chains never mix, so no job ever `needs:` a skipped
+# one.
+#
+# ── SHAPE: the DAG, from build-graph.json ─────────────────────────────────────
+#
+#   plan          reads build-graph.json -- the ONLY statement of the image set
+#   kwin-artifact resolves (and on a publishing event may build) the patched
+#                 KWin RPMs, so quasar-kde does not spend 27 minutes
+#   spine         quasar-base -> quasar-app -> quasar-steam-runtime, one job, in
+#                 order. FIRST, so the shared ancestry is in the layer cache
+#                 before the leaves start; otherwise every parallel leaf job
+#                 rebuilds it from cold.
+#   leaves        everything else, one job each, in parallel
 on:
   pull_request:
     branches: [stable]
@@ -31,46 +55,26 @@ on:
 permissions: {}
 
 jobs:
-  # ── Validation: no credentials, no publishing. Runs for PRs into stable. ────
-  validate:
-    if: github.event_name == 'pull_request'
+  # ── What to build, and the release-tag guard. No docker, no credentials. ────
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     permissions:
       contents: read
+    outputs:
+      spine: ${{ steps.sets.outputs.spine }}
+      leaves: ${{ steps.sets.outputs.leaves }}
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
-
-      - name: Verify the non-accelerated base lifecycle
-        run: ./scripts/verify.sh
-
-      - name: Build the complete image hierarchy
-        run: ./scripts/build.sh all
-
-      - name: Verify Steam launcher wiring
-        run: ./scripts/verify-steam.sh
-
-  # ── Publish: stable pushes, release tags, and explicit dispatches. ──────────
-  publish:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # fetch-depth: 0 so the release-tag guard below can ask whether the
-          # tagged commit is actually contained in stable.
-          fetch-depth: 0
+          # fetch-depth 0 so the release-tag guard can ask whether the tagged
+          # commit is actually contained in stable.
+          fetch-depth: ${{ startsWith(github.ref, 'refs/tags/v') && 0 || 1 }}
           persist-credentials: false
 
       # A tag is not intrinsically tied to a branch: without this, anyone able
       # to create a vX.Y.Z tag could point it at an unreviewed commit and
-      # overwrite :latest for every image. Belt and braces — this check lives in
+      # overwrite :latest for every image. Belt and braces -- this check lives in
       # a workflow that the tagged commit could itself modify, so it MUST be
       # paired with a repository ruleset restricting who can create v* tags.
       - name: Release tags must point at a commit on stable
@@ -83,76 +87,115 @@ jobs:
             exit 64
           fi
 
-      - name: Verify the non-accelerated base lifecycle
-        run: ./scripts/verify.sh
-
-      - name: Build the complete image hierarchy
-        run: ./scripts/build.sh all
-
-      - name: Verify Steam launcher wiring
-        run: ./scripts/verify-steam.sh
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish immutable and channel tags
-        env:
-          REGISTRY: ghcr.io
-          OWNER: ${{ github.repository_owner }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
+      - name: Resolve the image sets from build-graph.json
+        id: sets
         run: |
           set -euo pipefail
-          # channels[] is every MOVING tag this run publishes. The immutable
-          # sha- tag is always published alongside them and is what
-          # release-manifest pinning and quasar-manifest.json reference.
-          #
-          # Branch and tag names are distinguished by ref_type, never by
-          # pattern: a branch called "vulkan-fix" must not be mistaken for a
-          # release and publish a ":ulkan-fix" channel over :latest.
-          if [ "$REF_TYPE" = tag ]; then
-            if ! printf '%s' "$REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-              echo "Invalid release tag: $REF_NAME (want vX.Y.Z)" >&2; exit 64
-            fi
-            v="${REF_NAME#v}"
-            channels=("$v" "${v%.*}" latest)
-          else
-            case "$REF_NAME" in
-              develop) channels=(develop) ;;
-              stable)  channels=(latest) ;;
-              *) echo "Publishing is limited to develop, stable and vX.Y.Z tags; got $REF_NAME" >&2; exit 64 ;;
-            esac
-          fi
-          sha_tag="sha-${SHA:0:12}"
-          # PUBLISHED SET. quasar-test-vulkan / quasar-test-egl are deliberately
-          # absent: they are local-only GPU probes (./scripts/build.sh still
-          # builds them) and nothing consumes them from a registry, so paying
-          # build+push time for them on every stable push bought nothing.
-          for image in quasar-base quasar-app quasar-diagnostics quasar-steam; do
-            remote="$REGISTRY/$OWNER/$image"
-            # Push the immutable tag ONCE, then add every moving channel tag as
-            # a registry-side manifest copy. A `docker tag` + `docker push` per
-            # channel re-walks and re-verifies each layer, and that burst across
-            # several images tripped GitHub's secondary rate limit (403) on the
-            # first real publish. imagetools copies the manifest only.
-            docker tag "$image:dev" "$remote:$sha_tag"
-            docker push "$remote:$sha_tag"
-            for channel_tag in "${channels[@]}"; do
-              docker buildx imagetools create --tag "$remote:$channel_tag" "$remote:$sha_tag"
-            done
-          done
+          ./scripts/build.sh check
+          # The spine is one job's worth of work, in order, so it is a string;
+          # the leaves fan out, so they are a matrix array.
+          {
+            echo "spine=$(./scripts/graph.sh set ci+tier:spine | tr '\n' ' ' | sed 's/ $//')"
+            echo "leaves=$(./scripts/graph.sh matrix ci+tier:leaf)"
+          } >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
 
-      # Accelerated images intentionally are not started here. Their entrypoint
-      # requires an assigned Vulkan UUID and is validated on Tower and Hermes.
+  # ── Pull-request chain: read-only token, publishes nothing. ─────────────────
+  kwin-artifact-pr:
+    if: github.event_name == 'pull_request'
+    needs: plan
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/_kwin-artifact.yml
+    with:
+      # A miss is reported as "build it inline in quasar-kde" rather than filled
+      # in. Filling it would require packages:write on a run executing PR code.
+      may-build: false
+
+  spine-pr:
+    if: github.event_name == 'pull_request'
+    needs: [plan, kwin-artifact-pr]
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/_build-images.yml
+    with:
+      images: ${{ needs.plan.outputs.spine }}
+      publish: false
+      cache-write: false
+
+  # Each leaf job builds its own ancestry too; jobs do not share a docker daemon,
+  # so there is nothing to hand over. What makes that cheap rather than wasteful
+  # is the shared registry layer cache the last publishing run wrote -- a leaf
+  # materialises the spine instead of rebuilding it. spine-pr is still a
+  # `needs:` so a broken base fails once, loudly, before five leaves repeat it.
+  #
+  # fail-fast off: when quasar-kde breaks, the useful information is whether
+  # quasar-steam and quasar-benchapp broke too.
+  leaves-pr:
+    if: github.event_name == 'pull_request'
+    needs: [plan, kwin-artifact-pr, spine-pr]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.leaves) }}
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/_build-images.yml
+    with:
+      images: ${{ matrix.image }}
+      publish: false
+      cache-write: false
+      kwin-rpms-image: ${{ needs.kwin-artifact-pr.outputs.image }}
+
+  # ── Publishing chain: stable pushes, release tags, explicit dispatches. ─────
+  kwin-artifact-publish:
+    if: github.event_name != 'pull_request'
+    needs: plan
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/_kwin-artifact.yml
+    with:
+      may-build: true
+
+  spine-publish:
+    if: github.event_name != 'pull_request'
+    needs: [plan, kwin-artifact-publish]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/_build-images.yml
+    with:
+      images: ${{ needs.plan.outputs.spine }}
+      publish: true
+      # This is the run that refreshes the shared cache: it is building a
+      # reviewed ref and holds the credentials to write it. A pull request must
+      # never be able to poison what stable later builds from.
+      cache-write: true
+
+  leaves-publish:
+    if: github.event_name != 'pull_request'
+    needs: [plan, kwin-artifact-publish, spine-publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.leaves) }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/_build-images.yml
+    with:
+      images: ${{ matrix.image }}
+      publish: true
+      cache-write: true
+      kwin-rpms-image: ${{ needs.kwin-artifact-publish.outputs.image }}
 
   # ── Release: the only job that can write repository contents. ──────────────
   release:
-    needs: publish
+    needs: [spine-publish, leaves-publish]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -160,7 +203,7 @@ jobs:
     steps:
       # A GitHub Release is the human-readable half of a version tag: it records
       # what shipped and when, which is the point of the version being
-      # informational. Idempotent — a re-run of a successful tag workflow (or a
+      # informational. Idempotent -- a re-run of a successful tag workflow (or a
       # retry after a lost response) must not fail on an existing release.
       - name: Publish the GitHub Release
         env:

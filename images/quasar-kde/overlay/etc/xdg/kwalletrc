@@ -1,0 +1,6 @@
+# kwallet-integration packages are deliberately not installed (lean-image
+# principle); this disables the wallet subsystem itself so KDE apps don't
+# prompt to create/unlock a wallet that has no backend installed.
+[Wallet]
+Enabled=false
+First Use=false

@@ -1,0 +1,5 @@
+# Ephemeral/volume-mounted $HOME under a container: baloo's file indexer
+# gains nothing (no persistent local search UX worth the CPU/IO) and would
+# otherwise crawl the whole mounted home on every fresh session.
+[Basic Settings]
+Indexing-Enabled=false
