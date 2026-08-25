@@ -38,9 +38,16 @@ docker run --rm --entrypoint /bin/bash "$XFCE_IMAGE" -lc "$QV_GUARD"'
   # In-image assertion helpers. The host-side verify-lib.sh is not in the
   # container, and a bare `grep -q` under errexit exits 1 having printed
   # nothing at all -- so every check states what it looked for and why.
-  need() {  # need <pattern> <file> <why>
+  need() {  # need <extended-regex> <file> <why>
     grep -Eq -- "$1" "$2" && return 0
     echo "FAIL: $2 does not match /$1/ -- $3" >&2
+    exit 1
+  }
+  need_lit() {  # need_lit <fixed string> <file> <why>
+    # For shell text like ${VAR:-default}: as an ERE the $ would anchor to
+    # end-of-line and the check would fail against a line it should match.
+    grep -Fq -- "$1" "$2" && return 0
+    echo "FAIL: $2 does not contain \"$1\" -- $3" >&2
     exit 1
   }
   deny() {  # deny <pattern> <file> <why>
@@ -88,8 +95,8 @@ docker run --rm --entrypoint /bin/bash "$XFCE_IMAGE" -lc "$QV_GUARD"'
        "without it a Flatpak app talks to the PARENT compositor, outside the session"
 
   # --- Sizing: nothing baked, everything from the session mode (quasar#384) --
-  need "QUASAR_XFCE_WIDTH:-\$\{QUASAR_STREAM_WIDTH:-1920\}"   "$xfce" "stream width must win over any image default"
-  need "QUASAR_XFCE_HEIGHT:-\$\{QUASAR_STREAM_HEIGHT:-1080\}" "$xfce" "stream height must win over any image default"
+  need_lit "QUASAR_XFCE_WIDTH:-\${QUASAR_STREAM_WIDTH:-1920}"   "$xfce" "stream width must win over any image default"
+  need_lit "QUASAR_XFCE_HEIGHT:-\${QUASAR_STREAM_HEIGHT:-1080}" "$xfce" "stream height must win over any image default"
   need "-geometry" "$xfce" "Xwayland is sized with -geometry WxH"
   need "dbus-run-session -- startxfce4" "$xfce" "the session needs its own bus"
   need "/tmp/.X11-unix" "$xfce" "the rootful Xwayland socket dir must be prepared"
