@@ -1,0 +1,170 @@
+{
+  "$comment": [
+    "THE BUILD DAG, AS DATA. One source of truth for how every image in this repo",
+    "is built, in what order, with which build args, what verifies it, and whether",
+    "CI builds and/or publishes it.",
+    "",
+    "Consumed by BOTH scripts/build.sh (build order + build args + verify) and",
+    ".github/workflows/image-build.yml (matrix fan-out + published set), via",
+    "scripts/graph.sh. Before this file those two carried the same knowledge in two",
+    "hand-maintained forms -- a bash case statement and a hardcoded `for image in",
+    "...` list in the workflow -- and they had already drifted (the workflow's",
+    "published set and build.sh's `all` disagreed about the test probes).",
+    "",
+    "NOT to be confused with quasar-manifest.json, which is the CATALOG contract the",
+    "Quasar control plane fetches. This file is internal build metadata; nothing",
+    "outside this repo reads it.",
+    "",
+    "ADDING AN IMAGE: add an entry here and a Dockerfile. Nothing else. See",
+    "AGENTS.md, 'Adding a new image'.",
+    "",
+    "ARG RESOLVERS (the value of each entry in `args`):",
+    "  @version        -> the contents of ./VERSION",
+    "  @tag:<image>    -> <image>:$QUASAR_IMAGE_TAG (a sibling image in this graph)",
+    "  @env:NAME=DFLT  -> $NAME, or DFLT when unset/empty",
+    "  anything else   -> a literal",
+    "",
+    "FIELDS:",
+    "  name        image name; tagged <name>:$QUASAR_IMAGE_TAG (default :dev)",
+    "  dockerfile  path, built with the repo root as context",
+    "  target      optional --target for a multi-stage Dockerfile",
+    "  needs       sibling images that must be built first (the DAG edges)",
+    "  tier        spine | leaf | artifact -- see below",
+    "  args        build args, resolved as above",
+    "  verify      scripts run after this image builds (build.sh verify <name>)",
+    "  ci          built by GitHub Actions at all",
+    "  publish     pushed to ghcr.io/<owner>/<name> on a publishing event",
+    "  notes       why any of the above is the way it is",
+    "",
+    "TIERS. `spine` is the shared ancestry every leaf inherits; CI builds the spine",
+    "in one sequential job FIRST so its layers are in the shared registry cache",
+    "before the leaves fan out in parallel. Without that ordering N parallel leaf",
+    "jobs each rebuild quasar-base+quasar-app from cold. `artifact` is a publishable",
+    "non-image byproduct."
+  ],
+  "schema": 1,
+  "registry": "ghcr.io/accretion-io",
+  "images": [
+    {
+      "name": "quasar-base",
+      "dockerfile": "images/quasar-base/Dockerfile",
+      "needs": [],
+      "tier": "spine",
+      "args": { "VERSION": "@version" },
+      "verify": ["scripts/verify.sh"],
+      "ci": true,
+      "publish": true
+    },
+    {
+      "name": "quasar-app",
+      "dockerfile": "images/quasar-app/Dockerfile",
+      "needs": ["quasar-base"],
+      "tier": "spine",
+      "args": { "BASE_IMAGE": "@tag:quasar-base", "VERSION": "@version" },
+      "verify": [],
+      "ci": true,
+      "publish": true
+    },
+    {
+      "name": "quasar-steam-runtime",
+      "dockerfile": "images/quasar-steam-runtime/Dockerfile",
+      "needs": ["quasar-app"],
+      "tier": "spine",
+      "args": { "APP_IMAGE": "@tag:quasar-app", "VERSION": "@version" },
+      "verify": [],
+      "ci": true,
+      "publish": true,
+      "notes": "Two images build on this (quasar-steam, quasar-kde) and it carries the ~1.5 GB Steam/32-bit closure plus a bwrap source build, so it is spine rather than leaf: paying for it twice in parallel leaf jobs is the single largest avoidable duplicate in a fan-out."
+    },
+    {
+      "name": "quasar-diagnostics",
+      "dockerfile": "images/quasar-diagnostics/Dockerfile",
+      "needs": ["quasar-app"],
+      "tier": "leaf",
+      "args": { "APP_IMAGE": "@tag:quasar-app", "VERSION": "@version" },
+      "verify": [],
+      "ci": true,
+      "publish": true
+    },
+    {
+      "name": "quasar-steam",
+      "dockerfile": "images/quasar-steam/Dockerfile",
+      "needs": ["quasar-app", "quasar-steam-runtime"],
+      "tier": "leaf",
+      "args": {
+        "APP_IMAGE": "@tag:quasar-app",
+        "STEAM_RUNTIME_IMAGE": "@tag:quasar-steam-runtime",
+        "VERSION": "@version"
+      },
+      "verify": ["scripts/verify-steam.sh"],
+      "ci": true,
+      "publish": true
+    },
+    {
+      "name": "quasar-kde",
+      "dockerfile": "images/quasar-kde/Dockerfile",
+      "needs": ["quasar-steam-runtime"],
+      "tier": "leaf",
+      "args": {
+        "STEAM_RUNTIME_IMAGE": "@tag:quasar-steam-runtime",
+        "VERSION": "@version"
+      },
+      "verify": ["scripts/verify-kde.sh"],
+      "ci": true,
+      "publish": true
+    },
+    {
+      "name": "quasar-benchapp",
+      "dockerfile": "images/quasar-benchapp/Dockerfile",
+      "needs": ["quasar-app"],
+      "tier": "leaf",
+      "args": {
+        "APP_IMAGE": "@tag:quasar-app",
+        "VERSION": "@version",
+        "BENCHAPP_SRC_IMAGE": "@env:BENCHAPP_SRC_IMAGE=quasar-benchapp:src",
+        "BENCHAPP_GIT_SHA": "@env:BENCHAPP_GIT_SHA=unknown"
+      },
+      "verify": ["scripts/verify-benchapp.sh"],
+      "ci": false,
+      "publish": false,
+      "notes": "ci=false for now: FROM quasar-benchapp:src names a LOCALLY built image whose source is a separate repo, so a clean runner cannot produce it. Fixed in the commit that gives it a registry source."
+    },
+    {
+      "name": "quasar-test-vulkan",
+      "dockerfile": "images/quasar-test-vulkan/Dockerfile",
+      "needs": ["quasar-app"],
+      "tier": "leaf",
+      "args": { "APP_IMAGE": "@tag:quasar-app", "VERSION": "@version" },
+      "verify": [],
+      "ci": true,
+      "publish": false,
+      "notes": "Local-only GPU probe. Kept in CI because it is a COPY and a chmod on top of quasar-app -- seconds once the spine is cached -- and it is the cheapest way to notice that quasar-app stopped building. Never published: nothing consumes it from a registry."
+    },
+    {
+      "name": "quasar-test-egl",
+      "dockerfile": "images/quasar-test-egl/Dockerfile",
+      "needs": ["quasar-app"],
+      "tier": "leaf",
+      "args": { "APP_IMAGE": "@tag:quasar-app", "VERSION": "@version" },
+      "verify": [],
+      "ci": true,
+      "publish": false,
+      "notes": "Same as quasar-test-vulkan, plus one mesa-demos install."
+    },
+    {
+      "name": "quasar-unigine",
+      "dockerfile": "images/quasar-unigine/Dockerfile",
+      "needs": ["quasar-app"],
+      "tier": "leaf",
+      "args": {
+        "APP_IMAGE": "@tag:quasar-app",
+        "VERSION": "@version",
+        "WITH_SUPERPOSITION": "@env:WITH_SUPERPOSITION=1"
+      },
+      "verify": ["scripts/verify-unigine.sh"],
+      "ci": false,
+      "publish": false,
+      "notes": "ci=false DELIBERATELY. It pulls 1.9 GB of EULA'd UNIGINE installers from assets.unigine.com and is never published (README: 'deliberately not published to GHCR' -- it redistributes third-party binaries). CI would therefore spend the download and the disk on an image it can neither publish nor hand to anyone. It stays in `build.sh all` for local/devbox builds, where the BuildKit cache mount makes the download a one-off."
+    }
+  ]
+}
