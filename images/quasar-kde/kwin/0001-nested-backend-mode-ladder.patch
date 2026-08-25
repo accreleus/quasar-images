@@ -1,0 +1,796 @@
+Subject: [PATCH] nested wayland backend: real mode ladder + apply
+
+Quasar patch against kwin 6.7.4 (Fedora 43: kwin-6.7.4-1.fc43).
+
+PROBLEM
+-------
+KWin's nested `wayland` backend synthesises exactly ONE output mode, from the
+size the host compositor configures its xdg_toplevel at:
+
+  * `wayland_output.cpp init()`           -> `modes = {mode}`
+  * `wayland_output.cpp applyConfigure()` -> `modes = {mode}`  (configure size *
+                                             wp_fractional_scale_v1 scale)
+  * `wayland_output.cpp framePresented()` -> `modes = {mode}`  (on refresh change)
+
+and `applyChanges(OutputConfiguration &)` never reads `props->currentMode` at
+all (it also has `props->scale` commented out). `Capability::CustomModes` is not
+set. So inside a nested Plasma session, System Settings -> Display lists a
+single resolution and applying anything is a no-op.
+
+For Quasar the nested session IS the desktop the user streams, so "pick your
+internal resolution" has to work from Display Settings.
+
+WHAT THIS PATCH DOES
+--------------------
+1. `wayland_display.{h,cpp}`: bind the HOST compositor's `wl_output` (v2) purely
+   to collect its `mode` events, and expose the de-duplicated, largest-first
+   ladder as `WaylandDisplay::parentModeSizes()` + a `parentModesChanged()`
+   signal. Nothing else in the backend uses wl_output.
+
+2. `wayland_output.{h,cpp}`: build a real `State::modes` list = the
+   host-configured size (flagged Preferred) plus every host rung no larger than
+   it, with stable `OutputMode` identities (`m_modeCache`) so KScreen does not
+   see the list churn. `applyChanges()` now honours `props->currentMode` and
+   remembers the pick in `m_userMode`.
+
+3. Stickiness: a user-picked mode is INDEPENDENT of the host's configure size.
+   `applyConfigure()` never drops `m_userMode` because the size changed - Quasar
+   steps the streamed (external) resolution live, and an external step must not
+   throw away the user's chosen internal resolution. The pick only degrades, to
+   the new native size, when it no longer FITS inside it. It likewise survives
+   the same-size configure the host sends right after a mode change.
+
+4. Fit-to-host: the root surface's `wp_viewport` destination is pinned to the
+   host-configured logical size, and the content subsurfaces
+   (`wayland_layer.cpp`) are scaled/centred into it by `contentScale()` /
+   `contentOffset()` - aspect preserving, letterboxed against the existing black
+   root buffer. Pointer input (`wayland_backend.cpp`) and the cursor surface
+   (`wayland_egl_backend.cpp`, `wayland_qpainter_backend.cpp`) go through the
+   same mapping.
+
+   `contentScale()` is EXACTLY `1 / scale()` and `contentOffset()` exactly (0,0)
+   while the output runs at the host-configured size, which is what the
+   unpatched code hardcodes - so this is a no-op until a mode or scale is
+   actually changed.
+
+5. Scale: `props->scale` is honoured, but ONLY when the host does not implement
+   `wp_fractional_scale_v1` (upstream's stated reason for ignoring it is that
+   that protocol would overwrite it - true only when the host has it). This is
+   what makes the KScreen scale slider do anything under a host that lacks the
+   protocol.
+
+6. Rungs: the host's ladder is the primary source, but it is only a HINT - this
+   backend always commits a surface covering the host's configured area, so any
+   size at or below it is presentable against ANY host. Since every headless
+   parent (wlroots, mutter, and kwin's own server, whose `wl_output` only ever
+   sends the CURRENT mode) advertises exactly one, the standard rungs in the
+   host-configured size's aspect family are offered too. `KWIN_NESTED_EXTRA_MODES=0`
+   restricts the list to the host's own ladder.
+
+`Capability::CustomModes` is deliberately still NOT set: the ladder is the
+host's, not arbitrary user-defined modelines.
+
+diff -uNr a/src/backends/wayland/wayland_backend.cpp b/src/backends/wayland/wayland_backend.cpp
+--- a/src/backends/wayland/wayland_backend.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_backend.cpp	2026-08-16 11:12:26
+@@ -107,8 +107,12 @@
+         WaylandOutput *output = m_seat->backend()->findOutput(m_pointer->enteredSurface());
+         Q_ASSERT(output);
+         const auto subsurface = m_seat->backend()->findSubSurface(m_pointer->enteredSurface());
+-        const QPointF absolutePos = output->position() + relativeToSurface
+-            + (subsurface ? subsurface->position() : QPoint());
++        // Quasar: relativeToSurface is in the HOST's logical coordinates. When the
++        // user picked a mode smaller than the host's area, the content is scaled up
++        // to fill it, so the pointer has to be mapped back through that same
++        // transform. mapFromParent() is the identity when nothing was changed.
++        const QPointF parentPos = relativeToSurface + (subsurface ? QPointF(subsurface->position()) : QPointF());
++        const QPointF absolutePos = output->position() + output->mapFromParent(parentPos);
+         Q_EMIT pointerMotionAbsolute(absolutePos, std::chrono::milliseconds(time), this);
+     });
+     connect(pointer, &Pointer::buttonStateChanged, this, [this](quint32 serial, quint32 time, quint32 button, Pointer::ButtonState nativeState) {
+@@ -181,6 +185,11 @@
+     : m_seat(seat)
+     , m_relativePointer(relativePointer)
+ {
++    // Quasar NOTE: relative-pointer deltas are NOT mapped through contentScale().
++    // A relative pointer has no output association (upstream does not scale these
++    // by output scale either), and this path only runs while the pointer is
++    // explicitly locked via the nested backend's right-ctrl grab - a debugging
++    // affordance, not the streamed session's input path. Left as upstream.
+     connect(relativePointer, &RelativePointer::relativeMotion, this, [this](const QSizeF &delta, const QSizeF &deltaNonAccelerated, quint64 timestamp) {
+         Q_EMIT pointerMotion(sizeToPoint(delta), sizeToPoint(deltaNonAccelerated), std::chrono::microseconds(timestamp), this);
+     });
+@@ -196,16 +205,21 @@
+     connect(touch, &Touch::frameEnded, this, [this]() {
+         Q_EMIT touchFrame(this);
+     });
++    // Quasar: tp->position() is in the HOST's logical coordinates, exactly like
++    // wl_pointer motion - so it needs the same mapFromParent() inverse of the
++    // content scale/offset. Identity while the output runs at the host-configured
++    // size. (Upstream never adds a subsurface offset on the touch path the way it
++    // does for the pointer; that gap is pre-existing and untouched here.)
+     connect(touch, &Touch::sequenceStarted, this, [this](TouchPoint *tp) {
+         auto o = m_seat->backend()->findOutput(tp->surface());
+         Q_ASSERT(o);
+-        const QPointF position = o->position() + tp->position();
++        const QPointF position = o->position() + o->mapFromParent(tp->position());
+         Q_EMIT touchDown(tp->id(), position, std::chrono::milliseconds(tp->time()), this);
+     });
+     connect(touch, &Touch::pointAdded, this, [this](TouchPoint *tp) {
+         auto o = m_seat->backend()->findOutput(tp->surface());
+         Q_ASSERT(o);
+-        const QPointF position = o->position() + tp->position();
++        const QPointF position = o->position() + o->mapFromParent(tp->position());
+         Q_EMIT touchDown(tp->id(), position, std::chrono::milliseconds(tp->time()), this);
+     });
+     connect(touch, &Touch::pointRemoved, this, [this](TouchPoint *tp) {
+@@ -214,7 +228,7 @@
+     connect(touch, &Touch::pointMoved, this, [this](TouchPoint *tp) {
+         auto o = m_seat->backend()->findOutput(tp->surface());
+         Q_ASSERT(o);
+-        const QPointF position = o->position() + tp->position();
++        const QPointF position = o->position() + o->mapFromParent(tp->position());
+         Q_EMIT touchMotion(tp->id(), position, std::chrono::milliseconds(tp->time()), this);
+     });
+ }
+diff -uNr a/src/backends/wayland/wayland_display.cpp b/src/backends/wayland/wayland_display.cpp
+--- a/src/backends/wayland/wayland_display.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_display.cpp	2026-08-16 11:12:26
+@@ -24,6 +24,7 @@
+ #include <QThread>
+ #include <QWaitCondition>
+ 
++#include <algorithm>
+ #include <drm_fourcc.h>
+ #include <fcntl.h>
+ #include <poll.h>
+@@ -183,6 +184,12 @@
+     m_colorManager.reset();
+     m_viewporter.reset();
+ 
++    // Quasar: host wl_output proxies used for the nested mode ladder
++    for (const auto &parent : m_parentOutputs) {
++        wl_output_destroy(parent->output);
++    }
++    m_parentOutputs.clear();
++
+     if (m_shm) {
+         wl_shm_destroy(m_shm);
+     }
+@@ -375,6 +382,14 @@
+     return m_keyboardShortcutsInhibitManager;
+ }
+ 
++// Quasar: listener for the HOST compositor's wl_outputs (mode ladder only).
++const wl_output_listener WaylandDisplay::s_outputListener{
++    .geometry = &WaylandDisplay::output_geometry,
++    .mode = &WaylandDisplay::output_mode,
++    .done = &WaylandDisplay::output_done,
++    .scale = &WaylandDisplay::output_scale,
++};
++
+ void WaylandDisplay::registry_global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version)
+ {
+     WaylandDisplay *display = static_cast<WaylandDisplay *>(data);
+@@ -431,11 +446,90 @@
+         display->m_toplevelIconManager = reinterpret_cast<xdg_toplevel_icon_manager_v1 *>(wl_registry_bind(registry, name, &xdg_toplevel_icon_manager_v1_interface, 1));
+     } else if (strcmp(interface, zwp_keyboard_shortcuts_inhibit_manager_v1_interface.name) == 0) {
+         display->m_keyboardShortcutsInhibitManager = reinterpret_cast<zwp_keyboard_shortcuts_inhibit_manager_v1 *>(wl_registry_bind(registry, name, &zwp_keyboard_shortcuts_inhibit_manager_v1_interface, 1));
++    } else if (strcmp(interface, wl_output_interface.name) == 0) {
++        // Quasar: bind the host compositor's outputs purely to read their mode
++        // ladder. Nothing else in the nested backend uses wl_output.
++        const uint32_t bindVersion = std::min(version, 2u);
++        auto parent = std::make_unique<ParentOutput>();
++        parent->display = display;
++        parent->registryName = name;
++        parent->hasDoneEvent = bindVersion >= 2;
++        parent->output = static_cast<wl_output *>(wl_registry_bind(registry, name, &wl_output_interface, bindVersion));
++        wl_output_add_listener(parent->output, &s_outputListener, parent.get());
++        display->m_parentOutputs.push_back(std::move(parent));
+     }
+ }
+ 
+ void WaylandDisplay::registry_global_remove(void *data, wl_registry *registry, uint32_t name)
+ {
++    WaylandDisplay *display = static_cast<WaylandDisplay *>(data);
++    const auto it = std::find_if(display->m_parentOutputs.begin(), display->m_parentOutputs.end(), [name](const auto &parent) {
++        return parent->registryName == name;
++    });
++    if (it != display->m_parentOutputs.end()) {
++        wl_output_destroy((*it)->output);
++        display->m_parentOutputs.erase(it);
++        Q_EMIT display->parentModesChanged();
++    }
++}
++
++// Quasar: host wl_output mode-ladder tracking ---------------------------------
++
++void WaylandDisplay::output_geometry(void *data, wl_output *output, int32_t x, int32_t y, int32_t physicalWidth, int32_t physicalHeight, int32_t subpixel, const char *make, const char *model, int32_t transform)
++{
++    // intentionally ignored
++}
++
++void WaylandDisplay::output_mode(void *data, wl_output *output, uint32_t flags, int32_t width, int32_t height, int32_t refresh)
++{
++    auto parent = static_cast<ParentOutput *>(data);
++    if (width <= 0 || height <= 0) {
++        return;
++    }
++    const QSize size(width, height);
++    if (!parent->pendingModes.contains(size)) {
++        parent->pendingModes.append(size);
++    }
++    if (!parent->hasDoneEvent) {
++        // wl_output v1 has no done event, so every mode event has to be committed
++        // on its own.
++        parent->modes = parent->pendingModes;
++        Q_EMIT parent->display->parentModesChanged();
++    }
++}
++
++void WaylandDisplay::output_done(void *data, wl_output *output)
++{
++    auto parent = static_cast<ParentOutput *>(data);
++    if (parent->pendingModes.isEmpty()) {
++        // An atom-less done (e.g. a scale-only update) must not wipe the ladder.
++        return;
++    }
++    if (parent->modes != parent->pendingModes) {
++        parent->modes = parent->pendingModes;
++        Q_EMIT parent->display->parentModesChanged();
++    }
++    parent->pendingModes.clear();
++}
++
++void WaylandDisplay::output_scale(void *data, wl_output *output, int32_t factor)
++{
++    // intentionally ignored; wp_fractional_scale_v1 is what drives the nested scale
++}
++
++QList<QSize> WaylandDisplay::parentModeSizes() const
++{
++    if (m_parentOutputs.empty()) {
++        return {};
++    }
++    // The nested compositor is one xdg_toplevel; it is meaningless to mix ladders
++    // from several host outputs, so the first output's ladder is the one used.
++    QList<QSize> sizes = m_parentOutputs.front()->modes;
++    std::sort(sizes.begin(), sizes.end(), [](const QSize &a, const QSize &b) {
++        return a.width() * qint64(a.height()) > b.width() * qint64(b.height());
++    });
++    sizes.erase(std::unique(sizes.begin(), sizes.end()), sizes.end());
++    return sizes;
+ }
+ 
+ }
+diff -uNr a/src/backends/wayland/wayland_display.h b/src/backends/wayland/wayland_display.h
+--- a/src/backends/wayland/wayland_display.h	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_display.h	2026-08-16 11:12:26
+@@ -7,11 +7,16 @@
+ #pragma once
+ 
+ #include <QHash>
++#include <QList>
+ #include <QObject>
++#include <QSize>
+ 
+ #include <memory>
++#include <vector>
+ 
+ struct wl_display;
++struct wl_output;
++struct wl_output_listener;
+ struct wl_registry;
+ struct wl_shm;
+ struct zwp_linux_dmabuf_v1;
+@@ -86,12 +91,47 @@
+     xdg_toplevel_icon_manager_v1 *toplevelIconManager() const;
+     zwp_keyboard_shortcuts_inhibit_manager_v1 *keyboardShortcutsInhibitManager() const;
+ 
++    /**
++     * Quasar: the mode sizes advertised by the host compositor's first wl_output,
++     * de-duplicated and sorted largest-first. Empty when the host advertises no
++     * wl_output (or only the one mode kwin is already running at).
++     *
++     * A nested output has no modes of its own - its size is dictated by the host's
++     * xdg_toplevel.configure. Exposing the host's ladder here lets WaylandOutput
++     * advertise a real mode list so Display Settings can offer a choice.
++     */
++    QList<QSize> parentModeSizes() const;
++
+ public Q_SLOTS:
+     void flush();
+ 
++Q_SIGNALS:
++    /**
++     * Quasar: emitted when the host compositor's advertised mode list changes.
++     */
++    void parentModesChanged();
++
+ private:
+     static void registry_global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version);
+     static void registry_global_remove(void *data, wl_registry *registry, uint32_t name);
++
++    // Quasar: host wl_output tracking, for the nested mode ladder.
++    struct ParentOutput
++    {
++        WaylandDisplay *display = nullptr;
++        wl_output *output = nullptr;
++        uint32_t registryName = 0;
++        bool hasDoneEvent = false;
++        QList<QSize> pendingModes;
++        QList<QSize> modes;
++    };
++    static void output_geometry(void *data, wl_output *output, int32_t x, int32_t y, int32_t physicalWidth, int32_t physicalHeight, int32_t subpixel, const char *make, const char *model, int32_t transform);
++    static void output_mode(void *data, wl_output *output, uint32_t flags, int32_t width, int32_t height, int32_t refresh);
++    static void output_done(void *data, wl_output *output);
++    static void output_scale(void *data, wl_output *output, int32_t factor);
++    static const wl_output_listener s_outputListener;
++
++    std::vector<std::unique_ptr<ParentOutput>> m_parentOutputs;
+ 
+     wl_display *m_display = nullptr;
+     wl_registry *m_registry = nullptr;
+diff -uNr a/src/backends/wayland/wayland_egl_backend.cpp b/src/backends/wayland/wayland_egl_backend.cpp
+--- a/src/backends/wayland/wayland_egl_backend.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_egl_backend.cpp	2026-08-16 11:12:26
+@@ -202,7 +202,12 @@
+     wl_buffer *buffer = m_backend->backend()->importBuffer(m_buffer->buffer());
+     Q_ASSERT(buffer);
+ 
+-    static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_buffer->buffer()->size() / m_output->scale(), (hotspot() / m_output->scale()).toPoint());
++    // Quasar: the cursor is a host-side surface, so it is sized in the host's
++    // logical coordinates - the same mapping the content layers use.
++    // contentScale() == 1 / scale() unless a mode or scale was changed.
++    auto *waylandOutput = static_cast<WaylandOutput *>(m_output.get());
++    const qreal contentScale = waylandOutput->contentScale();
++    waylandOutput->cursor()->update(buffer, m_buffer->buffer()->size() * contentScale, (hotspot() * contentScale).toPoint());
+ 
+     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
+     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+diff -uNr a/src/backends/wayland/wayland_layer.cpp b/src/backends/wayland/wayland_layer.cpp
+--- a/src/backends/wayland/wayland_layer.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_layer.cpp	2026-08-16 11:12:26
+@@ -95,7 +95,15 @@
+     // this is a bit annoying, we need a new Wayland protocol
+     // to do this properly with fractional scaling. Until we
+     // have that, it may cause blurriness in some cases!
+-    const Rect logicalTarget = targetRect().scaled(1.0 / m_output->scale()).rounded();
++    //
++    // Quasar: the layer is placed in the HOST's logical coordinates, which are
++    // only the same as (pixels / output scale) while the output runs at the size
++    // the host configured. Once the user picks a smaller mode, the content has to
++    // be scaled up to keep filling the host's area - otherwise the desktop draws
++    // into the top-left corner and the rest of the stream is black.
++    // contentScale()/contentOffset() are exactly 1/scale() and (0,0) when no mode
++    // or scale has been changed, so this is upstream behaviour by default.
++    const Rect logicalTarget = targetRect().scaled(output->contentScale()).translated(output->contentOffset()).rounded();
+     if (m_viewport) {
+         m_viewport->setSource(sourceRect());
+         m_viewport->setDestination(logicalTarget.size());
+diff -uNr a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+--- a/src/backends/wayland/wayland_output.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_output.cpp	2026-08-16 11:12:26
+@@ -17,6 +17,7 @@
+ #include "wayland_backend.h"
+ #include "wayland_display.h"
+ #include "wayland_layer.h"
++#include "wayland_logging.h"
+ 
+ #include <KWayland/Client/compositor.h>
+ #include <KWayland/Client/pointer.h>
+@@ -37,6 +38,8 @@
+ 
+ #include <QPainter>
+ 
++#include <algorithm>
++#include <array>
+ #include <cmath>
+ #include <ranges>
+ 
+@@ -169,6 +172,9 @@
+         xdg_toplevel_icon_v1_destroy(toplevelIcon);
+     }
+ 
++    // Quasar: the host's mode ladder can arrive/change after the output exists.
++    connect(backend->display(), &WaylandDisplay::parentModesChanged, this, &WaylandOutput::refreshModeLadder);
++
+     connect(m_xdgShellSurface.get(), &XdgShellSurface::configureRequested, this, &WaylandOutput::handleConfigure);
+     connect(m_xdgShellSurface.get(), &XdgShellSurface::closeRequested, qApp, &QCoreApplication::quit);
+     connect(this, &WaylandOutput::enabledChanged, this, &WaylandOutput::updateWindowTitle);
+@@ -312,7 +318,14 @@
+         m_surface->attachBuffer(buffer);
+         m_mapped = true;
+     }
+-    m_viewport->setDestination(QSize(std::round(modeSize().width() / scale()), std::round(modeSize().height() / scale())));
++    // Quasar: the root surface always covers exactly the area the host configured,
++    // whatever mode is current - so the host never sees the nested compositor
++    // shrink, and the letterbox around a non-matching aspect stays black.
++    if (!m_parentLogicalSize.isEmpty()) {
++        m_viewport->setDestination(m_parentLogicalSize);
++    } else {
++        m_viewport->setDestination(QSize(std::round(modeSize().width() / scale()), std::round(modeSize().height() / scale())));
++    }
+     m_surface->setScale(1);
+     // commit the subsurfaces before the main surface
+     for (OutputLayer *layer : layersToUpdate) {
+@@ -345,10 +358,12 @@
+ {
+     if (refreshRate != this->refreshRate()) {
+         m_refreshRate = refreshRate;
+-        const auto mode = std::make_shared<OutputMode>(OutputModeline(pixelSize(), m_refreshRate));
++        // Quasar: rebuild the whole ladder at the new rate rather than collapsing
++        // it to the single current mode.
++        m_modeCache.clear();
+         State next = m_state;
+-        next.modes = {mode};
+-        next.currentMode = mode;
++        const QSize native = m_nativeSize.isEmpty() ? pixelSize() : m_nativeSize;
++        rebuildModes(next, native, m_userMode.value_or(native));
+         setState(next);
+         m_renderLoop->setRefreshRate(m_refreshRate);
+     }
+@@ -365,6 +380,171 @@
+     m_frames.pop_front();
+ }
+ 
++// Quasar: mode-ladder plumbing -----------------------------------------------
++//
++// A nested output has no hardware modes: upstream synthesises exactly ONE mode
++// from the host's xdg_toplevel.configure size and drops everything else, so
++// System Settings -> Display shows a one-entry resolution list and applying a
++// resolution is a no-op. The three functions below give it a real ladder taken
++// from the host compositor's wl_output, make a user-picked mode stick, and keep
++// the toplevel filling the host's area regardless (the content is scaled by
++// wp_viewport - see contentScale()).
++
++// Quasar: rungs offered in addition to whatever the host advertises.
++//
++// Reading the host's wl_output ladder is the primary source, but it is only a
++// HINT: this backend always commits a surface covering the host's configured
++// area (the content is scaled into it by contentScale()), so any size at or
++// below the configured one is presentable against ANY host - including one that
++// advertises a single mode, which is what every wlroots/mutter/kwin headless
++// parent does. Offering the standard rungs therefore costs nothing and is what
++// makes the resolution list useful instead of a one-entry no-op.
++//
++// Only rungs in the SAME aspect family as the host-configured size are offered;
++// a different aspect would letterbox the desktop for no reason.
++// Set KWIN_NESTED_EXTRA_MODES=0 to offer nothing but the host's own ladder.
++static QList<QSize> standardRungs(const QSize &nativeSize)
++{
++    static const bool disabled = qgetenv("KWIN_NESTED_EXTRA_MODES") == "0";
++    if (disabled || nativeSize.isEmpty()) {
++        return {};
++    }
++    static constexpr std::array<QSize, 20> candidates{
++        // 16:9
++        QSize(3840, 2160), QSize(2560, 1440), QSize(1920, 1080), QSize(1600, 900),
++        QSize(1366, 768), QSize(1280, 720), QSize(1024, 576), QSize(854, 480),
++        // 16:10
++        QSize(2560, 1600), QSize(1920, 1200), QSize(1680, 1050), QSize(1440, 900),
++        QSize(1280, 800), QSize(1024, 640),
++        // 21:9
++        QSize(3440, 1440), QSize(2560, 1080),
++        // 4:3
++        QSize(1600, 1200), QSize(1400, 1050), QSize(1024, 768), QSize(800, 600)};
++
++    const qreal nativeAspect = nativeSize.width() / qreal(nativeSize.height());
++    QList<QSize> rungs;
++    for (const QSize &candidate : candidates) {
++        if (candidate.width() > nativeSize.width() || candidate.height() > nativeSize.height()) {
++            continue;
++        }
++        if (candidate == nativeSize) {
++            continue;
++        }
++        const qreal aspect = candidate.width() / qreal(candidate.height());
++        if (std::abs(aspect - nativeAspect) > 0.01) {
++            continue;
++        }
++        rungs.append(candidate);
++    }
++    return rungs;
++}
++
++std::shared_ptr<OutputMode> WaylandOutput::modeFor(const QSize &size, bool preferred)
++{
++    const auto key = std::make_pair(size.width(), size.height());
++    auto it = m_modeCache.find(key);
++    if (it != m_modeCache.end() && it->second->refreshRate() == m_refreshRate
++        && bool(it->second->flags() & OutputModeline::Flag::Preferred) == preferred) {
++        return it->second;
++    }
++    OutputModeline::Flags flags;
++    if (preferred) {
++        flags |= OutputModeline::Flag::Preferred;
++    }
++    auto mode = std::make_shared<OutputMode>(OutputModeline(size, m_refreshRate, flags));
++    m_modeCache[key] = mode;
++    return mode;
++}
++
++void WaylandOutput::rebuildModes(State &next, const QSize &nativeSize, const QSize &currentSize)
++{
++    // Resolve the current size ONCE: an invalid or oversized request falls back
++    // to the native size, and everything below (including the Preferred flag)
++    // then agrees on what "current" is. Computing it twice let an invalid
++    // currentSize cache the native mode with Preferred cleared.
++    QSize cur = currentSize;
++    if (!cur.isValid() || cur.isEmpty()
++        || cur.width() > nativeSize.width() || cur.height() > nativeSize.height()) {
++        cur = nativeSize;
++    }
++
++    QList<QSize> sizes;
++    sizes.append(nativeSize);
++    if (!sizes.contains(cur)) {
++        sizes.append(cur);
++    }
++    QList<QSize> candidates = m_backend->display()->parentModeSizes();
++    candidates.append(standardRungs(nativeSize));
++    for (const QSize &candidate : std::as_const(candidates)) {
++        // Only rungs at or below the size the host configured us at: the surface
++        // must keep covering the host's area, never overflow it.
++        if (candidate.width() > nativeSize.width() || candidate.height() > nativeSize.height()) {
++            continue;
++        }
++        if (!sizes.contains(candidate)) {
++            sizes.append(candidate);
++        }
++    }
++    std::sort(sizes.begin(), sizes.end(), [](const QSize &a, const QSize &b) {
++        return a.width() * qint64(a.height()) > b.width() * qint64(b.height());
++    });
++
++    QList<std::shared_ptr<OutputMode>> modes;
++    modes.reserve(sizes.size());
++    for (const QSize &size : std::as_const(sizes)) {
++        modes.append(modeFor(size, size == nativeSize));
++    }
++    next.modes = modes;
++    next.currentMode = modeFor(cur, cur == nativeSize);
++}
++
++void WaylandOutput::refreshModeLadder()
++{
++    if (!m_nativeSize.isValid() || m_nativeSize.isEmpty()) {
++        return;
++    }
++    State next = m_state;
++    rebuildModes(next, m_nativeSize, m_userMode.value_or(m_nativeSize));
++    setState(next);
++}
++
++QSize WaylandOutput::parentLogicalSize() const
++{
++    return m_parentLogicalSize;
++}
++
++qreal WaylandOutput::contentScale() const
++{
++    const QSize pixel = pixelSize();
++    const QSize parent = m_parentLogicalSize;
++    if (pixel.isEmpty() || parent.isEmpty()) {
++        // unpatched behaviour
++        return scale() > 0 ? 1.0 / scale() : 1.0;
++    }
++    return std::min(parent.width() / qreal(pixel.width()), parent.height() / qreal(pixel.height()));
++}
++
++QPointF WaylandOutput::contentOffset() const
++{
++    const QSize pixel = pixelSize();
++    const QSize parent = m_parentLogicalSize;
++    if (pixel.isEmpty() || parent.isEmpty()) {
++        return QPointF();
++    }
++    const qreal factor = contentScale();
++    return QPointF((parent.width() - pixel.width() * factor) / 2.0,
++                   (parent.height() - pixel.height() * factor) / 2.0);
++}
++
++QPointF WaylandOutput::mapFromParent(const QPointF &parentLogicalPos) const
++{
++    const qreal divisor = contentScale() * scale();
++    if (divisor <= 0) {
++        return parentLogicalPos;
++    }
++    return (parentLogicalPos - contentOffset()) / divisor;
++}
++
+ void WaylandOutput::applyChanges(const OutputConfiguration &config)
+ {
+     const auto props = config.constChangeSet(this);
+@@ -375,9 +555,38 @@
+     next.enabled = props->enabled.value_or(m_state.enabled);
+     next.transform = props->transform.value_or(m_state.transform);
+     next.position = props->pos.value_or(m_state.position);
+-    // intentionally ignored, as it would get overwritten
+-    // with the fractional scale protocol anyways
+-    // next.scale = props->scale.value_or(m_state.scale);
++    // Quasar: upstream ignores props->scale because wp_fractional_scale_v1 would
++    // overwrite it on the next configure. That is only true when the host
++    // actually implements that protocol; when it does not, honouring the user's
++    // choice is what makes the KScreen scale slider work at all.
++    if (!m_fractionalScale) {
++        if (props->scale) {
++            m_userScale = *props->scale;
++        }
++        next.scale = m_userScale.value_or(m_state.scale);
++        next.scaleSetting = props->scaleSetting.value_or(next.scale);
++    }
++    // Quasar: honour the picked resolution. It is remembered so the host's next
++    // configure - which arrives at the SAME size, because the toplevel keeps
++    // filling the host's area - does not snap it back.
++    if (props->currentMode && m_nativeSize.isValid() && !m_nativeSize.isEmpty()) {
++        const QSize requested = props->currentMode->size();
++        if (requested.isValid() && !requested.isEmpty()
++            && requested.width() <= m_nativeSize.width() && requested.height() <= m_nativeSize.height()) {
++            if (requested == m_nativeSize) {
++                m_userMode.reset();
++            } else {
++                m_userMode = requested;
++            }
++        } else {
++            qCWarning(KWIN_WAYLAND_BACKEND) << "ignoring requested mode" << requested
++                                            << "- a nested output cannot exceed the size the host configured it at"
++                                            << m_nativeSize;
++        }
++    }
++    if (m_nativeSize.isValid() && !m_nativeSize.isEmpty()) {
++        rebuildModes(next, m_nativeSize, m_userMode.value_or(m_nativeSize));
++    }
+     next.desiredMode = props->desiredMode.value_or(m_state.desiredMode);
+     next.uuid = props->uuid.value_or(m_state.uuid);
+     next.replicationSource = props->replicationSource.value_or(m_state.replicationSource);
+@@ -428,12 +637,14 @@
+ {
+     m_renderLoop->setRefreshRate(m_refreshRate);
+ 
+-    auto mode = std::make_shared<OutputMode>(OutputModeline(pixelSize, m_refreshRate));
++    // Quasar: seed the ladder from the requested size; the host's first configure
++    // replaces it with the real one a moment later.
++    m_nativeSize = pixelSize;
++    m_parentLogicalSize = scale > 0 ? QSize(std::round(pixelSize.width() / scale), std::round(pixelSize.height() / scale)) : pixelSize;
+ 
+     State initialState;
+-    initialState.modes = {mode};
+-    initialState.currentMode = mode;
+     initialState.scale = scale;
++    rebuildModes(initialState, pixelSize, pixelSize);
+     setState(initialState);
+ 
+     m_xdgShellSurface->setFullscreen(fullscreen);
+@@ -461,12 +672,30 @@
+ {
+     m_xdgShellSurface->ackConfigure(serial);
+     if (!size.isEmpty()) {
+-        auto mode = std::make_shared<OutputMode>(OutputModeline(size * m_pendingScale, m_refreshRate));
++        // Quasar: a user-picked mode is INDEPENDENT of the host's configure size
++        // and survives it changing. The host resizes this toplevel routinely -
++        // Quasar steps the streamed (external) resolution live - and an external
++        // step must not silently throw away the user's chosen internal
++        // resolution. The pick only degrades, to the new native size, when it no
++        // longer FITS: the surface must never overflow the host's area.
++        //
++        // It also survives a same-size configure, which is what the host sends
++        // right after a mode change (the toplevel deliberately keeps filling the
++        // host's area, so from the host's side nothing changed).
++        m_parentLogicalSize = size;
++        m_nativeSize = size * m_pendingScale;
+ 
++        QSize current = m_userMode.value_or(m_nativeSize);
++        if (current.width() > m_nativeSize.width() || current.height() > m_nativeSize.height()) {
++            m_userMode.reset();
++            current = m_nativeSize;
++        }
++
+         State next = m_state;
+-        next.modes = {mode};
+-        next.currentMode = mode;
+-        next.scale = m_pendingScale;
++        rebuildModes(next, m_nativeSize, current);
++        if (m_fractionalScale || !m_userScale) {
++            next.scale = m_pendingScale;
++        }
+         setState(next);
+ 
+         Q_EMIT m_backend->outputsQueried();
+diff -uNr a/src/backends/wayland/wayland_output.h b/src/backends/wayland/wayland_output.h
+--- a/src/backends/wayland/wayland_output.h	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_output.h	2026-08-16 11:12:26
+@@ -12,9 +12,13 @@
+ 
+ #include <KWayland/Client/xdgshell.h>
+ #include <QObject>
++#include <QPointF>
+ #include <QSize>
+ #include <QTimer>
+ #include <deque>
++#include <map>
++#include <optional>
++#include <utility>
+ 
+ namespace KWayland
+ {
+@@ -111,12 +115,42 @@
+     void setOutputLayers(std::vector<std::unique_ptr<OutputLayer>> &&layers);
+     QList<OutputLayer *> outputLayers() const;
+ 
++    /**
++     * Quasar: the logical size the HOST compositor last configured this toplevel
++     * at. The nested output always presents at this size, whatever mode the user
++     * picked - the content is scaled to fit it (see contentScale()).
++     */
++    QSize parentLogicalSize() const;
++    /**
++     * Quasar: uniform factor mapping this output's PIXEL coordinates into the
++     * host compositor's logical coordinates, aspect preserving.
++     *
++     * With no user-picked mode and no user-picked scale this is exactly
++     * 1 / scale(), which is what the unpatched backend hardcodes - the patch is a
++     * no-op until a mode or scale is actually changed.
++     */
++    qreal contentScale() const;
++    /**
++     * Quasar: letterbox offset, in host logical coordinates, that centres the
++     * scaled content inside the host's configured area.
++     */
++    QPointF contentOffset() const;
++    /**
++     * Quasar: inverse of contentScale()/contentOffset() - maps a point in the
++     * host's logical coordinates to this output's logical coordinates.
++     */
++    QPointF mapFromParent(const QPointF &parentLogicalPos) const;
++
+ private:
+     void handleConfigure(const QSize &size, KWayland::Client::XdgShellSurface::States states, quint32 serial);
+     void updateWindowTitle();
+     void applyConfigure(const QSize &size, quint32 serial);
+     void updateColor();
+     void inhibitShortcuts(bool inhibit);
++    // Quasar: mode-ladder helpers
++    std::shared_ptr<OutputMode> modeFor(const QSize &size, bool preferred);
++    void rebuildModes(State &next, const QSize &nativeSize, const QSize &currentSize);
++    void refreshModeLadder();
+ 
+     static const wp_fractional_scale_v1_listener s_fractionalScaleListener;
+     static void handleFractionalScaleChanged(void *data, struct wp_fractional_scale_v1 *wp_fractional_scale_v1, uint32_t scale120);
+@@ -155,6 +189,19 @@
+     zwp_keyboard_shortcuts_inhibitor_v1 *m_shortcutInhibition = nullptr;
+     uint32_t m_refreshRate = 60'000;
+     qreal m_pendingScale = 1.0;
++    // Quasar: nested mode ladder + sticky user selection.
++    /// last logical size the host configured this toplevel at
++    QSize m_parentLogicalSize;
++    /// the mode size the host's configure implies (parent logical * scale)
++    QSize m_nativeSize;
++    /// a mode the user picked in Display Settings; sticky until the host's
++    /// configure size actually CHANGES (a genuine external resolution change)
++    std::optional<QSize> m_userMode;
++    /// a scale the user picked in Display Settings; only honoured when the host
++    /// does not drive the scale through wp_fractional_scale_v1
++    std::optional<qreal> m_userScale;
++    /// stable OutputMode identities, so KScreen does not see the ladder churn
++    std::map<std::pair<int, int>, std::shared_ptr<OutputMode>> m_modeCache;
+ };
+ 
+ } // namespace Wayland
+diff -uNr a/src/backends/wayland/wayland_qpainter_backend.cpp b/src/backends/wayland/wayland_qpainter_backend.cpp
+--- a/src/backends/wayland/wayland_qpainter_backend.cpp	2026-08-16 11:12:26
++++ b/src/backends/wayland/wayland_qpainter_backend.cpp	2026-08-16 11:12:26
+@@ -124,7 +124,12 @@
+     wl_buffer *buffer = static_cast<WaylandOutput *>(m_output.get())->backend()->importBuffer(m_back->buffer());
+     Q_ASSERT(buffer);
+ 
+-    static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_back->buffer()->size() / m_output->scale(), hotspot().toPoint());
++    // Quasar: see the note in WaylandEglCursorLayer::doEndFrame. The hotspot is
++    // scaled here too, matching the EGL path -- upstream passes it through
++    // unscaled, which is only right while contentScale() is 1.
++    auto *waylandOutput = static_cast<WaylandOutput *>(m_output.get());
++    const qreal contentScale = waylandOutput->contentScale();
++    waylandOutput->cursor()->update(buffer, m_back->buffer()->size() * contentScale, (hotspot() * contentScale).toPoint());
+     m_swapchain->release(m_back);
+     return true;
+ }

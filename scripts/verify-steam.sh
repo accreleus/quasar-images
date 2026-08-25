@@ -115,6 +115,9 @@ docker run --rm --entrypoint /bin/bash quasar-steam:dev -lc '
   # address docker assigned).
   test -f /etc/NetworkManager/conf.d/00-quasar.conf
   grep -q "^no-auto-default=\*" /etc/NetworkManager/conf.d/00-quasar.conf
+# Connectivity check must be configured or NM reports "limited" on the bridge
+# device and every NM-gated app (Plasma applet, Discover, Steam) plays offline.
+grep -q "^uri=http://nmcheck.gnome.org/check_network_status.txt" /etc/NetworkManager/conf.d/00-quasar.conf
 '
 
 labels="$(docker image inspect quasar-steam:dev --format '{{json .Config.Labels}}')"
