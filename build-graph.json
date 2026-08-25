@@ -40,11 +40,24 @@
     "in one sequential job FIRST so its layers are in the shared registry cache",
     "before the leaves fan out in parallel. Without that ordering N parallel leaf",
     "jobs each rebuild quasar-base+quasar-app from cold. `artifact` is a publishable",
-    "non-image byproduct."
+    "non-image byproduct (see the kwin RPMs)."
   ],
   "schema": 1,
   "registry": "ghcr.io/accretion-io",
   "images": [
+    {
+      "name": "quasar-kwin-rpms",
+      "dockerfile": "images/quasar-kde/Dockerfile",
+      "target": "kwin-rpms",
+      "needs": [],
+      "tier": "artifact",
+      "args": { "VERSION": "@version" },
+      "verify": [],
+      "ci": true,
+      "publish": false,
+      "content_tag": "scripts/kwin-artifact-tag.sh",
+      "notes": "FROM scratch, ~12 MB: the patched-KWin RPMs and nothing else. Published under its own content-addressed tag by the kwin-artifact CI job, not by the ordinary publish path -- which is why publish=false here and why tier=artifact keeps it out of the `all` and `ci` sets (quasar-kde can also build it inline, and building it twice is 54 minutes). quasar-kde consumes it via KWIN_RPMS_IMAGE."
+    },
     {
       "name": "quasar-base",
       "dockerfile": "images/quasar-base/Dockerfile",
@@ -107,11 +120,13 @@
       "tier": "leaf",
       "args": {
         "STEAM_RUNTIME_IMAGE": "@tag:quasar-steam-runtime",
-        "VERSION": "@version"
+        "VERSION": "@version",
+        "KWIN_RPMS_IMAGE": "@env:KWIN_RPMS_IMAGE=kwin-rpms"
       },
       "verify": ["scripts/verify-kde.sh"],
       "ci": true,
-      "publish": true
+      "publish": true,
+      "notes": "KWIN_RPMS_IMAGE=kwin-rpms names the LOCAL stage in the same Dockerfile, i.e. build the RPMs here (~27 min). CI points it at the published quasar-kwin-rpms artefact instead."
     },
     {
       "name": "quasar-benchapp",
