@@ -1,0 +1,177 @@
+name: Build images (reusable)
+
+# THE ONE BUILD/VALIDATE/PUBLISH DEFINITION. image-build.yml calls this from
+# every job that touches an image, so the steps cannot drift again -- previously
+# `validate` and `publish` were two verbatim copies of the same five steps and
+# had already diverged (only one of them ran the KDE verify).
+#
+# It is deliberately dumb about WHICH images it builds: the caller passes a list
+# it got from build-graph.json via scripts/graph.sh. Nothing here enumerates
+# images.
+#
+# SECURITY MODEL. A reusable workflow cannot grant itself permissions; it gets
+# what the CALLING JOB was given, and no more. So the caller decides -- and can
+# be read in one place -- whether a given build has write credentials:
+#
+#   pull_request  -> caller grants contents:read + packages:read. `publish` and
+#                    `cache-write` are false, GITHUB_TOKEN cannot write a
+#                    package, and the checkout does not persist credentials. A
+#                    PR runs scripts/*.sh FROM THE PR, so it must not hold a
+#                    token that can publish anything.
+#   push/dispatch -> caller grants packages:write and passes publish/cache-write.
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: Space-separated image names from build-graph.json.
+        required: true
+        type: string
+      publish:
+        description: Push sha- and channel tags for the publishable images.
+        default: false
+        type: boolean
+      cache-write:
+        description: Export layer cache (mode=max) as well as importing it.
+        default: false
+        type: boolean
+      kwin-rpms-image:
+        description: >-
+          Published quasar-kwin-rpms ref, or empty to build the RPMs inline in
+          quasar-kde's own Dockerfile (~27 minutes).
+        default: ''
+        type: string
+      benchapp-src-image:
+        description: Override for the benchapp payload image.
+        default: ''
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Layer cache. Import ALWAYS: even a pull request should start from the
+      # layers the last reviewed push produced, and importing needs no
+      # credentials beyond package read. Export only when the caller says so.
+      #
+      # Not the GitHub Actions cache: that expires after 7 days idle, is capped
+      # at 10 GB per repository, and is invisible to the dev boxes. A registry
+      # cache does none of those things and the boxes can point at it.
+      QUASAR_CACHE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+      QUASAR_CACHE_WRITE: ${{ inputs.cache-write && '1' || '0' }}
+      # Exporting cache means a docker-container builder, and such a builder
+      # CANNOT resolve `FROM <local tag>` -- so the intermediate images have to
+      # be registry-resolvable while the chain is being built. These `stage/*`
+      # packages are build scaffolding, not products: nothing outside a run
+      # consumes them, and they are separate from the published packages
+      # precisely so that is obvious. See scripts/build.sh, "the parent problem".
+      QUASAR_IMAGE_REGISTRY: ${{ inputs.cache-write && format('ghcr.io/{0}/stage', github.repository_owner) || '' }}
+      KWIN_RPMS_IMAGE: ${{ inputs.kwin-rpms-image }}
+      BENCHAPP_SRC_IMAGE: ${{ inputs.benchapp-src-image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch-depth 0 so a release tag can be checked against stable.
+          fetch-depth: ${{ startsWith(github.ref, 'refs/tags/v') && 0 || 1 }}
+          persist-credentials: false
+
+      # BEFORE the build, not after. The build itself pulls from ghcr (the layer
+      # cache, and the kwin artefact), so logging in afterwards -- as the publish
+      # job used to -- only worked while every package happened to be public. A
+      # single package being flipped private would have broken the build with an
+      # authorization error that pointed nowhere near the cause.
+      #
+      # This is a READ login on a pull request: the caller granted packages:read
+      # only, so the same step cannot publish anything there.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate the build graph
+        run: ./scripts/build.sh check
+
+      - name: Build
+        env:
+          IMAGES: ${{ inputs.images }}
+        run: |
+          set -euo pipefail
+          for image in $IMAGES; do
+            echo "::group::build $image"
+            ./scripts/build.sh "$image"
+            echo "::endgroup::"
+          done
+
+      # Every image's verify scripts come from build-graph.json, so wiring a new
+      # one in is a data edit. verify-benchapp.sh and verify-unigine.sh existed
+      # for months with nothing running them; that cannot recur, because an
+      # image's verify list is read from the same place its build args are.
+      - name: Verify
+        env:
+          IMAGES: ${{ inputs.images }}
+        run: |
+          set -euo pipefail
+          for image in $IMAGES; do
+            echo "::group::verify $image"
+            ./scripts/build.sh verify "$image"
+            echo "::endgroup::"
+          done
+
+      - name: Publish immutable and channel tags
+        if: inputs.publish
+        env:
+          REGISTRY: ghcr.io
+          OWNER: ${{ github.repository_owner }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          IMAGES: ${{ inputs.images }}
+        run: |
+          set -euo pipefail
+          # channels[] is every MOVING tag this run publishes. The immutable
+          # sha- tag is always published alongside them and is what
+          # release-manifest pinning and quasar-manifest.json reference.
+          #
+          # Branch and tag names are distinguished by ref_type, never by
+          # pattern: a branch called "vulkan-fix" must not be mistaken for a
+          # release and publish a ":ulkan-fix" channel over :latest.
+          if [ "$REF_TYPE" = tag ]; then
+            if ! printf '%s' "$REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Invalid release tag: $REF_NAME (want vX.Y.Z)" >&2; exit 64
+            fi
+            v="${REF_NAME#v}"
+            channels=("$v" "${v%.*}" latest)
+          else
+            case "$REF_NAME" in
+              develop) channels=(develop) ;;
+              stable)  channels=(latest) ;;
+              *) echo "Publishing is limited to develop, stable and vX.Y.Z tags; got $REF_NAME" >&2; exit 64 ;;
+            esac
+          fi
+          sha_tag="sha-${SHA:0:12}"
+
+          # WHICH images are published is build-graph.json's `publish` flag, not
+          # a list in this file. The two used to be maintained separately.
+          publishable="$(./scripts/graph.sh set publish)"
+          for image in $IMAGES; do
+            if ! printf '%s\n' "$publishable" | grep -qxF "$image"; then
+              echo "skipping $image -- publish=false in build-graph.json"
+              continue
+            fi
+            remote="$REGISTRY/$OWNER/$image"
+            # Push the immutable tag ONCE, then add every moving channel tag as
+            # a registry-side manifest copy. A `docker tag` + `docker push` per
+            # channel re-walks and re-verifies each layer, and that burst across
+            # several images tripped GitHub's secondary rate limit (403) on the
+            # first real publish. imagetools copies the manifest only.
+            docker tag "$image:dev" "$remote:$sha_tag"
+            docker push "$remote:$sha_tag"
+            for channel_tag in "${channels[@]}"; do
+              docker buildx imagetools create --tag "$remote:$channel_tag" "$remote:$sha_tag"
+            done
+          done
+
+      # Accelerated images intentionally are not started here. Their entrypoint
+      # requires an assigned Vulkan UUID and is validated on Tower and Hermes.
