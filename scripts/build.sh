@@ -19,28 +19,42 @@
 # and gains nothing from an external one. CI is the opposite case: every runner
 # is cold, which is the whole reason this exists.
 #
-#   QUASAR_CACHE_REGISTRY=ghcr.io/accretion-io   import <image>:buildcache
-#   QUASAR_CACHE_DIR=/path                       import a local cache directory
-#   QUASAR_CACHE_WRITE=1                         also EXPORT (mode=max)
+#   QUASAR_CACHE_REGISTRY=ghcr.io/accretion-io   <image>:buildcache refs
+#   QUASAR_CACHE_DIR=/path                       a local cache directory
+#   QUASAR_CACHE_WRITE=1                         EXPORT as well as import
+#   QUASAR_IMAGE_REGISTRY=ghcr.io/accretion-io   see "the parent problem" below
 #   QUASAR_BUILDER=quasar-images                 buildx builder name
-#   QUASAR_BUILDX=1                              use buildx even with no cache
 #
-# Either cache knob switches the build to `docker buildx build` on a
-# docker-container builder, because `--cache-to type=registry|local` is not
-# supported by the default `docker` driver AT ALL (it fails the build; it does
-# not degrade). The docker-container driver in turn does not write to the local
-# image store, so every build gets an explicit `--load` -- without it
-# `./scripts/build.sh quasar-base && ./scripts/verify.sh` would pass the build
-# and then fail on `docker image inspect quasar-base:dev`, because the image
-# would exist only inside the builder. That combination (container driver +
-# registry cache + no --load) is the trap this replaces: PR #25 wired the cache
-# flags into a `docker build` that could never accept them, from a function
-# nothing called.
+# IMPORT is cheap and works on the ordinary `docker` driver, so cache-read alone
+# changes nothing else. That is the pull-request path: read the cache the last
+# reviewed push wrote, write nothing.
 #
-# mode=max exports intermediate stage layers, not just the final image's. For
-# this repo that IS the point: every expensive layer -- the Steam 32-bit
-# closure, the bwrap and gamescope source builds, the kwin rpmbuild -- lives in
-# a stage that mode=min would not export.
+# EXPORT (mode=max) is the valuable half -- it is what puts INTERMEDIATE stage
+# layers in the cache, and every expensive layer here (the Steam 32-bit closure,
+# the bwrap and gamescope source builds, the kwin rpmbuild) lives in a stage that
+# a mode=min/inline cache would not export at all. `--cache-to type=registry` is
+# not supported by the `docker` driver, so exporting means a docker-container
+# builder.
+#
+# THE PARENT PROBLEM, and it is the reason PR #25's version could not have
+# worked. A docker-container builder cannot resolve a `FROM` against the local
+# docker image store. `FROM quasar-base:dev` inside it fails with
+#
+#   ERROR: failed to solve: quasar-base:dev: failed to resolve source metadata
+#   for docker.io/library/quasar-base:dev: pull access denied
+#
+# no matter how recently `--load` put that image in the store -- reproduced on
+# the devbox, 2026-08-26. Every image in this repo except quasar-base builds
+# `FROM` a sibling, so a container builder needs those siblings to be
+# REGISTRY-resolvable. QUASAR_IMAGE_REGISTRY is that: with it set, each image is
+# loaded locally (so the verify scripts still work) AND pushed to
+# <registry>/<image>:<tag>, and graph.sh resolves every `@tag:` parent to the
+# same ref. Export therefore REQUIRES it, and build.sh refuses the combination
+# without it rather than failing four minutes later inside BuildKit.
+#
+# `--load` is not optional either: the container driver does not populate the
+# local image store, so without it the build would pass and `./scripts/verify.sh`
+# would then fail on `docker image inspect quasar-base:dev`.
 
 set -euo pipefail
 
@@ -52,9 +66,19 @@ graph() { "$SCRIPT_DIR/graph.sh" "$@"; }
 
 tag="${QUASAR_IMAGE_TAG:-dev}"
 builder="${QUASAR_BUILDER:-quasar-images}"
+registry="${QUASAR_IMAGE_REGISTRY:-}"
 
-cache_active() { [ -n "${QUASAR_CACHE_REGISTRY:-}${QUASAR_CACHE_DIR:-}" ]; }
-use_buildx()   { cache_active || [ "${QUASAR_BUILDX:-0}" = 1 ]; }
+cache_read()  { [ -n "${QUASAR_CACHE_REGISTRY:-}${QUASAR_CACHE_DIR:-}" ]; }
+cache_write() { cache_read && [ "${QUASAR_CACHE_WRITE:-0}" = 1 ]; }
+# Only cache EXPORT forces the container builder; import works on the plain
+# driver, which keeps the cheap path free of the parent problem entirely.
+use_buildx()  { cache_write || [ "${QUASAR_BUILDX:-0}" = 1 ]; }
+
+if cache_write && [ -z "$registry" ]; then
+  echo "build.sh: QUASAR_CACHE_WRITE needs QUASAR_IMAGE_REGISTRY -- a container" >&2
+  echo "          builder cannot resolve 'FROM <local tag>'. See the header." >&2
+  exit 78
+fi
 
 ensure_builder() {
   if docker buildx inspect "$builder" >/dev/null 2>&1; then return 0; fi
@@ -63,9 +87,9 @@ ensure_builder() {
 }
 
 # Cache refs are PER IMAGE, not one shared ref. With a single shared ref each
-# image's export overwrites the previous one's manifest, so the last image built
-# would be the only one with a usable cache -- the failure mode that makes a "we
-# added caching" change quietly do nothing.
+# image's export overwrites the previous image's manifest, leaving only the last
+# image built with a usable cache -- caching that looks wired up and does
+# nothing.
 cache_flags() {
   local image="$1"
   if [ -n "${QUASAR_CACHE_REGISTRY:-}" ]; then
@@ -75,7 +99,7 @@ cache_flags() {
     fi
   fi
   if [ -n "${QUASAR_CACHE_DIR:-}" ]; then
-    # Importing a local cache dir that does not exist yet is a hard BuildKit
+    # Importing a cache directory that does not exist yet is a hard BuildKit
     # error, not a miss -- so the first ever run must not pass --cache-from.
     if [ -d "$QUASAR_CACHE_DIR/$image" ]; then
       printf -- '--cache-from\ntype=local,src=%s/%s\n' "$QUASAR_CACHE_DIR" "$image"
@@ -86,6 +110,17 @@ cache_flags() {
     fi
   fi
   return 0
+}
+
+# Publish the just-built image under its registry ref so the NEXT image in the
+# chain can `FROM` it from inside the container builder. Cheap against a
+# registry that already holds the layers; the publish workflow pushes the same
+# content again under its release tags, and both are manifest-level work.
+push_parent_ref() {
+  local image="$1"
+  docker tag "$image:$tag" "$registry/$image:$tag"
+  docker push -q "$registry/$image:$tag" >/dev/null
+  echo "build.sh: pushed parent ref $registry/$image:$tag" >&2
 }
 
 # ── The benchapp payload ──────────────────────────────────────────────────────
@@ -133,17 +168,19 @@ build_one() {
     flags+=(--build-arg "$kv")
   done < <(graph args "$image")
 
+  local cf=()
+  while IFS= read -r kv; do
+    if [ -n "$kv" ]; then cf+=("$kv"); fi
+  done < <(cache_flags "$image")
+
   if use_buildx; then
     ensure_builder
-    local cf=()
-    while IFS= read -r kv; do
-      if [ -n "$kv" ]; then cf+=("$kv"); fi
-    done < <(cache_flags "$image")
     echo "build.sh: buildx $image:$tag ${cf[*]:-(no cache)}" >&2
     docker buildx build --builder "$builder" --load --progress=plain \
       ${cf[@]+"${cf[@]}"} "${flags[@]}" .
+    if [ -n "$registry" ]; then push_parent_ref "$image"; fi
   else
-    DOCKER_BUILDKIT=1 docker build --progress=plain "${flags[@]}" .
+    DOCKER_BUILDKIT=1 docker build --progress=plain ${cf[@]+"${cf[@]}"} "${flags[@]}" .
   fi
 }
 

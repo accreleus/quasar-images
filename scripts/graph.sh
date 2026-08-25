@@ -86,7 +86,14 @@ _resolve() {
   local raw="$1" tag="${QUASAR_IMAGE_TAG:-dev}"
   case "$raw" in
     '@version')  tr -d '[:space:]' < "$REPO_ROOT/VERSION" ;;
-    '@tag:'*)    printf '%s:%s' "${raw#@tag:}" "$tag" ;;
+    # A parent image reference. It carries $QUASAR_IMAGE_REGISTRY when one is
+    # set, because a buildx docker-container builder CANNOT resolve a `FROM`
+    # against the local docker image store -- `FROM quasar-base:dev` fails there
+    # with "pull access denied ... docker.io/library/quasar-base:dev" no matter
+    # how recently `--load` put it in the store. So the moment builds move to a
+    # container builder (which registry cache export requires), parents have to
+    # be registry-resolvable. See scripts/build.sh, "Layer cache".
+    '@tag:'*)    printf '%s%s:%s' "${QUASAR_IMAGE_REGISTRY:+${QUASAR_IMAGE_REGISTRY}/}" "${raw#@tag:}" "$tag" ;;
     '@env:'*)
       # Separate `local`s deliberately: within ONE `local a=... b=$a`, $a is not
       # yet in scope when b is expanded (shellcheck SC2318).
