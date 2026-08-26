@@ -1,0 +1,92 @@
+<?xml version="1.1" encoding="UTF-8"?>
+<!--
+  Baked default panel layout for the Quasar XFCE session.
+
+  WHY THIS PATH: xfconfd loads $XDG_CONFIG_DIRS/xfce4/xfconf/xfce-perchannel-xml/
+  <channel>.xml as READ-ONLY system defaults and $XDG_CONFIG_HOME/... as the
+  user's own store, with the user store winning property-by-property. Anything a
+  user changes in Panel Preferences is written to $HOME and survives; this file
+  only supplies the initial state. Fedora already ships xfce4-session.xml,
+  xfce4-keyboard-shortcuts.xml and xsettings.xml in the same directory -- this
+  adds the xfce4-panel channel next to them rather than replacing any of them.
+
+  It also pre-empts /etc/xdg/xfce4/panel/default.xml, the template xfce4-panel
+  copies when the xfce4-panel channel has no /panels property at all. Fedora's
+  default.xml builds a two-panel Xubuntu-style layout around applicationsmenu;
+  with this channel populated the panel uses these properties instead.
+
+  Layout is deliberately minimal for a streamed session: one bottom panel with
+  the Whisker menu (branded with the Quasar mark), a window list, the
+  notification area and a clock. No pulseaudio plugin (xfce4-pulseaudio-plugin
+  is not installed -- audio is handled by the stream, not by a tray applet), no
+  docklike plugin (not packaged in the image), no power/battery plugins (there
+  is no battery in a container).
+-->
+<channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="dark-mode" type="bool" value="true"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=8;x=960;y=1058"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="icon-size" type="uint" value="28"/>
+      <property name="size" type="uint" value="42"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+        <value type="int" value="4"/>
+        <value type="int" value="5"/>
+        <value type="int" value="6"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <!-- Whisker menu: the application launcher, branded with the Quasar mark.
+         button-icon resolves through the icon theme, so "quasar" picks up
+         /usr/share/icons/hicolor/{scalable,256x256}/apps/quasar.{svg,png}
+         shipped by this image. show-command-lockscreen is off: there is no
+         screen locker in the image and no local display to lock. -->
+    <property name="plugin-1" type="string" value="whiskermenu">
+      <property name="button-icon" type="string" value="quasar"/>
+      <property name="button-title" type="string" value="Quasar"/>
+      <property name="show-button-title" type="bool" value="false"/>
+      <property name="view-mode" type="int" value="0"/>
+      <property name="favorites" type="array">
+        <value type="string" value="steam.desktop"/>
+        <value type="string" value="org.gnome.Software.desktop"/>
+        <value type="string" value="xfce4-terminal.desktop"/>
+        <value type="string" value="thunar.desktop"/>
+        <value type="string" value="org.xfce.mousepad.desktop"/>
+      </property>
+      <property name="show-command-lockscreen" type="bool" value="false"/>
+      <property name="show-command-switchuser" type="bool" value="false"/>
+      <property name="show-command-suspend" type="bool" value="false"/>
+      <property name="show-command-hibernate" type="bool" value="false"/>
+      <property name="show-command-shutdown" type="bool" value="false"/>
+      <property name="show-command-restart" type="bool" value="false"/>
+      <property name="show-command-logout" type="bool" value="false"/>
+      <property name="show-command-menueditor" type="bool" value="false"/>
+      <property name="show-command-profile" type="bool" value="false"/>
+    </property>
+    <property name="plugin-2" type="string" value="tasklist">
+      <property name="grouping" type="uint" value="1"/>
+      <property name="show-handle" type="bool" value="false"/>
+    </property>
+    <property name="plugin-3" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-4" type="string" value="systray">
+      <property name="square-icons" type="bool" value="true"/>
+    </property>
+    <property name="plugin-5" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-6" type="string" value="clock">
+      <property name="digital-layout" type="uint" value="3"/>
+    </property>
+  </property>
+</channel>

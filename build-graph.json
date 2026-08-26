@@ -129,6 +129,20 @@
       "notes": "KWIN_RPMS_IMAGE=kwin-rpms names the LOCAL stage in the same Dockerfile, i.e. build the RPMs here (~27 min). CI points it at the published quasar-kwin-rpms artefact instead."
     },
     {
+      "name": "quasar-xfce",
+      "dockerfile": "images/quasar-xfce/Dockerfile",
+      "needs": ["quasar-steam-runtime"],
+      "tier": "leaf",
+      "args": {
+        "STEAM_RUNTIME_IMAGE": "@tag:quasar-steam-runtime",
+        "VERSION": "@version"
+      },
+      "verify": ["scripts/verify-xfce.sh"],
+      "ci": true,
+      "publish": true,
+      "notes": "The X11 sibling of quasar-kde: an XFCE 4 session on a rootful Xwayland nested under the Quasar compositor, since there is no Wayland XFCE session. No KWIN_RPMS_IMAGE equivalent -- xfwm4 is the stock distro build, so this leaf is an ordinary FROM quasar-steam-runtime with no artefact dependency. publish=true states the intent; nothing on develop publishes (see the workflow's PUBLISHING MODEL), and the first real publish is the operator-gated stable batch that must ALSO add the xfce-desktop entry to quasar-manifest.json -- a published image with no catalog entry is one the control plane cannot launch."
+    },
+    {
       "name": "quasar-benchapp",
       "dockerfile": "images/quasar-benchapp/Dockerfile",
       "needs": ["quasar-app"],
