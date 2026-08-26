@@ -48,6 +48,27 @@
       "notes": "no_new_privileges MUST be false: the bundled Steam desktop client's startup re-escalates via sudo, same as the steam image. network MUST be \"bridge\" (Steam sign-in/downloads). systempaths_unconfined MUST be true: user Flatpak's bwrap mounts a fresh /proc inside its own mount namespace, and Docker's masked paths block that mount even with seccomp=unconfined already in place — flatpak install works but flatpak run fails mounting /proc without it (live-verified 2026-08-13). Desktop-session host requirements beyond the preset (agent-side, not yet preset-mappable): unprivileged user namespaces (seccomp permitting CLONE_NEWUSER — the agent's seccomp=unconfined covers it). One running session per home volume (org.quasar.image.session=desktop)."
     },
     {
+      "id": "xfce-desktop",
+      "display_name": "XFCE Desktop",
+      "description": "XFCE 4 X11 desktop session with the Steam desktop client, user-level Flatpak (gnome-software), Firefox, and Quasar branding. Runs a rootful Xwayland nested under the Quasar compositor (there is no Wayland XFCE session); the whole mutable state lives in the /home/quasar volume (org.quasar.image.persist). Needs a host --shm-size bump and PUID/PGID matching the managed home, like Steam.",
+      "kind": "prebuilt",
+      "version": "2026.08.26",
+      "registry_ref": "ghcr.io/accretion-io/quasar-xfce@sha256:2c9c47f70233296883e339460df47b70de44e33fbda25ed4bbc24781f9f663a5",
+      "runtime": {
+        "preset_name": "XFCE Desktop",
+        "gpu": true,
+        "no_new_privileges": false,
+        "systempaths_unconfined": true,
+        "managed_home": true,
+        "home_container_path": "/home/quasar",
+        "network": "bridge",
+        "args": [],
+        "env": {},
+        "mounts": []
+      },
+      "notes": "no_new_privileges MUST be false: the bundled Steam desktop client's startup re-escalates via sudo, same as the steam and kde-desktop images. network MUST be \"bridge\" (Steam sign-in/downloads). systempaths_unconfined MUST be true: user Flatpak's bwrap mounts a fresh /proc inside its own mount namespace, and Docker's masked paths block that mount even with seccomp=unconfined already in place — flatpak install works but flatpak run fails mounting /proc without it (live-verified 2026-08-13 on kde-desktop; the same Flatpak stack ships here). Desktop-session host requirements beyond the preset (agent-side, not yet preset-mappable): unprivileged user namespaces (seccomp permitting CLONE_NEWUSER — the agent's seccomp=unconfined covers it). One running session per home volume (org.quasar.image.session=desktop). Resolution is deliberately absent from env: the launcher takes the session mode from QUASAR_STREAM_WIDTH/HEIGHT (quasar#384) and sizes the rootful Xwayland with -geometry, so a pinned value here would shadow it for every session."
+    },
+    {
       "id": "quasar-probe",
       "display_name": "Quasar Probe (template)",
       "description": "Minimal template image used to validate the P4 agent-side build path. FROM alpine, no package installs — builds in seconds. Not a production app; safe to install/uninstall as a mechanism check.",
