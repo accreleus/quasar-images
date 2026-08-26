@@ -254,6 +254,24 @@ scaffolding written by publishing runs to satisfy constraint (2) above — the
 intermediate images a container builder has to resolve `FROM` against. Nothing
 outside a run consumes them; they are a separate namespace so that is obvious.
 
+## Cross-image gotchas from investigation records
+
+Not every dead end gets its own image. `docs/specs/2026-08-15-quasar-gnome-blocked.md`
+is a decision record (quasar-gnome will not ship on Fedora 43 — mutter's only
+nested backend is compiled out when x11 support is off), but two of its findings
+are load-bearing for every other image in this repo, not just GNOME:
+
+- **The login1 blocker.** Any Wayland session in this family that talks to
+  `org.freedesktop.login1` (gnome-shell did) hard-fails while
+  `/run/systemd/seats` exists — and it exists in our base image, shipped by the
+  systemd RPM. `rmdir /run/systemd/seats` is the fix if a future session hits it.
+- **`waylandsink` rejects an absolute `WAYLAND_DISPLAY`.** It needs
+  `XDG_RUNTIME_DIR` plus a relative socket name — the exact opposite of the
+  absolute-path convention `quasar-kde`, `quasar-steam`, `quasar-benchapp`, and
+  `quasar-unigine` all resolve to first (see each launcher's `WAYLAND_DISPLAY`
+  handling). Anyone wiring a GStreamer sink directly against the parent
+  compositor socket will lose time to this if they don't know it going in.
+
 ## Verify scripts
 
 `scripts/verify*.sh` are structural, not functional: they assert labels,
