@@ -43,7 +43,7 @@
     "non-image byproduct (see the kwin RPMs)."
   ],
   "schema": 1,
-  "registry": "ghcr.io/accretion-io",
+  "registry": "ghcr.io/accreleus",
   "images": [
     {
       "name": "quasar-kwin-rpms",

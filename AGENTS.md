@@ -101,7 +101,7 @@ is cold, which is the whole reason the knobs exist.
 
 | variable | effect |
 |---|---|
-| `QUASAR_CACHE_REGISTRY=ghcr.io/accretion-io` | import `<image>:buildcache` |
+| `QUASAR_CACHE_REGISTRY=ghcr.io/accreleus` | import `<image>:buildcache` |
 | `QUASAR_CACHE_DIR=/path` | import a local cache directory |
 | `QUASAR_CACHE_WRITE=1` | export as well (`mode=max`) |
 | `QUASAR_IMAGE_REGISTRY=…` | required by export — see below |
@@ -152,7 +152,7 @@ The RPMs are bit-identical whenever their inputs are, so they are an artefact:
   builddep` resolves against whatever that base offers on the day.
 - `KWIN_RPMS_IMAGE` selects the source. The default, `kwin-rpms`, resolves to the
   **local stage in the same Dockerfile**, so an ordinary local build is exactly
-  what it always was. Point it at `ghcr.io/accretion-io/quasar-kwin-rpms:<tag>`
+  what it always was. Point it at `ghcr.io/accreleus/quasar-kwin-rpms:<tag>`
   and BuildKit never instantiates the rpmbuild stages at all.
 
 Inside the build the work is split across two stages so their cache keys cover
@@ -170,7 +170,7 @@ cost this image is knowingly signed up for; it should not also cost that.
 ```sh
 ./scripts/kwin-artifact-tag.sh --explain   # what is hashed, and the tag
 ./scripts/build.sh quasar-kwin-rpms        # build the artefact on its own
-KWIN_RPMS_IMAGE=ghcr.io/accretion-io/quasar-kwin-rpms:<tag> \
+KWIN_RPMS_IMAGE=ghcr.io/accreleus/quasar-kwin-rpms:<tag> \
   ./scripts/build.sh quasar-kde            # consume it
 ```
 
@@ -181,18 +181,18 @@ running the workflow on a branch that may write packages.
 ## The benchapp payload
 
 `quasar-benchapp` lifts its binary out of another image whose source is the
-separate, private `accretion-io/quasar-mark` repo. `scripts/build.sh` resolves
+separate, private `accreleus/quasar-mark` repo. `scripts/build.sh` resolves
 which image:
 
 1. `$BENCHAPP_SRC_IMAGE` — explicit override, always wins.
 2. `quasar-benchapp:src` — a local build, if present. **The devbox loop**: build
    it in a quasar-mark checkout, then build here. Kept deliberately so iterating
    on the probe never has to go through a publish.
-3. `ghcr.io/accretion-io/quasar-benchapp-src:latest` — the clean-runner path.
+3. `ghcr.io/accreleus/quasar-benchapp-src:latest` — the clean-runner path.
 
 **Operator prerequisite for (3):** that GHCR package is private by default.
 Until it is made public, or granted **Read** access for the
-`accretion-io/quasar-images` repository (package → Package settings → *Manage
+`accreleus/quasar-images` repository (package → Package settings → *Manage
 Actions access*), this repo's Actions token cannot pull it and the benchapp leg
 of CI fails on the pull. No secret needs creating for that route.
 
@@ -249,7 +249,7 @@ works.
 Cache **write** is likewise publish-only: a pull request must never be able to
 poison what `stable` later builds from.
 
-`stage/*` packages (`ghcr.io/accretion-io/stage/quasar-base`, …) are build
+`stage/*` packages (`ghcr.io/accreleus/stage/quasar-base`, …) are build
 scaffolding written by publishing runs to satisfy constraint (2) above — the
 intermediate images a container builder has to resolve `FROM` against. Nothing
 outside a run consumes them; they are a separate namespace so that is obvious.
