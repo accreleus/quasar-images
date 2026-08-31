@@ -42,7 +42,7 @@ images do — it keeps the node-agent's handover exactly as given.
 ## Build
 
 The payload comes from the separate `quasar-benchgame` repo, published (private) at
-https://github.com/accretion-io/quasar-mark, so the build is two steps:
+https://github.com/accreleus/quasar-mark, so the build is two steps:
 
 ```sh
 # 1. in a quasar-mark checkout

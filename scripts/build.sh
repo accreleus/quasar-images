@@ -19,10 +19,10 @@
 # and gains nothing from an external one. CI is the opposite case: every runner
 # is cold, which is the whole reason this exists.
 #
-#   QUASAR_CACHE_REGISTRY=ghcr.io/accretion-io   <image>:buildcache refs
+#   QUASAR_CACHE_REGISTRY=ghcr.io/accreleus   <image>:buildcache refs
 #   QUASAR_CACHE_DIR=/path                       a local cache directory
 #   QUASAR_CACHE_WRITE=1                         EXPORT as well as import
-#   QUASAR_IMAGE_REGISTRY=ghcr.io/accretion-io   see "the parent problem" below
+#   QUASAR_IMAGE_REGISTRY=ghcr.io/accreleus   see "the parent problem" below
 #   QUASAR_BUILDER=quasar-images                 buildx builder name
 #
 # IMPORT is cheap and works on the ordinary `docker` driver, so cache-read alone
@@ -126,7 +126,7 @@ push_parent_ref() {
 # ── The benchapp payload ──────────────────────────────────────────────────────
 #
 # images/quasar-benchapp/Dockerfile lifts its binary from another image. That
-# image's source is github.com/accretion-io/quasar-mark, a SEPARATE (private)
+# image's source is github.com/accreleus/quasar-mark, a SEPARATE (private)
 # repo, so `build.sh all` on a clean runner had no way to produce it and failed
 # on `FROM quasar-benchapp:src` -- which is why CI never built this image.
 #
@@ -141,7 +141,7 @@ push_parent_ref() {
 #
 # See AGENTS.md, "The benchapp payload", for the GHCR package-read prerequisite
 # on (3).
-BENCHAPP_SRC_FALLBACK="${BENCHAPP_SRC_FALLBACK:-ghcr.io/accretion-io/quasar-benchapp-src:latest}"
+BENCHAPP_SRC_FALLBACK="${BENCHAPP_SRC_FALLBACK:-ghcr.io/accreleus/quasar-benchapp-src:latest}"
 resolve_benchapp_src() {
   [ -z "${BENCHAPP_SRC_IMAGE:-}" ] || return 0
   if docker image inspect quasar-benchapp:src >/dev/null 2>&1; then

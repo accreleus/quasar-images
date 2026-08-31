@@ -8,7 +8,7 @@
 # which is exactly the signal this image exists to measure.
 #
 # The payload is built from the separate, private
-# https://github.com/accretion-io/quasar-mark repo (formerly `quasar-benchgame`)
+# https://github.com/accreleus/quasar-mark repo (formerly `quasar-benchgame`)
 # and lifted from an image rather than fetched or vendored here.
 #
 # WHERE THAT IMAGE COMES FROM is scripts/build.sh's decision, not this file's --
