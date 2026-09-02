@@ -272,6 +272,42 @@ are load-bearing for every other image in this repo, not just GNOME:
   handling). Anyone wiring a GStreamer sink directly against the parent
   compositor socket will lose time to this if they don't know it going in.
 
+## Devices and the uid/gid drop
+
+`quasar-entrypoint` drops to the application user with `setpriv --reuid --regid
+--init-groups`, and **`--init-groups` rebuilds the supplementary group set from
+`/etc/group`** (initgroups(3)). Every gid the host granted the container —
+`docker run --group-add <gid>`, which is how the node-agent passes the host's
+`render`/`video` gids alongside `--device /dev/dri` — is therefore **discarded at
+the drop**. The container's root process could open the device; the application
+cannot.
+
+That is not a hypothetical either: it shipped. `quasar-steam` on an AMD host
+with 0660 DRM nodes enumerated only `llvmpipe` as uid 1000, so gamescope aborted
+on the missing `VK_EXT_physical_device_drm` and the app exited 1 — while the
+container's own GPU contract check reported `"result":"pass"`, because it ran
+pre-drop as root and root holds `CAP_DAC_OVERRIDE`.
+
+Two rules follow, and both are now mechanism rather than advice:
+
+1. **A device the app must open needs the app user to be a MEMBER of its owning
+   group before the drop** — `overlay/etc/quasar/init.d/10-dri-device-groups.sh`
+   does that for `/dev/dri/*` (groupadd by gid when the host's gid has no name
+   in the container, then `usermod -aG`). Membership, not
+   `setpriv --keep-groups`: it keeps the drop's semantics for everything else,
+   and `id` inside the container then names what it has. **gid 0 is never
+   granted** — a 0660 root:root node is a misconfigured host and stays broken
+   and logged.
+2. **Anything that checks what the application can do must run post-drop.** The
+   GPU probe now runs under the same `setpriv` as the command does. A check that
+   runs as root cannot fail the way a session fails, and one that cannot fail
+   reads as cover.
+
+The other device path in this family, `15-input-device-perms.sh`, solves the
+same class of problem the other way (it opens gamepad nodes to 0666) because
+those nodes are created root-owned inside the container and have no meaningful
+host group to join.
+
 ## Verify scripts
 
 `scripts/verify*.sh` are structural, not functional: they assert labels,
