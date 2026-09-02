@@ -69,4 +69,40 @@ docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   [[ "$(stat -c %a /dev/input/event9)" == 600 ]] # joystick+keyboard combo: untouched
 '
 
+# DRI device-group hook: the app user must END UP a member of each /dev/dri
+# node's owning group, because the uid/gid drop uses `setpriv --init-groups`,
+# which rebuilds the supplementary set from /etc/group and therefore discards
+# the gids Docker granted via `--group-add`. Without membership the app runs as
+# uid 1000 with no access to renderD*, Vulkan falls back to llvmpipe, and
+# gamescope aborts on the missing VK_EXT_physical_device_drm.
+#
+# gid 0 is the deliberate exception: a 0660 root:root node is a misconfigured
+# host and must stay broken rather than be papered over by handing the app user
+# root-group membership.
+docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
+  set -euo pipefail
+  mkdir -p /dev/dri
+  mknod /dev/dri/renderD128 c 226 128 && chown 0:991 /dev/dri/renderD128 && chmod 0660 /dev/dri/renderD128
+  mknod /dev/dri/card0      c 226 0   && chown 0:0   /dev/dri/card0      && chmod 0660 /dev/dri/card0
+  mknod /dev/dri/renderD129 c 226 129 && chown 0:995 /dev/dri/renderD129 && chmod 0666 /dev/dri/renderD129
+  /etc/quasar/init.d/10-dri-device-groups.sh
+  groups="$(id -nG quasar)"
+  grep -qw quasar-dri-991 <<<"$groups"          # 0660 root:<gid 991> -> granted
+  if grep -qw root <<<"$groups"; then           # gid 0 -> NEVER granted
+    echo "FAIL: the app user was granted root-group membership" >&2; exit 1
+  fi
+  if getent group 995 >/dev/null; then          # world-rw -> nothing to grant
+    echo "FAIL: a group was created for a world-rw node" >&2; exit 1
+  fi
+  rm -rf /dev/dri                               # no /dev/dri at all -> no-op
+  /etc/quasar/init.d/10-dri-device-groups.sh
+'
+# The GPU contract check must observe what the APPLICATION observes. Run as
+# root it holds CAP_DAC_OVERRIDE and opens a 0660 DRM node whatever its group
+# is, so it reported `"result":"pass"` on hosts where the app user then got
+# llvmpipe -- a check that reads as cover.
+assert_grep 'setpriv .*--init-groups -- /usr/local/bin/quasar-gpu-probe' \
+  overlay/usr/local/bin/quasar-entrypoint \
+  "the GPU probe must run post-drop as the app user, not as root: as root it cannot fail the way a session fails"
+
 echo "quasar-base lifecycle checks passed"
