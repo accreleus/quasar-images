@@ -74,8 +74,16 @@ if [[ "$(id -u)" == "0" ]]; then
   if [[ -x /usr/local/bin/quasar-gpu-init ]]; then
     /usr/local/bin/quasar-gpu-init
   fi
+  # The probe runs AS THE APPLICATION USER, not as root. As root it answered a
+  # question nobody asked: root has CAP_DAC_OVERRIDE and opens a 0660 DRM node
+  # whatever its group is, so the probe passed on hosts where the app user could
+  # not open /dev/dri at all and the session then software-rendered (or, under
+  # gamescope, aborted on the missing VK_EXT_physical_device_drm). Dropping the
+  # same way the real command does — after the init hooks, so it also proves
+  # 10-dri-device-groups.sh did its job — makes the contract check observe what
+  # the application will observe.
   if [[ -x /usr/local/bin/quasar-gpu-probe && "${QUASAR_GPU_PROBE_ON_STARTUP:-1}" == "1" ]]; then
-    /usr/local/bin/quasar-gpu-probe
+    setpriv --reuid="$PUID" --regid="$PGID" --init-groups -- /usr/local/bin/quasar-gpu-probe
   fi
 
   printf '{"event":"quasar-base.ready","uid":%s,"gid":%s,"home":"%s"}\n' "$PUID" "$PGID" "$HOME" >&2
