@@ -1,0 +1,19 @@
+<?xml version="1.1" encoding="UTF-8"?>
+<!--
+  System default: xfwm4's own compositor is off.
+
+  The Quasar host compositor already composites the stream. With xfwm4's
+  compositor on, the second launch into a home kills the session on NVIDIA
+  (SIGSEGV, rc=139: no GLX_EXT_texture_from_pixmap under this rootful Xwayland)
+  and blanks the desktop on AMD.
+
+  This seeds a NEW home. It cannot fix an existing one: xfconf lets the per-user
+  file win property by property, and a `locked="*"` here was tested and did not
+  override a user value of true. Homes that already hold use_compositing=true are
+  corrected by the start script (quasar-xfce) before the session starts.
+-->
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="false"/>
+  </property>
+</channel>

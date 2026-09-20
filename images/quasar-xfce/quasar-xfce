@@ -336,6 +336,18 @@ log "X display :0 ready (rootful Xwayland pid $xwayland_pid)"
 # session_pid below is dbus-run-session itself, with xfce4-session as its direct
 # child (see the shutdown relay above for the measured process tree and why a
 # single TERM to this pid is the right relay).
+# xfwm4 must never start its own compositor here: the Quasar host compositor
+# already composites the stream, and under this rootful Xwayland xfwm4's GLX
+# compositor kills the session on NVIDIA (SIGSEGV, rc=139) and blanks the desktop
+# on AMD. The system default (/etc/xdg/.../xfwm4.xml) covers a new home, but
+# xfconf lets a per-user value win, and a home that ran an older image already
+# holds use_compositing=true. Correct that one property before xfconfd reads it.
+xfwm4_user="${XDG_CONFIG_HOME:-$HOME/.config}/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
+if [[ -f "$xfwm4_user" ]] && grep -q 'name="use_compositing" type="bool" value="true"' "$xfwm4_user"; then
+  sed -i 's/name="use_compositing" type="bool" value="true"/name="use_compositing" type="bool" value="false"/' "$xfwm4_user"
+  log "xfwm4 compositing was on in this home; turned it off (the host compositor composites)"
+fi
+
 session=(dbus-run-session -- startxfce4)
 
 if [[ "$shutting_down" == "1" ]]; then

@@ -95,6 +95,12 @@ RUN test -f /etc/xdg/autostart/xfce-polkit.desktop \
 # the file header.
 COPY images/quasar-xfce/overlay/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
 
+# System default: xfwm4 compositing off (accreleus/quasar#273). The Quasar host
+# compositor already composites the stream; xfwm4's own compositor crashes the
+# second launch into a home on NVIDIA and blanks it on AMD. This seeds new homes;
+# the start script corrects homes that already hold use_compositing=true.
+COPY images/quasar-xfce/overlay/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
+
 # Branding: Quasar mark as the Whisker menu / application icon (scalable + 256px
 # raster fallback), same hicolor paths and same source files as quasar-kde.
 COPY images/quasar-xfce/overlay/usr/share/icons/hicolor/scalable/apps/quasar.svg /usr/share/icons/hicolor/scalable/apps/quasar.svg
@@ -103,6 +109,7 @@ COPY images/quasar-xfce/overlay/usr/share/icons/hicolor/256x256/apps/quasar.png 
 COPY images/quasar-xfce/quasar-xfce /usr/local/bin/quasar-xfce
 
 RUN chmod 0644 /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \
+      /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
       /usr/share/icons/hicolor/scalable/apps/quasar.svg \
       /usr/share/icons/hicolor/256x256/apps/quasar.png \
     && chmod 0755 /usr/local/bin/quasar-xfce \
