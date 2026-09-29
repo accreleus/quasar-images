@@ -97,6 +97,27 @@ docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   rm -rf /dev/dri                               # no /dev/dri at all -> no-op
   /etc/quasar/init.d/10-dri-device-groups.sh
 '
+# Engine groups (quasar #428): the node-agent names in QUASAR_APP_ENGINE_GROUPS
+# the gids the app user must hold that no --group-add can deliver past the
+# --init-groups drop (gid 0 on rootless Docker). Checked through the real
+# entrypoint, post-drop: named -> held; unset or malformed -> not held.
+engine_groups() {
+  docker run --rm "$@" "$BASE_IMAGE" /bin/sh -c 'id -G'
+}
+held="$(engine_groups -e QUASAR_APP_ENGINE_GROUPS=0,4242)"
+grep -qw 0 <<<"$held" || { echo "FAIL: named gid 0 not held after the drop: $held" >&2; exit 1; }
+grep -qw 4242 <<<"$held" || { echo "FAIL: named gid 4242 not held after the drop: $held" >&2; exit 1; }
+held="$(engine_groups)"
+if grep -qw 0 <<<"$held"; then
+  echo "FAIL: the app user holds gid 0 with QUASAR_APP_ENGINE_GROUPS unset: $held" >&2; exit 1
+fi
+for value in "" "0,x" "0;id" " 0" "-1,0" "0,"; do
+  held="$(engine_groups -e "QUASAR_APP_ENGINE_GROUPS=$value")"
+  if grep -qw 0 <<<"$held"; then
+    echo "FAIL: the app user holds gid 0 from a malformed QUASAR_APP_ENGINE_GROUPS='$value': $held" >&2; exit 1
+  fi
+done
+
 # The GPU contract check must observe what the APPLICATION observes. Run as
 # root it holds CAP_DAC_OVERRIDE and opens a 0660 DRM node whatever its group
 # is, so it reported `"result":"pass"` on hosts where the app user then got

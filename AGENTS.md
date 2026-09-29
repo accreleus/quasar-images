@@ -297,7 +297,12 @@ Two rules follow, and both are now mechanism rather than advice:
    `setpriv --keep-groups`: it keeps the drop's semantics for everything else,
    and `id` inside the container then names what it has. **gid 0 is never
    granted** — a 0660 root:root node is a misconfigured host and stays broken
-   and logged.
+   and logged. The one exception is explicit: `12-engine-groups.sh` adds the
+   app user to each gid the node-agent names in `QUASAR_APP_ENGINE_GROUPS`
+   (strictly comma-separated gids, anything else ignored). The agent sets `0`
+   on rootless Docker only, where gid 0 inside the container is the Quasar
+   account's group, the one host preparation grants input and DRM nodes to
+   (quasar #428). The image never infers gid 0 on its own.
 2. **Anything that checks what the application can do must run post-drop.** The
    GPU probe now runs under the same `setpriv` as the command does. A check that
    runs as root cannot fail the way a session fails, and one that cannot fail
