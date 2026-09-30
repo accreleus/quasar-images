@@ -7,8 +7,8 @@
       "display_name": "Steam",
       "description": "Steam in a game-console experience through nested Gamescope (legacy Big Picture, the games-on-whales-validated game-foreground path). Needs a host --shm-size bump, 32-bit graphics libraries, and PUID/PGID matching the managed home.",
       "kind": "prebuilt",
-      "version": "2026.09.02",
-      "registry_ref": "ghcr.io/accreleus/quasar-steam@sha256:586c67412921821287a5cf68c390aebbaf00fc750ce390170f219b465460bde5",
+      "version": "2026.09.30",
+      "registry_ref": "ghcr.io/accreleus/quasar-steam@sha256:fed599cc1c20dc2d0721d88a815f720c888bdeab1e074ca807879939ef0f3c5d",
       "library_provider": "steam",
       "artwork": {
         "tile": "images/quasar-steam/artwork/tile.png"
@@ -31,8 +31,8 @@
       "display_name": "KDE Desktop",
       "description": "KDE Plasma 6 Wayland desktop session with the Steam desktop client, user-level Flatpak (Discover), and Quasar branding. Runs nested under the Quasar compositor; the whole mutable state lives in the /home/quasar volume (org.quasar.image.persist). Needs a host --shm-size bump and PUID/PGID matching the managed home, like Steam.",
       "kind": "prebuilt",
-      "version": "2026.09.02",
-      "registry_ref": "ghcr.io/accreleus/quasar-kde@sha256:15ef8c29d8a5e5ffa67b6f32e048e406cf886faf64f6fc7d5f4236189fb57298",
+      "version": "2026.09.30",
+      "registry_ref": "ghcr.io/accreleus/quasar-kde@sha256:3796642e93f8dacf08063feec0ffaa38dae8743caa15da64cd51d0c24550e4c5",
       "runtime": {
         "preset_name": "KDE Desktop",
         "gpu": true,
@@ -52,8 +52,8 @@
       "display_name": "XFCE Desktop",
       "description": "XFCE 4 X11 desktop session with the Steam desktop client, user-level Flatpak (gnome-software), Firefox, and Quasar branding. Runs a rootful Xwayland nested under the Quasar compositor (there is no Wayland XFCE session); the whole mutable state lives in the /home/quasar volume (org.quasar.image.persist). Needs a host --shm-size bump and PUID/PGID matching the managed home, like Steam.",
       "kind": "prebuilt",
-      "version": "2026.09.02",
-      "registry_ref": "ghcr.io/accreleus/quasar-xfce@sha256:1a63146fa51c4dcedb70dec05075f087bc5c091ceaa87f357d14211c684c86f8",
+      "version": "2026.09.30",
+      "registry_ref": "ghcr.io/accreleus/quasar-xfce@sha256:604fa552f570a316b568344527846717a756fd15f8656327e6a6f39f6a858c58",
       "runtime": {
         "preset_name": "XFCE Desktop",
         "gpu": true,
