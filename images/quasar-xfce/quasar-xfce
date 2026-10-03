@@ -42,6 +42,7 @@ shutdown_timeout="${QUASAR_XFCE_SHUTDOWN_TIMEOUT:-8}"
 [[ "$shutdown_timeout" =~ ^[0-9]+$ ]] || shutdown_timeout=8
 session_pid=""
 xwayland_pid=""
+bridge_pid=""
 shutting_down=0
 
 # Bounded poll for one pid to disappear. Deliberately NOT escalated to SIGKILL:
@@ -88,6 +89,11 @@ on_term() {
     log "sending SIGTERM to the XFCE session (pid $session_pid, budget ${shutdown_timeout}s)"
     kill -TERM "$session_pid" 2>/dev/null || true
     await_pid_exit "$session_pid" "XFCE session"
+  fi
+
+  # The mode bridge is an X11 client too; it goes before its display server.
+  if [[ -n "$bridge_pid" ]] && kill -0 "$bridge_pid" 2>/dev/null; then
+    kill -TERM "$bridge_pid" 2>/dev/null || true
   fi
 
   # Xwayland only AFTER the session is gone (or its budget expired): it is the
@@ -330,6 +336,29 @@ while :; do
 done
 log "X display :0 ready (rootful Xwayland pid $xwayland_pid)"
 
+# --- The display-mode bridge (quasar #445) ----------------------------------
+# A rootful Xwayland lists its own fixed 60 Hz RandR table and never tells the
+# parent compositor about a mode change, so on its own XFCE's display settings
+# can neither show the monitor's real modes nor change the monitor.
+# quasar-xfce-modes (images/quasar-xfce/mode-bridge/) is a client of BOTH
+# servers: it mirrors the parent compositor's wlr-output-management modes into
+# RandR as user modes, and when the user applies one it asks the compositor for
+# it; the node agent then moves the monitor and the compositor to that mode and
+# Xwayland follows the compositor's configure. It is the second and last process
+# that gets the parent socket, through its own variable rather than
+# WAYLAND_DISPLAY so GTK/Qt inside it (there are none) could never pick it up.
+# Optional and soft: a parent without the protocol makes it exit at once, and a
+# missing binary is logged, never fatal. QUASAR_XFCE_MODE_BRIDGE=0 keeps it off.
+if [[ "${QUASAR_XFCE_MODE_BRIDGE:-1}" != "0" ]]; then
+  if command -v quasar-xfce-modes >/dev/null 2>&1; then
+    QUASAR_PARENT_WAYLAND_DISPLAY="$parent_wayland_display" DISPLAY=:0 quasar-xfce-modes &
+    bridge_pid=$!
+    log "display-mode bridge started (pid $bridge_pid)"
+  else
+    log "quasar-xfce-modes is not in this image; display settings list Xwayland's own modes only"
+  fi
+fi
+
 # --- Launch: the XFCE session ------------------------------------------------
 # dbus-run-session gives the whole session one session bus (there is no systemd
 # --user to provide one, and xfconfd/Thunar/xfce4-session all need it).
@@ -366,6 +395,9 @@ log "XFCE session exited (rc=$rc)"
 # The session is the lifecycle owner: when it ends (user logout, or the relay
 # above), the display server has nothing left to serve. Bounded, never a
 # group-kill, and a no-op if the relay already took it down.
+if [[ -n "$bridge_pid" ]] && kill -0 "$bridge_pid" 2>/dev/null; then
+  kill -TERM "$bridge_pid" 2>/dev/null || true
+fi
 if [[ -n "$xwayland_pid" ]] && kill -0 "$xwayland_pid" 2>/dev/null; then
   log "session over; stopping Xwayland (pid $xwayland_pid)"
   kill -TERM "$xwayland_pid" 2>/dev/null || true
