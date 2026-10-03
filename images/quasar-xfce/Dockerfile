@@ -1,4 +1,22 @@
 ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
+
+# --- quasar-xfce-modes: the display-mode bridge (quasar #445) -------------------
+# A rootful Xwayland ignores the compositor's wl_output modes and lists its own
+# 60 Hz table, so XFCE's display settings could never show the monitor's real
+# modes nor send a choice anywhere. This ~30 KB C program mirrors the Quasar
+# compositor's wlr-output-management modes into RandR and forwards the user's
+# pick back; see images/quasar-xfce/mode-bridge/quasar-xfce-modes.c for the
+# whole mechanism. Built in a throwaway stage so the final image carries the
+# binary and none of the toolchain or -devel packages; its runtime libraries
+# (libwayland-client, libX11, libXrandr) are already in the XFCE package set.
+FROM ${STEAM_RUNTIME_IMAGE} AS mode-bridge-builder
+RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
+      gcc make pkgconf-pkg-config wayland-devel wlr-protocols-devel \
+      libX11-devel libXrandr-devel \
+    && dnf clean all
+COPY images/quasar-xfce/mode-bridge /src/mode-bridge
+RUN make -C /src/mode-bridge
+
 FROM ${STEAM_RUNTIME_IMAGE}
 
 ARG VERSION=0.1.0-dev
@@ -107,12 +125,13 @@ COPY images/quasar-xfce/overlay/usr/share/icons/hicolor/scalable/apps/quasar.svg
 COPY images/quasar-xfce/overlay/usr/share/icons/hicolor/256x256/apps/quasar.png /usr/share/icons/hicolor/256x256/apps/quasar.png
 
 COPY images/quasar-xfce/quasar-xfce /usr/local/bin/quasar-xfce
+COPY --from=mode-bridge-builder /src/mode-bridge/quasar-xfce-modes /usr/local/bin/quasar-xfce-modes
 
 RUN chmod 0644 /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \
       /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
       /usr/share/icons/hicolor/scalable/apps/quasar.svg \
       /usr/share/icons/hicolor/256x256/apps/quasar.png \
-    && chmod 0755 /usr/local/bin/quasar-xfce \
+    && chmod 0755 /usr/local/bin/quasar-xfce /usr/local/bin/quasar-xfce-modes \
     && gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
 
 # NO setcap -r step here, unlike quasar-kde. Linux refuses execve with EPERM when
