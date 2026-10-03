@@ -771,7 +771,7 @@ index c4cee70..b2bd6a5 100644
 +{
 +	int32_t nWidth = 0;
 +	int32_t nHeight = 0;
-+	int32_t nRefreshmHz = 0; // 0: unknown, keep the current refresh
++	int32_t nRefreshmHz = 0; // 0: unknown, nearest the session refresh
 +	bool bSession = true;    // no pick: the session's own mode
 +
 +	bool operator==( const QuasarModeWant_t &o ) const
