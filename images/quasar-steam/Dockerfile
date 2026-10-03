@@ -9,6 +9,15 @@ ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
 # BPM until a game launch. The one-argument patch makes Passthrough also warp
 # the real cursor (wlserver_mousewarp), so nested pointer input works from
 # session start.
+#
+# Display-mode forwarding (quasar#447): gamescope-quasar-mode-forward.patch lists
+# the parent compositor's modes to games and forwards a game's pick to it through
+# wlr-output-management; xwayland-quasar-emu-mode.patch makes gamescope's own
+# Xwayland keep the refresh of that pick (stock Xwayland reduces it to a size).
+# The Xwayland is built from the tag matching Fedora 43's package and installed
+# beside it for gamescope only (WLR_XWAYLAND, set by the launcher); the system
+# /usr/bin/Xwayland is untouched. Both builds run in this one stage, in order, so
+# an image build never compiles them in parallel.
 # Builds from ${APP_IMAGE}, not the Steam runtime: the builder only needs the
 # Fedora toolchain + `dnf builddep gamescope`, so keeping it on quasar-app
 # leaves it independent of the runtime layer (and its build cache).
@@ -16,18 +25,35 @@ FROM ${APP_IMAGE} AS gamescope-builder
 
 RUN dnf --setopt=install_weak_deps=False -y install \
       git meson ninja-build gcc gcc-c++ \
-      xorg-x11-server-Xwayland-devel \
+      xorg-x11-server-Xwayland-devel libXrandr-devel \
     && (dnf -y install dnf5-plugins || dnf -y install dnf-plugins-core) \
     && (dnf builddep -y gamescope || dnf builddep -y --enablerepo="*source*" gamescope) \
+    && (dnf builddep -y xorg-x11-server-Xwayland || dnf builddep -y --enablerepo="*source*" xorg-x11-server-Xwayland) \
     && dnf clean all && rm -rf /var/cache/dnf
 
 WORKDIR /build
-COPY images/quasar-steam/gamescope-nested-pointer-warp.patch /build/
+COPY images/quasar-steam/gamescope-nested-pointer-warp.patch \
+     images/quasar-steam/gamescope-quasar-mode-forward.patch /build/
 RUN git clone --branch 3.16.23 --depth 1 --recurse-submodules https://github.com/ValveSoftware/gamescope.git \
     && cd gamescope \
     && git apply /build/gamescope-nested-pointer-warp.patch \
+    && git apply /build/gamescope-quasar-mode-forward.patch \
+    && cp subprojects/wlroots/protocol/wlr-output-management-unstable-v1.xml protocol/ \
     && meson setup build --buildtype=release -Denable_openvr_support=false \
     && ninja -C build
+
+# Same meson options as Fedora's xorg-x11-server-Xwayland.spec (plus --prefix,
+# which %meson implies), so the binary finds xkb, fonts and protocol.txt where
+# the packaged one does.
+COPY images/quasar-steam/xwayland-quasar-emu-mode.patch /build/
+RUN git clone --branch xwayland-24.1.13 --depth 1 https://gitlab.freedesktop.org/xorg/xserver.git \
+    && cd xserver \
+    && git apply /build/xwayland-quasar-emu-mode.patch \
+    && meson setup build --prefix=/usr --buildtype=release \
+         -Ddefault_font_path="catalogue:/etc/X11/fontpath.d,built-ins" \
+         -Dxkb_output_dir=/var/lib/xkb -Dserverconfigdir=/usr/share/xwayland \
+         -Dxcsecurity=true -Dglamor=true -Ddri3=true \
+    && ninja -C build hw/xwayland/Xwayland
 
 FROM ${STEAM_RUNTIME_IMAGE}
 
@@ -52,6 +78,7 @@ RUN dnf --setopt=install_weak_deps=False -y install \
     && rm -rf /var/cache/dnf
 
 COPY --from=gamescope-builder /build/gamescope/build/src/gamescope /usr/bin/gamescope
+COPY --from=gamescope-builder /build/xserver/build/hw/xwayland/Xwayland /usr/local/libexec/quasar-steam/Xwayland
 COPY images/quasar-steam/quasar-steam /usr/local/bin/quasar-steam
 COPY images/quasar-steam/steam-wrapper /usr/local/bin/quasar-steam-client
 RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client

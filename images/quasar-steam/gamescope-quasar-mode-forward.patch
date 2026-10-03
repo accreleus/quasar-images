@@ -1,0 +1,934 @@
+gamescope: forward a game's display-mode pick to the parent compositor (quasar #447)
+
+Why. Nested gamescope sizes its output from -W/-H/-r and never asks the parent
+for anything: a game that switches resolution is scaled inside gamescope and
+the monitor never moves (upstream WaylandBackend.cpp: the connector's GetModes()
+is empty, wl_output modes are only read for a VRR refresh guess). The Quasar
+compositor advertises the monitor's real modes, each with its own refresh, and
+takes a pick through wlr-output-management-unstable-v1; its node agent then
+moves the physical display and configures our toplevel at the new size. This
+patch is gamescope's half of that contract.
+
+What it does (all inert when the parent has no zwlr_output_manager_v1, or when
+GAMESCOPE_QUASAR_MODE_FORWARD=0 -- the manager is then never bound and gamescope
+behaves exactly as upstream):
+
+ A. Lists the parent's modes in each of gamescope's Xwaylands' RandR as user
+    modes (XRRCreateMode + XRRAddOutputMode, each with a synthetic timing whose
+    vertical refresh is the parent's exact mHz), so a game's resolution menu
+    shows the monitor's sizes and rates. Modes larger than the Xwayland root are
+    left out (RRSetCrtcConfig rejects them).
+ B. Watches the focused window for the mode its client applied:
+    _QUASAR_XWAYLAND_EMU_MODE (w, h, mHz; set by the companion
+    xwayland-quasar-emu-mode.patch), else _XWAYLAND_RANDR_EMU_MONITOR_RECTS
+    (stock Xwayland: size only), else a game Xwayland's root that Steam resized
+    with GAMESCOPE_XWAYLAND_MODE_CONTROL. After it has held for 300 ms it asks
+    the parent for the matching mode (create_configuration on the last done
+    serial, enable_head, set_mode, apply). With no pick in front (the game
+    exited, Steam has focus) it asks for the session's own mode again. One
+    configuration in flight at a time; a mode already sent is not re-sent until
+    the parent's current mode changes (covers the echo while the display moves,
+    `failed`, and a `succeeded` the agent then declined).
+ C. Follows the parent: the toplevel configure that follows a move already sets
+    g_nOutputWidth/Height (LibDecor_Frame_Configure, upstream). The patch adds
+    the refresh: on a new current mode it sets g_nNestedRefresh and
+    g_nOutputRefresh to it, because `-r` pinned g_nNestedRefresh at launch and
+    the vblank timer prefers it. Also only the CURRENT wl_output mode now sets
+    the output's refresh (the parent lists every mode on wl_output).
+
+The client header comes from the wlroots submodule's
+protocol/wlr-output-management-unstable-v1.xml, copied into protocol/ by the
+Dockerfile before meson setup (meson's subproject sandbox forbids reading it in
+place). Needs libXrandr-devel at build time.
+
+diff --git a/protocol/meson.build b/protocol/meson.build
+index e93c353..66da976 100644
+--- a/protocol/meson.build
++++ b/protocol/meson.build
+@@ -43,6 +43,10 @@ protocols = [
+ 
+ 	# wlroots protocols
+ 	'wlr-layer-shell-unstable-v1.xml',
++	# Quasar: client side of the parent's output management (QuasarModeForward).
++	# Copied in from the wlroots submodule before setup (meson's subproject
++	# sandbox forbids reading it in place).
++	'wlr-output-management-unstable-v1.xml',
+ ]
+ 
+ protocols_client_src = []
+diff --git a/src/Backends/QuasarModeForward.cpp b/src/Backends/QuasarModeForward.cpp
+new file mode 100644
+index 0000000..a7425f5
+--- /dev/null
++++ b/src/Backends/QuasarModeForward.cpp
+@@ -0,0 +1,522 @@
++// Quasar: see QuasarModeForward.hpp for what this is and why.
++#include "QuasarModeForward.hpp"
++
++#include "log.hpp"
++#include "main.hpp"
++
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <unordered_map>
++
++#include <X11/Xlib.h>
++#include <X11/extensions/Xrandr.h>
++
++#include "wlr_begin.hpp"
++#include <wayland-client.h>
++#include <wlr-output-management-unstable-v1-client-protocol.h>
++#include "wlr_end.hpp"
++
++static LogScope qmf_log( "quasar_modes" );
++
++namespace gamescope::QuasarModeForward
++{
++    // Two refresh rates this close name the same mode (the parent uses the
++    // same tolerance for set_custom_mode).
++    static constexpr int32_t k_nRefreshTolerancemHz = 500;
++
++    struct ModeEntry
++    {
++        zwlr_output_mode_v1 *pProxy = nullptr;
++        HostMode mode;
++        bool bFinished = false;
++    };
++
++    struct State
++    {
++        zwlr_output_manager_v1 *pManager = nullptr;
++        zwlr_output_head_v1 *pHead = nullptr;
++        std::vector<ModeEntry *> modes;
++        zwlr_output_mode_v1 *pCurrentProxy = nullptr;
++        bool bHeadEnabled = true;
++
++        uint32_t uSerial = 0;
++        bool bHaveSerial = false;
++        bool bFinished = false;
++
++        // Bookkeeping that turns `done` into change notifications.
++        bool bModesDirty = false;
++        uint64_t ulModesGeneration = 0;
++        std::vector<HostMode> liveModes;
++        std::optional<HostMode> lastCurrent;
++
++        // The one configuration in flight, and what it asked for.
++        zwlr_output_configuration_v1 *pConfig = nullptr;
++        HostMode asked;
++        // The last mode sent; not re-sent until the current mode changes.
++        std::optional<HostMode> lastSent;
++    };
++    static State s;
++
++    bool SameMode( const HostMode &a, const HostMode &b )
++    {
++        return a.nWidth == b.nWidth && a.nHeight == b.nHeight &&
++               std::abs( a.nRefreshmHz - b.nRefreshmHz ) <= k_nRefreshTolerancemHz;
++    }
++
++    // v3 made release the destructor of mode and head objects.
++    static void ReleaseMode( zwlr_output_mode_v1 *pMode )
++    {
++        if ( zwlr_output_mode_v1_get_version( pMode ) >= ZWLR_OUTPUT_MODE_V1_RELEASE_SINCE_VERSION )
++            zwlr_output_mode_v1_release( pMode );
++        else
++            zwlr_output_mode_v1_destroy( pMode );
++    }
++    static void ReleaseHead( zwlr_output_head_v1 *pHead )
++    {
++        if ( zwlr_output_head_v1_get_version( pHead ) >= ZWLR_OUTPUT_HEAD_V1_RELEASE_SINCE_VERSION )
++            zwlr_output_head_v1_release( pHead );
++        else
++            zwlr_output_head_v1_destroy( pHead );
++    }
++
++    static ModeEntry *EntryOf( zwlr_output_mode_v1 *pProxy )
++    {
++        return pProxy ? static_cast<ModeEntry *>( zwlr_output_mode_v1_get_user_data( pProxy ) ) : nullptr;
++    }
++
++    static bool KnobEnabled()
++    {
++        const char *pszKnob = getenv( "GAMESCOPE_QUASAR_MODE_FORWARD" );
++        if ( !pszKnob || !*pszKnob )
++            return true;
++        return !( !strcmp( pszKnob, "0" ) || !strcasecmp( pszKnob, "false" ) || !strcasecmp( pszKnob, "off" ) || !strcasecmp( pszKnob, "no" ) );
++    }
++
++    // ---- zwlr_output_mode_v1 ----------------------------------------------
++
++    static void Mode_Size( void *pData, zwlr_output_mode_v1 *, int32_t nWidth, int32_t nHeight )
++    {
++        auto *pEntry = static_cast<ModeEntry *>( pData );
++        pEntry->mode.nWidth = nWidth;
++        pEntry->mode.nHeight = nHeight;
++        s.bModesDirty = true;
++    }
++    static void Mode_Refresh( void *pData, zwlr_output_mode_v1 *, int32_t nRefresh )
++    {
++        auto *pEntry = static_cast<ModeEntry *>( pData );
++        pEntry->mode.nRefreshmHz = nRefresh;
++        s.bModesDirty = true;
++    }
++    static void Mode_Preferred( void *, zwlr_output_mode_v1 * )
++    {
++    }
++    static void Mode_Finished( void *pData, zwlr_output_mode_v1 * )
++    {
++        auto *pEntry = static_cast<ModeEntry *>( pData );
++        pEntry->bFinished = true;
++        s.bModesDirty = true;
++    }
++    static const zwlr_output_mode_v1_listener s_ModeListener =
++    {
++        .size      = Mode_Size,
++        .refresh   = Mode_Refresh,
++        .preferred = Mode_Preferred,
++        .finished  = Mode_Finished,
++    };
++
++    // ---- zwlr_output_head_v1 ----------------------------------------------
++
++    static void Head_Name( void *, zwlr_output_head_v1 *, const char * ) {}
++    static void Head_Description( void *, zwlr_output_head_v1 *, const char * ) {}
++    static void Head_PhysicalSize( void *, zwlr_output_head_v1 *, int32_t, int32_t ) {}
++    static void Head_Mode( void *, zwlr_output_head_v1 *, zwlr_output_mode_v1 *pMode )
++    {
++        auto *pEntry = new ModeEntry{ .pProxy = pMode };
++        zwlr_output_mode_v1_add_listener( pMode, &s_ModeListener, pEntry );
++        s.modes.push_back( pEntry );
++        s.bModesDirty = true;
++    }
++    static void Head_Enabled( void *, zwlr_output_head_v1 *, int32_t nEnabled )
++    {
++        s.bHeadEnabled = !!nEnabled;
++    }
++    static void Head_CurrentMode( void *, zwlr_output_head_v1 *, zwlr_output_mode_v1 *pMode )
++    {
++        s.pCurrentProxy = pMode;
++    }
++    static void Head_Position( void *, zwlr_output_head_v1 *, int32_t, int32_t ) {}
++    static void Head_Transform( void *, zwlr_output_head_v1 *, int32_t ) {}
++    static void Head_Scale( void *, zwlr_output_head_v1 *, wl_fixed_t ) {}
++    static void Head_Finished( void *, zwlr_output_head_v1 *pHead )
++    {
++        if ( s.pHead == pHead )
++        {
++            ReleaseHead( pHead );
++            s.pHead = nullptr;
++            s.pCurrentProxy = nullptr;
++        }
++    }
++    static void Head_Make( void *, zwlr_output_head_v1 *, const char * ) {}
++    static void Head_Model( void *, zwlr_output_head_v1 *, const char * ) {}
++    static void Head_SerialNumber( void *, zwlr_output_head_v1 *, const char * ) {}
++    static void Head_AdaptiveSync( void *, zwlr_output_head_v1 *, uint32_t ) {}
++    static const zwlr_output_head_v1_listener s_HeadListener =
++    {
++        .name          = Head_Name,
++        .description   = Head_Description,
++        .physical_size = Head_PhysicalSize,
++        .mode          = Head_Mode,
++        .enabled       = Head_Enabled,
++        .current_mode  = Head_CurrentMode,
++        .position      = Head_Position,
++        .transform     = Head_Transform,
++        .scale         = Head_Scale,
++        .finished      = Head_Finished,
++        .make          = Head_Make,
++        .model         = Head_Model,
++        .serial_number = Head_SerialNumber,
++        .adaptive_sync = Head_AdaptiveSync,
++    };
++
++    // ---- zwlr_output_manager_v1 -------------------------------------------
++
++    static void Manager_Head( void *, zwlr_output_manager_v1 *, zwlr_output_head_v1 *pHead )
++    {
++        if ( s.pHead )
++        {
++            // The Quasar compositor has exactly one head; ignore any other.
++            ReleaseHead( pHead );
++            return;
++        }
++        s.pHead = pHead;
++        zwlr_output_head_v1_add_listener( pHead, &s_HeadListener, nullptr );
++    }
++
++    // C: follow the parent. Its owner moves the display and then configures
++    // our toplevel at the new size (CWaylandPlane::LibDecor_Frame_Configure
++    // already takes g_nOutputWidth/Height from that). The refresh is ours to
++    // take: `-r` pinned g_nNestedRefresh at launch, and the vblank timer paces
++    // on it in preference to g_nOutputRefresh, so a 60 Hz launch would keep a
++    // 120 Hz monitor at 60.
++    static void FollowCurrent( const HostMode &current )
++    {
++        if ( current.nRefreshmHz <= 0 )
++            return;
++        if ( g_nNestedRefresh != current.nRefreshmHz || g_nOutputRefresh != current.nRefreshmHz )
++        {
++            qmf_log.infof( "parent is at %dx%d @ %.3f Hz; pacing at that refresh",
++                current.nWidth, current.nHeight, current.nRefreshmHz / 1000.0 );
++            g_nNestedRefresh = current.nRefreshmHz;
++            g_nOutputRefresh = current.nRefreshmHz;
++        }
++    }
++
++    static void Manager_Done( void *, zwlr_output_manager_v1 *, uint32_t uSerial )
++    {
++        s.uSerial = uSerial;
++        s.bHaveSerial = true;
++
++        if ( s.bModesDirty )
++        {
++            std::vector<ModeEntry *> keep;
++            for ( ModeEntry *pEntry : s.modes )
++            {
++                if ( pEntry->bFinished )
++                {
++                    if ( s.pCurrentProxy == pEntry->pProxy )
++                        s.pCurrentProxy = nullptr;
++                    ReleaseMode( pEntry->pProxy );
++                    delete pEntry;
++                    continue;
++                }
++                keep.push_back( pEntry );
++            }
++            s.modes = std::move( keep );
++
++            s.liveModes.clear();
++            for ( ModeEntry *pEntry : s.modes )
++            {
++                if ( pEntry->mode.nWidth > 0 && pEntry->mode.nHeight > 0 && pEntry->mode.nRefreshmHz > 0 )
++                    s.liveModes.push_back( pEntry->mode );
++            }
++            s.bModesDirty = false;
++            s.ulModesGeneration++;
++            qmf_log.infof( "parent advertises %zu modes", s.liveModes.size() );
++        }
++
++        std::optional<HostMode> current = GetCurrent();
++        if ( current && ( !s.lastCurrent || !SameMode( *current, *s.lastCurrent ) ) )
++        {
++            s.lastCurrent = current;
++            // The display moved: whatever was sent has been acted on (or
++            // overtaken), so any mode may be asked for again.
++            s.lastSent.reset();
++            FollowCurrent( *current );
++        }
++    }
++    static void Manager_Finished( void *, zwlr_output_manager_v1 *pManager )
++    {
++        qmf_log.infof( "parent finished the output manager; mode forwarding off" );
++        s.bFinished = true;
++        zwlr_output_manager_v1_destroy( pManager );
++        s.pManager = nullptr;
++    }
++    static const zwlr_output_manager_v1_listener s_ManagerListener =
++    {
++        .head     = Manager_Head,
++        .done     = Manager_Done,
++        .finished = Manager_Finished,
++    };
++
++    // ---- zwlr_output_configuration_v1 -------------------------------------
++
++    static void EndConfig()
++    {
++        if ( s.pConfig )
++            zwlr_output_configuration_v1_destroy( s.pConfig );
++        s.pConfig = nullptr;
++    }
++    static void Config_Succeeded( void *, zwlr_output_configuration_v1 * )
++    {
++        qmf_log.infof( "parent accepted %dx%d @ %.3f Hz", s.asked.nWidth, s.asked.nHeight, s.asked.nRefreshmHz / 1000.0 );
++        EndConfig();
++    }
++    static void Config_Failed( void *, zwlr_output_configuration_v1 * )
++    {
++        qmf_log.warnf( "parent refused %dx%d @ %.3f Hz; the game stays scaled", s.asked.nWidth, s.asked.nHeight, s.asked.nRefreshmHz / 1000.0 );
++        EndConfig();
++    }
++    static void Config_Cancelled( void *, zwlr_output_configuration_v1 * )
++    {
++        // Built against a stale serial: the next tick after the fresh `done`
++        // asks again.
++        qmf_log.infof( "mode request cancelled (stale serial); retrying" );
++        s.lastSent.reset();
++        EndConfig();
++    }
++    static const zwlr_output_configuration_v1_listener s_ConfigListener =
++    {
++        .succeeded = Config_Succeeded,
++        .failed    = Config_Failed,
++        .cancelled = Config_Cancelled,
++    };
++
++    // ---- public -----------------------------------------------------------
++
++    bool OnRegistryGlobal( wl_registry *pRegistry, uint32_t uName, const char *pInterface, uint32_t uVersion )
++    {
++        if ( strcmp( pInterface, zwlr_output_manager_v1_interface.name ) != 0 )
++            return false;
++        if ( s.pManager )
++            return true;
++        if ( !KnobEnabled() )
++        {
++            qmf_log.infof( "GAMESCOPE_QUASAR_MODE_FORWARD=0: not binding %s; game resolutions stay scaled", pInterface );
++            return true;
++        }
++        uint32_t uBindVersion = std::min<uint32_t>( uVersion, 4u );
++        s.pManager = (zwlr_output_manager_v1 *)wl_registry_bind( pRegistry, uName, &zwlr_output_manager_v1_interface, uBindVersion );
++        zwlr_output_manager_v1_add_listener( s.pManager, &s_ManagerListener, nullptr );
++        qmf_log.infof( "parent speaks %s v%u; forwarding game mode picks to it", pInterface, uBindVersion );
++        return true;
++    }
++
++    bool Active()
++    {
++        return s.pManager && !s.bFinished && s.pHead && s.bHaveSerial && s.bHeadEnabled && !s.liveModes.empty();
++    }
++
++    const std::vector<HostMode> &GetModes()
++    {
++        return s.liveModes;
++    }
++
++    std::optional<HostMode> GetCurrent()
++    {
++        ModeEntry *pEntry = EntryOf( s.pCurrentProxy );
++        if ( !pEntry || pEntry->bFinished || pEntry->mode.nWidth <= 0 )
++            return std::nullopt;
++        return pEntry->mode;
++    }
++
++    uint64_t GetModesGeneration()
++    {
++        return s.ulModesGeneration;
++    }
++
++    std::optional<HostMode> RequestMode( int32_t nWidth, int32_t nHeight, int32_t nRefreshmHz )
++    {
++        if ( !Active() )
++            return std::nullopt;
++
++        std::optional<HostMode> current = GetCurrent();
++        if ( nRefreshmHz <= 0 )
++            nRefreshmHz = current ? current->nRefreshmHz : g_nOutputRefresh;
++
++        ModeEntry *pBest = nullptr;
++        for ( ModeEntry *pEntry : s.modes )
++        {
++            if ( pEntry->bFinished || pEntry->mode.nWidth != nWidth || pEntry->mode.nHeight != nHeight )
++                continue;
++            if ( !pBest || std::abs( pEntry->mode.nRefreshmHz - nRefreshmHz ) < std::abs( pBest->mode.nRefreshmHz - nRefreshmHz ) )
++                pBest = pEntry;
++        }
++        if ( !pBest )
++            return std::nullopt;
++
++        const HostMode want = pBest->mode;
++        if ( current && SameMode( want, *current ) )
++            return want;
++        if ( s.pConfig )
++            return want; // One in flight; the parent answers every one.
++        if ( s.lastSent && SameMode( want, *s.lastSent ) )
++            return want;
++
++        s.asked = want;
++        s.lastSent = want;
++        s.pConfig = zwlr_output_manager_v1_create_configuration( s.pManager, s.uSerial );
++        zwlr_output_configuration_v1_add_listener( s.pConfig, &s_ConfigListener, nullptr );
++        zwlr_output_configuration_head_v1 *pConfigHead = zwlr_output_configuration_v1_enable_head( s.pConfig, s.pHead );
++        zwlr_output_configuration_head_v1_set_mode( pConfigHead, pBest->pProxy );
++        zwlr_output_configuration_head_v1_destroy( pConfigHead );
++        zwlr_output_configuration_v1_apply( s.pConfig );
++        qmf_log.infof( "asking the parent for %dx%d @ %.3f Hz", want.nWidth, want.nHeight, want.nRefreshmHz / 1000.0 );
++        return want;
++    }
++
++    // ---- A: RandR user modes ----------------------------------------------
++
++    static constexpr const char k_szModePrefix[] = "quasar-";
++
++    struct RandRState
++    {
++        uint64_t ulModesGeneration = UINT64_MAX;
++        int nRootWidth = 0;
++        int nRootHeight = 0;
++        RROutput output = 0;
++        std::vector<RRMode> added;
++    };
++    static std::unordered_map<const void *, RandRState> s_RandR;
++
++    static double RandRModeHz( const XRRModeInfo *pInfo )
++    {
++        if ( !pInfo->hTotal || !pInfo->vTotal )
++            return 0.0;
++        double flV = pInfo->vTotal;
++        if ( pInfo->modeFlags & RR_DoubleScan )
++            flV *= 2;
++        if ( pInfo->modeFlags & RR_Interlace )
++            flV /= 2;
++        return double( pInfo->dotClock ) / ( double( pInfo->hTotal ) * flV );
++    }
++
++    void SyncRandRModes( const void *pKey, Display *pDisplay, unsigned long ulRoot, int nRootWidth, int nRootHeight )
++    {
++        if ( !Active() || !pDisplay )
++            return;
++
++        RandRState &st = s_RandR[ pKey ];
++        if ( st.ulModesGeneration == s.ulModesGeneration && st.nRootWidth == nRootWidth && st.nRootHeight == nRootHeight )
++            return;
++        st.ulModesGeneration = s.ulModesGeneration;
++        st.nRootWidth = nRootWidth;
++        st.nRootHeight = nRootHeight;
++
++        // Retire what we listed before; the set is rebuilt from scratch.
++        for ( RRMode mode : st.added )
++        {
++            XRRDeleteOutputMode( pDisplay, st.output, mode );
++            XRRDestroyMode( pDisplay, mode );
++        }
++        st.added.clear();
++
++        XRRScreenResources *pRes = XRRGetScreenResourcesCurrent( pDisplay, ulRoot );
++        if ( !pRes )
++            return;
++
++        // gamescope gives each Xwayland exactly one (headless) output.
++        XRROutputInfo *pOutputInfo = nullptr;
++        for ( int i = 0; i < pRes->noutput && !pOutputInfo; i++ )
++        {
++            XRROutputInfo *pInfo = XRRGetOutputInfo( pDisplay, pRes, pRes->outputs[ i ] );
++            if ( pInfo && pInfo->connection == RR_Connected )
++            {
++                pOutputInfo = pInfo;
++                st.output = pRes->outputs[ i ];
++            }
++            else if ( pInfo )
++                XRRFreeOutputInfo( pInfo );
++        }
++        if ( !pOutputInfo )
++        {
++            XRRFreeScreenResources( pRes );
++            return;
++        }
++
++        auto XwaylandLists = [&]( int32_t nWidth, int32_t nHeight, int nHz ) -> bool
++        {
++            for ( int i = 0; i < pOutputInfo->nmode; i++ )
++            {
++                for ( int j = 0; j < pRes->nmode; j++ )
++                {
++                    const XRRModeInfo *pInfo = &pRes->modes[ j ];
++                    if ( pInfo->id != pOutputInfo->modes[ i ] )
++                        continue;
++                    if ( pInfo->name && !strncmp( pInfo->name, k_szModePrefix, strlen( k_szModePrefix ) ) )
++                        continue;
++                    if ( int32_t( pInfo->width ) == nWidth && int32_t( pInfo->height ) == nHeight &&
++                         int( RandRModeHz( pInfo ) + 0.5 ) == nHz )
++                        return true;
++                }
++            }
++            return false;
++        };
++
++        std::vector<HostMode> listed;
++        for ( const HostMode &mode : s.liveModes )
++        {
++            if ( mode.nWidth > nRootWidth || mode.nHeight > nRootHeight )
++                continue;
++            bool bDuplicate = false;
++            for ( const HostMode &other : listed )
++                bDuplicate |= SameMode( mode, other );
++            if ( bDuplicate )
++                continue;
++            int nHz = int( ( mode.nRefreshmHz + 500 ) / 1000 );
++            bool bRootSize = mode.nWidth == nRootWidth && mode.nHeight == nRootHeight;
++            if ( !bRootSize && XwaylandLists( mode.nWidth, mode.nHeight, nHz ) )
++                continue;
++
++            // A synthetic timing whose vertical refresh is exactly the
++            // parent's: nothing drives a CRTC with it, the numbers only have
++            // to round-trip the refresh through RandR (the same trick as the
++            // XFCE bridge).
++            char szName[64];
++            snprintf( szName, sizeof( szName ), "%s%dx%d@%d.%03d", k_szModePrefix,
++                mode.nWidth, mode.nHeight, mode.nRefreshmHz / 1000, mode.nRefreshmHz % 1000 );
++            XRRModeInfo info{};
++            info.width = unsigned( mode.nWidth );
++            info.height = unsigned( mode.nHeight );
++            info.hTotal = unsigned( mode.nWidth );
++            info.vTotal = unsigned( mode.nHeight );
++            info.hSyncStart = info.hSyncEnd = info.width;
++            info.vSyncStart = info.vSyncEnd = info.height;
++            info.dotClock = (unsigned long)( ( uint64_t( mode.nWidth ) * uint64_t( mode.nHeight ) * uint64_t( mode.nRefreshmHz ) ) / 1000 );
++            info.name = szName;
++            info.nameLength = unsigned( strlen( szName ) );
++            RRMode id = XRRCreateMode( pDisplay, ulRoot, &info );
++            if ( !id )
++                continue;
++            XRRAddOutputMode( pDisplay, st.output, id );
++            st.added.push_back( id );
++            listed.push_back( mode );
++        }
++
++        XRRFreeOutputInfo( pOutputInfo );
++        XRRFreeScreenResources( pRes );
++        XFlush( pDisplay );
++        qmf_log.infof( "listed %zu parent modes in an Xwayland's RandR (root %dx%d)", st.added.size(), nRootWidth, nRootHeight );
++    }
++}
+diff --git a/src/Backends/QuasarModeForward.hpp b/src/Backends/QuasarModeForward.hpp
+new file mode 100644
+index 0000000..768a6fc
+--- /dev/null
++++ b/src/Backends/QuasarModeForward.hpp
+@@ -0,0 +1,74 @@
++// Quasar: forward display-mode picks from nested gamescope to the parent
++// compositor through wlr-output-management-unstable-v1, and follow the parent
++// when it moves.
++//
++// The parent (the Quasar compositor) advertises the monitor's real modes, each
++// with its own refresh, as the modes of one wlr-output-management head, and
++// takes a pick through create_configuration/enable_head/set_mode/apply. Its
++// owner then moves the physical display and configures gamescope's toplevel at
++// the new size. This module is the client half: it binds the manager on the
++// backend's wl_display, keeps the head's mode list and current mode, and sends
++// at most one configuration at a time.
++//
++// Everything here runs on the thread that dispatches the backend's default
++// queue (steamcompmgr's, through CWaylandBackend::PollState), the same thread
++// that calls in from steamcompmgr. No locking.
++//
++// GAMESCOPE_QUASAR_MODE_FORWARD=0 leaves the manager unbound, which is exactly
++// the behaviour of a parent without the protocol: Active() stays false and
++// gamescope scales a game's resolution inside its own output, as upstream does.
++#pragma once
++
++#include <cstdint>
++#include <optional>
++#include <vector>
++
++struct wl_registry;
++typedef struct _XDisplay Display;
++
++namespace gamescope::QuasarModeForward
++{
++    struct HostMode
++    {
++        int32_t nWidth = 0;
++        int32_t nHeight = 0;
++        int32_t nRefreshmHz = 0;
++    };
++
++    // Called from the backend's registry listener. Returns true when the
++    // global was the output manager (bound or deliberately not).
++    bool OnRegistryGlobal( wl_registry *pRegistry, uint32_t uName, const char *pInterface, uint32_t uVersion );
++
++    // The parent speaks the protocol, the knob is not off, and the head and
++    // its first `done` have arrived.
++    bool Active();
++
++    // The head's live modes, and the current one.
++    const std::vector<HostMode> &GetModes();
++    std::optional<HostMode> GetCurrent();
++
++    // Bumped whenever the mode list (not just the current mode) changes.
++    uint64_t GetModesGeneration();
++
++    // Ask the parent for the mode of `nWidth`x`nHeight` whose refresh is
++    // nearest `nRefreshmHz` (0: nearest the current refresh). Returns the
++    // parent mode that answers the request (already current, in flight, or
++    // just sent), or nullopt when the parent has no mode of that size.
++    // A mode already sent is not sent again until the parent's current mode
++    // changes: that covers the echo while the display moves, a `failed`, and
++    // a `succeeded` the display's owner then declined to act on.
++    std::optional<HostMode> RequestMode( int32_t nWidth, int32_t nHeight, int32_t nRefreshmHz );
++
++    // Two modes the parent would treat as the same.
++    bool SameMode( const HostMode &a, const HostMode &b );
++
++    // A: list the parent's modes, each with its own refresh, in one of our
++    // Xwaylands' RandR, as user modes on its output (a game's resolution menu
++    // reads them from there). Idempotent and cheap when nothing changed;
++    // `pKey` identifies the Xwayland. Only modes no larger than the Xwayland
++    // root are listed: RRSetCrtcConfig rejects a mode that overflows the
++    // screen. A mode Xwayland already lists at the same size and whole hertz
++    // is not duplicated, except at the root size itself, where Xwayland's own
++    // entry is its current mode and picking it never reaches the server.
++    void SyncRandRModes( const void *pKey, Display *pDisplay, unsigned long ulRoot, int nRootWidth, int nRootHeight );
++}
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+index 0264afc..32fd48b 100644
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -10,6 +10,7 @@
+ #include "refresh_rate.h"
+ #include "waitable.h"
+ #include "Utils/TempFiles.h"
++#include "Backends/QuasarModeForward.hpp"
+ 
+ #include <cstring>
+ #include <unordered_map>
+@@ -2564,6 +2565,10 @@ namespace gamescope
+         {
+             m_pPrimarySelectionDeviceManager = (zwp_primary_selection_device_manager_v1 *)wl_registry_bind( pRegistry, uName, &zwp_primary_selection_device_manager_v1_interface, 1u );
+         }
++        else if ( QuasarModeForward::OnRegistryGlobal( pRegistry, uName, pInterface, uVersion ) )
++        {
++            // Quasar: wlr-output-management on the parent; see QuasarModeForward.hpp.
++        }
+     }
+ 
+     void CWaylandBackend::Wayland_Modifier( zwp_linux_dmabuf_v1 *pDmabuf, uint32_t uFormat, uint32_t uModifierHi, uint32_t uModifierLo )
+@@ -2593,6 +2598,11 @@ namespace gamescope
+     }
+     void CWaylandBackend::Wayland_Output_Mode( wl_output *pOutput, uint32_t uFlags, int32_t nWidth, int32_t nHeight, int32_t nRefresh )
+     {
++        // Quasar: a parent that lists every mode of the display (the Quasar
++        // compositor does) sends non-current modes too; only the current one
++        // is the output's refresh.
++        if ( !( uFlags & WL_OUTPUT_MODE_CURRENT ) )
++            return;
+         m_pOutputs[ pOutput ].nRefresh = nRefresh;
+     }
+     void CWaylandBackend::Wayland_Output_Done( wl_output *pOutput )
+diff --git a/src/meson.build b/src/meson.build
+index 8512bf5..908c781 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -9,6 +9,7 @@ dep_xtst = dependency('xtst')
+ dep_xres = dependency('xres')
+ dep_xmu = dependency('xmu')
+ dep_xi = dependency('xi')
++dep_xrandr = dependency('xrandr')
+ 
+ drm_dep = dependency('libdrm', version: '>= 2.4.113', required: get_option('drm_backend'))
+ eis_dep = dependency('libeis-1.0', required : get_option('input_emulation'))
+@@ -97,6 +98,7 @@ required_wlroots_features = ['xwayland']
+ src = [
+   'Backends/HeadlessBackend.cpp',
+   'Backends/WaylandBackend.cpp',
++  'Backends/QuasarModeForward.cpp',
+   'Utils/TempFiles.cpp',
+   'Utils/Version.cpp',
+   'Utils/Process.cpp',
+@@ -195,7 +197,7 @@ gamescope_version = configure_file(
+       dep_xxf86vm, dep_xres, glm_dep, drm_dep, wayland_server,
+       xkbcommon, thread_dep, sdl2_dep, wlroots_dep,
+       vulkan_dep, liftoff_dep, dep_xtst, dep_xmu, cap_dep, epoll_dep, pipewire_dep, librt_dep,
+-      stb_dep, displayinfo_dep, openvr_dep, dep_xcursor, avif_dep, dep_xi,
++      stb_dep, displayinfo_dep, openvr_dep, dep_xcursor, avif_dep, dep_xi, dep_xrandr,
+       libdecor_dep, eis_dep, luajit_dep, libinput_dep, pixman_dep, udev_dep,
+     ],
+     install: true,
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index c4cee70..b2bd6a5 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -97,6 +97,7 @@
+ #include "BufferMemo.h"
+ #include "Utils/Process.h"
+ #include "Utils/Algorithm.h"
++#include "Backends/QuasarModeForward.hpp"
+ 
+ #include "wlr_begin.hpp"
+ #include "wlr/types/wlr_pointer_constraints_v1.h"
+@@ -5703,9 +5704,158 @@ static inline float santitize_float( float f )
+ #endif
+ }
+ 
++// Quasar: forward a game's display-mode pick to the parent compositor and
++// return to the session's mode when the game is no longer in front. See
++// Backends/QuasarModeForward.hpp. Inert unless the parent speaks
++// wlr-output-management (and GAMESCOPE_QUASAR_MODE_FORWARD is not 0).
++//
++// What a game "picked" is read from the focused window:
++//   1. _QUASAR_XWAYLAND_EMU_MODE (width, height, refresh mHz), set by the
++//      patched Xwayland on every window of a client that applied a RandR or
++//      VidMode mode;
++//   2. else _XWAYLAND_RANDR_EMU_MONITOR_RECTS (x, y, width, height), the same
++//      fact from a stock Xwayland, without the refresh;
++//   3. else, for a window of a game Xwayland (not Steam's), that Xwayland's
++//      root size when Steam changed it through GAMESCOPE_XWAYLAND_MODE_CONTROL
++//      (its per-game resolution setting).
++// Nothing picked means the session's own mode (the parent's mode before any
++// forward, updated whenever the parent moves for a reason of its own).
++static bool g_bQuasarModeDirty = true;
++
++static void quasar_mode_forward_mark_dirty()
++{
++	g_bQuasarModeDirty = true;
++}
++
++struct QuasarModeWant_t
++{
++	int32_t nWidth = 0;
++	int32_t nHeight = 0;
++	int32_t nRefreshmHz = 0; // 0: unknown, keep the current refresh
++	bool bSession = true;    // no pick: the session's own mode
++
++	bool operator==( const QuasarModeWant_t &o ) const
++	{
++		return nWidth == o.nWidth && nHeight == o.nHeight && nRefreshmHz == o.nRefreshmHz && bSession == o.bSession;
++	}
++};
++
++// Each Xwayland's root size when gamescope first saw it, so a root Steam
++// resized later (GAMESCOPE_XWAYLAND_MODE_CONTROL) can be told apart.
++static std::unordered_map<xwayland_ctx_t *, std::pair<int, int>> s_QuasarInitialRootSize;
++
++static QuasarModeWant_t quasar_mode_want_for_window( steamcompmgr_win_t *w )
++{
++	QuasarModeWant_t want;
++	if ( !w || w->type != steamcompmgr_win_type_t::XWAYLAND )
++		return want;
++
++	xwayland_ctx_t *ctx = w->xwayland().ctx;
++	if ( !ctx )
++		return want;
++
++	std::vector< uint32_t > values;
++	if ( get_prop( ctx, w->xwayland().id, ctx->atoms.quasarXWaylandEmuMode, values ) && values.size() >= 3 && values[0] && values[1] )
++		return QuasarModeWant_t{ int32_t( values[0] ), int32_t( values[1] ), int32_t( values[2] ), false };
++	if ( get_prop( ctx, w->xwayland().id, ctx->atoms.xwaylandRandrEmuMonitorRects, values ) && values.size() >= 4 && values[2] && values[3] )
++		return QuasarModeWant_t{ int32_t( values[2] ), int32_t( values[3] ), 0, false };
++
++	auto iter = s_QuasarInitialRootSize.find( ctx );
++	if ( iter != s_QuasarInitialRootSize.end() && ctx->xwayland_server != wlserver_get_xwayland_server( 0 ) &&
++		 ( ctx->root_width != iter->second.first || ctx->root_height != iter->second.second ) )
++		return QuasarModeWant_t{ ctx->root_width, ctx->root_height, 0, false };
++
++	return want;
++}
++
++static void quasar_mode_forward_tick()
++{
++	using namespace gamescope;
++
++	if ( !QuasarModeForward::Active() )
++		return;
++
++	// A: keep every Xwayland's RandR listing the parent's modes.
++	{
++		gamescope_xwayland_server_t *server = NULL;
++		for (size_t i = 0; (server = wlserver_get_xwayland_server(i)); i++)
++		{
++			xwayland_ctx_t *ctx = server->ctx.get();
++			if ( !ctx )
++				continue;
++			s_QuasarInitialRootSize.try_emplace( ctx, ctx->root_width, ctx->root_height );
++			QuasarModeForward::SyncRandRModes( ctx, ctx->dpy, ctx->root, ctx->root_width, ctx->root_height );
++		}
++	}
++
++	std::optional<QuasarModeForward::HostMode> current = QuasarModeForward::GetCurrent();
++	if ( !current )
++		return;
++
++	// The session's mode: the parent's mode until we forward something, and
++	// whatever it moves to on its own (a move that is not the answer to our
++	// last request) from then on.
++	static std::optional<QuasarModeForward::HostMode> s_session;
++	static std::optional<QuasarModeForward::HostMode> s_lastSeen;
++	static std::optional<QuasarModeForward::HostMode> s_lastAsked;
++	if ( !s_lastSeen || !QuasarModeForward::SameMode( *current, *s_lastSeen ) )
++	{
++		bool bOurs = s_session && s_lastAsked && QuasarModeForward::SameMode( *current, *s_lastAsked );
++		if ( !bOurs )
++			s_session = current;
++		s_lastAsked.reset();
++		s_lastSeen = current;
++	}
++
++	// B: what the window in front wants, re-read when it or its pick changes.
++	static uint64_t s_ulFocusSeq = UINT64_MAX;
++	static QuasarModeWant_t s_want;
++	static uint64_t s_ulWantSinceMs = 0;
++	global_focus_t *pFocus = GetCurrentFocus();
++	steamcompmgr_win_t *pWindow = pFocus ? pFocus->focusWindow : nullptr;
++	uint64_t ulFocusSeq = pWindow ? pWindow->seq : 0;
++	if ( ulFocusSeq != s_ulFocusSeq )
++	{
++		s_ulFocusSeq = ulFocusSeq;
++		g_bQuasarModeDirty = true;
++	}
++	if ( g_bQuasarModeDirty )
++	{
++		g_bQuasarModeDirty = false;
++		QuasarModeWant_t want = quasar_mode_want_for_window( pWindow );
++		if ( !( want == s_want ) )
++		{
++			s_want = want;
++			s_ulWantSinceMs = get_time_in_milliseconds();
++		}
++	}
++
++	// Launches and exits flip focus and modes a few times in quick
++	// succession; only act on a want that has held for a moment.
++	static constexpr uint64_t k_ulSettleMs = 300;
++	if ( get_time_in_milliseconds() - s_ulWantSinceMs < k_ulSettleMs )
++		return;
++
++	int32_t nWidth = s_want.bSession ? s_session->nWidth : s_want.nWidth;
++	int32_t nHeight = s_want.bSession ? s_session->nHeight : s_want.nHeight;
++	int32_t nRefreshmHz = s_want.bSession ? s_session->nRefreshmHz : s_want.nRefreshmHz;
++	if ( nRefreshmHz <= 0 )
++		nRefreshmHz = s_session->nRefreshmHz;
++
++	std::optional<QuasarModeForward::HostMode> asked = QuasarModeForward::RequestMode( nWidth, nHeight, nRefreshmHz );
++	if ( asked && !QuasarModeForward::SameMode( *asked, *current ) )
++		s_lastAsked = asked;
++	// No parent mode of that size: the game stays scaled, as upstream.
++}
++
+ static void
+ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+ {
++	if (ev->atom == ctx->atoms.quasarXWaylandEmuMode || ev->atom == ctx->atoms.xwaylandRandrEmuMonitorRects)
++	{
++		// Quasar: a client picked (or dropped) an emulated mode.
++		quasar_mode_forward_mark_dirty();
++	}
+ 	/* check if Trans property was changed */
+ 	if (ev->atom == ctx->atoms.opacityAtom)
+ 	{
+@@ -7675,6 +7825,8 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
+ 	ctx->atoms.gamescopeSharpness = XInternAtom( ctx->dpy, "GAMESCOPE_SHARPNESS", false );
+ 
+ 	ctx->atoms.gamescopeXWaylandModeControl = XInternAtom( ctx->dpy, "GAMESCOPE_XWAYLAND_MODE_CONTROL", false );
++	ctx->atoms.quasarXWaylandEmuMode = XInternAtom( ctx->dpy, "_QUASAR_XWAYLAND_EMU_MODE", false );
++	ctx->atoms.xwaylandRandrEmuMonitorRects = XInternAtom( ctx->dpy, "_XWAYLAND_RANDR_EMU_MONITOR_RECTS", false );
+ 	ctx->atoms.gamescopeFPSLimit = XInternAtom( ctx->dpy, "GAMESCOPE_FPS_LIMIT", false );
+ 	ctx->atoms.gamescopeDynamicRefresh[gamescope::GAMESCOPE_SCREEN_TYPE_INTERNAL] = XInternAtom( ctx->dpy, "GAMESCOPE_DYNAMIC_REFRESH", false );
+ 	ctx->atoms.gamescopeDynamicRefresh[gamescope::GAMESCOPE_SCREEN_TYPE_EXTERNAL] = XInternAtom( ctx->dpy, "GAMESCOPE_DYNAMIC_REFRESH_EXTERNAL", false );
+@@ -8530,6 +8682,9 @@ steamcompmgr_main(int argc, char **argv)
+ 			}
+ 		}
+ 
++		// Quasar: mode forwarding to the parent compositor (nested only).
++		quasar_mode_forward_tick();
++
+ 		// If our DRM state is out-of-date, refresh it. This might update
+ 		// the output size.
+ 		if ( GetBackend()->PollState() )
+diff --git a/src/xwayland_ctx.hpp b/src/xwayland_ctx.hpp
+index 5c8809f..093e48c 100644
+--- a/src/xwayland_ctx.hpp
++++ b/src/xwayland_ctx.hpp
+@@ -163,6 +163,9 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
+ 		Atom gamescopeSharpness;
+ 
+ 		Atom gamescopeXWaylandModeControl;
++		// Quasar: a client's emulated RandR/VidMode mode (QuasarModeForward).
++		Atom quasarXWaylandEmuMode;
++		Atom xwaylandRandrEmuMonitorRects;
+ 
+ 		Atom gamescopeFPSLimit;
+ 		Atom gamescopeDynamicRefresh[gamescope::GAMESCOPE_SCREEN_TYPE_COUNT];

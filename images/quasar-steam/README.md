@@ -31,13 +31,45 @@ The launcher (`quasar-steam`) selects one of two **validated** configurations vi
 `QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0`/`1`) overrides the per-mode default.
 Set `QUASAR_STEAM_GAMESCOPE=0` to run Steam without nested Gamescope.
 
-Display mode: gamescope's nested output is sized from `QUASAR_STREAM_WIDTH` /
+## Display mode
+
+**Starting mode.** Gamescope's nested output starts at `QUASAR_STREAM_WIDTH` /
 `QUASAR_STREAM_HEIGHT` / `QUASAR_STREAM_FPS`, which Quasar injects per session
 from the launched stream profile (quasar#384). An explicit `GAMESCOPE_WIDTH` /
-`GAMESCOPE_HEIGHT` / `GAMESCOPE_REFRESH` overrides it (per-app pin); with
-neither set the image falls back to 1920x1080x60. This is what Steam and every
-game it launches see -- it is not derived from the host compositor's output,
-which nested gamescope does not read.
+`GAMESCOPE_HEIGHT` / `GAMESCOPE_REFRESH` overrides it (per-app pin). With
+neither set, the image falls back to 1920x1080x60.
+
+**A game's resolution pick moves the monitor (quasar#447).** This needs a
+Quasar compositor that speaks `wlr-output-management`. The patched gamescope
+(`gamescope-quasar-mode-forward.patch`) then does three things:
+
+- It lists the monitor's modes in a game's display settings, each with its own
+  refresh rate. Modes larger than the session's starting size are not listed.
+- When a game applies one, gamescope asks the host for that mode. When the game
+  exits or loses focus, it asks for the session's mode again.
+- When the host moves, gamescope follows it: its output takes the new size and
+  refresh, so the game runs 1:1 instead of being scaled.
+
+Gamescope's own Xwayland is a patched build at
+`/usr/local/libexec/quasar-steam/Xwayland` (`xwayland-quasar-emu-mode.patch`).
+Without it, a game's pick reaches gamescope as a size only, so the refresh it
+chose would be lost. The system Xwayland is unchanged.
+
+The signal is a RandR or VidMode mode change, which native games (SDL) and Wine
+games that switch modes make. Steam's per-game resolution setting
+(`GAMESCOPE_XWAYLAND_MODE_CONTROL`) is forwarded as a size too. A Proton game
+that scales internally and never switches modes is still scaled by gamescope.
+
+Turn it off with `GAMESCOPE_QUASAR_MODE_FORWARD=0`: gamescope then scales a
+game's resolution inside its own output, as upstream does, and the launcher uses
+the system Xwayland. The same happens automatically when the host has no
+`wlr-output-management`.
+
+How to check it worked:
+
+- The gamescope log has `parent speaks zwlr_output_manager_v1` at startup.
+- Applying a mode in a game logs `asking the parent for WxH @ R Hz`, then
+  `parent is at WxH @ R Hz`.
 
 ## Host / launch requirements
 
