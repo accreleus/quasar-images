@@ -20,6 +20,8 @@ constraints, the pin policy, the KWin artefact, and what CI does per event.
 
 `quasar-app` builds on `quasar-base` and adds the shared Vulkan/EGL/OpenGL, Mesa, GLVND, GBM, Wayland, audio, NVIDIA-runtime initialization, and GPU-probe runtime. `quasar-diagnostics`, `quasar-test-vulkan`, `quasar-test-egl`, and `quasar-steam-runtime` build on `quasar-app`. **`quasar-test-vulkan` and `quasar-test-egl` are local-only GPU probes** — buildable via `./scripts/build.sh`, deliberately NOT published, because nothing consumes them from a registry.
 
+`quasar-app` also carries `quasar-display-bridge` (`images/quasar-app/display-bridge/`, built in its own throwaway stage so only the ~30 KB binary and its runtime libs — `libwayland-client`, `libX11`, `libXrandr`, already in this image — land in the final layer). It mirrors the Quasar compositor's `wlr-output-management` modes into RandR on a rootful Xwayland and forwards the user's pick back, so any X11 desktop image gets real display settings for free instead of re-implementing it. A desktop launcher starts it once its X server is up: `QUASAR_PARENT_WAYLAND_DISPLAY=<parent socket path> DISPLAY=<its :N> quasar-display-bridge &`. It is optional and soft (no protocol support, no crash — it just exits); `quasar-xfce`'s `QUASAR_XFCE_MODE_BRIDGE=0` is the per-image off-switch convention to follow. `quasar-xfce-modes` is kept as a compatibility symlink to the same binary.
+
 ```sh
 ./scripts/build.sh all
 ```
