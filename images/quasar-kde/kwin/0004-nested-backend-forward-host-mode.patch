@@ -45,6 +45,14 @@ WHAT THIS PATCH DOES
    (KWIN_NESTED_EXTRA_MODES) stay, at the current refresh, for sizes the host
    does not advertise. Without the protocol the list is exactly 0001's.
 
+   Only the host mode that IS the native entry is left out, compared exactly.
+   A monitor can advertise two modes of one size within half a hertz (an EDID's
+   1920x1080 at 119.879 and at 119.878 Hz), and a move can land on the sibling
+   of the mode asked for. Collapsing the sibling into the native entry made the
+   mode the OutputConfigurationStore remembered vanish, and the store then fell
+   back to chooseMode() - the highest refresh at the preferred size - and
+   re-applied 1920x1080 at 240 Hz (seen live on the console host).
+
 3. `applyChanges()`: a USER pick (OutputConfiguration::Source::User, i.e.
    Display Settings / kscreen-doctor) of a HOST mode is forwarded AND adopted at
    once: from the apply on, the pick (its size and its refresh) is the output's
@@ -54,48 +62,43 @@ WHAT THIS PATCH DOES
    at the picked size and its head reports the picked mode as current, the pick
    is satisfied: it IS the native mode, contentScale() is 1/scale() and the
    offset 0, and because size, refresh and Preferred flag are unchanged the
-   current OutputMode object is the very same one. The two arrive in either
+   current OutputMode object is the very same one (unless the host landed on a
+   sibling mode, see below). The two arrive in either
    order; `settleHostPick()` checks on both. A same-size refresh change needs
    only the head's current mode (its letterbox is geometrically a no-op, but the
    current mode carries the new refresh at once).
 
-   WHY ADOPT AT ONCE, AND WHY THAT IS NOT ENOUGH (the KScreen bounce). The
-   first version of this patch kept the output at its OLD mode until the host
-   moved, to avoid showing a letterboxed picture for half a second. Every
-   RESOLUTION pick then bounced back. Observed live on the console host: pick
-   1920x1080@120 from 3840x2160@120; the host moved and configured us at
-   1080p; 60 ms later a Source::User apply of 3840x2160@120 arrived, was
-   forwarded, and the host went straight back. The KCM's apply completed with
-   KWin still reporting 4K, so every KScreen client (the kscreen kded daemon,
-   the KCM) held 4K as the configuration, and one of them put it back when the
-   host's move changed the output under it. kde-output-management-v2 tags
-   every client apply Source::User, so point 5's Source::System guard cannot
-   see such an apply.
+   WHY ADOPT AT ONCE. KScreen (the KCM, the kscreen kded daemon) reads the
+   output back the moment its apply returns, and records whatever KWin reports
+   as current. Adopting the pick makes that the pick, and when the host's
+   configure lands at it the current OutputMode object is unchanged (same size,
+   refresh and Preferred flag) unless the host settled on a sibling mode (point
+   2), in which case the output reports the mode the host really runs.
 
-   Adopting the pick at once (above) makes KScreen read back the pick as the
-   result of the KCM's apply. It was not sufficient on its own: live, with the
-   pick adopted, the display oscillated 1080p -> 4K -> 1080p -> 4K, each
-   request 1-4 ms after the host's configure, alternating, i.e. a KScreen
-   client re-asserting the mode it held BEFORE each move as an immediate
-   reaction to the move. (A changed mode list is never invisible to KScreen:
-   kde-output-device-v2 re-sends EVERY mode object whenever the list changes,
-   so a configure that moves the native size always looks like a new mode
-   list to every client, whatever OutputMode identities KWin keeps.)
+   THE BOUNCE THAT WAS NOT KSCREEN. Earlier live runs saw a pick revert, and
+   then oscillate 1080p -> 4K -> 1080p, each request 1-4 ms after the host's
+   configure. Those runs had no KWin logging (Qt logged to a journal the
+   container does not have), and the bounce was put down to a KScreen client
+   re-applying its old mode as Source::User; an earlier revision of this patch
+   swallowed such applies for 500 ms after every host move. The first run with
+   logging (2026-10-04) showed no KScreen re-apply at all: after the pick, the
+   only applies were the store's Source::System ones, and the request that sent
+   the host back came from the host's own follow-client-size fallback, which
+   reads a fullscreen client's committed root surface as a mode request. Until
+   it acks the host's configure, this backend commits its root surface at the
+   size the host has just left (the root is a single-pixel buffer viewported to
+   the configured area). The host stands that fallback down while a
+   wlr-output-management client is bound. Here, the echo window is gone (it
+   could only swallow a genuine quick re-pick), and the configure that answers
+   a pick in flight is applied at once rather than after the one-refresh
+   configure throttle, so the stale-size window is only the frames already on
+   the wire.
 
-   So, in addition: a USER apply of a DIFFERENT host mode that arrives within
-   500 ms of the host moving us - a configure at a new size, or a new current
-   mode on the host's head - is treated as an echo and NOT forwarded. The
-   output keeps the mode the host gave it and KScreen reads that back as the
-   result of its apply. No person opens Display Settings and picks within half
-   a second of the display moving; the echoes land within milliseconds. A
-   re-apply of the pick still in flight is a no-op (already the current mode),
-   and a re-apply of where the host already is changes nothing. Only a
-   DIFFERENT user pick, outside the echo window, is forwarded (while another is
-   in flight it supersedes it and is adopted in its place). A configure never
-   forwards anything: only applyChanges() with Source::User does.
-
-   The exact KScreen client behind the echo is not pinned yet; every decision
-   above is logged (point 7) so the next live run can name it.
+   So: a re-apply of the pick still in flight is a no-op (it is already the
+   current mode), and a re-apply of where the host already is changes nothing.
+   A DIFFERENT user pick is forwarded (while another is in flight it supersedes
+   it and is adopted in its place). A configure never forwards anything: only
+   applyChanges() with Source::User does.
 
    Fallback: `failed`, a second `cancelled` (the first is retried once with the
    fresh serial, which precedes it on the wire), or no move within 2 s ->
@@ -129,9 +132,10 @@ WHAT THIS PATCH DOES
 7. Logging, category kwin_wayland_backend at info level (the image enables
    it): "host offers wlr-output-management" once per session; every apply
    that names a host mode, with its source, the native mode, the pick in flight
-   and the time since the host last moved us; "asked the host for mode";
-   "host configured us at"; "host head moved to"; "host moved to mode"; "not
-   forwarding ... echo"; and the fallbacks as warnings.
+   and the time since the host last moved us; "asked the host for mode" (the
+   refresh of the host mode object actually sent, and the asked-for one when
+   they differ); "host configured us at"; "host head moved to"; "host moved to
+   mode" (naming a sibling landing); and the fallbacks as warnings.
 
 Nothing changes against a host that lacks wlr-output-management: no bind, no
 request, no mode forwarding, the 0001 ladder and letterbox.
@@ -791,7 +795,7 @@ index 0000000..541284a
 +  </interface>
 +</protocol>
 diff --git a/src/backends/wayland/wayland_display.cpp b/src/backends/wayland/wayland_display.cpp
-index 99bfadc..d0eb075 100644
+index 99bfadc..accedcc 100644
 --- a/src/backends/wayland/wayland_display.cpp
 +++ b/src/backends/wayland/wayland_display.cpp
 @@ -25,6 +25,7 @@
@@ -820,7 +824,7 @@ index 99bfadc..d0eb075 100644
  
      if (m_shm) {
          wl_shm_destroy(m_shm);
-@@ -390,6 +395,308 @@ const wl_output_listener WaylandDisplay::s_outputListener{
+@@ -390,6 +395,315 @@ const wl_output_listener WaylandDisplay::s_outputListener{
      .scale = &WaylandDisplay::output_scale,
  };
  
@@ -1122,14 +1126,21 @@ index 99bfadc..d0eb075 100644
 +    // Send now rather than on the event thread's next turn: this runs from an
 +    // applyChanges(), not from an event dispatch.
 +    wl_display_flush(m_display);
-+    qCInfo(KWIN_WAYLAND_BACKEND) << "asked the host for mode" << size << "@" << best->mode.refresh << "mHz";
++    // The refresh logged is the host mode object actually sent in set_mode,
++    // which can differ (by up to 500 mHz) from the refresh that was asked for.
++    if (best->mode.refresh == refresh) {
++        qCInfo(KWIN_WAYLAND_BACKEND) << "asked the host for mode" << size << "@" << best->mode.refresh << "mHz";
++    } else {
++        qCInfo(KWIN_WAYLAND_BACKEND) << "asked the host for mode" << size << "@" << best->mode.refresh << "mHz (the host's mode nearest to"
++                                     << refresh << "mHz)";
++    }
 +    return true;
 +}
 +
  void WaylandDisplay::registry_global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version)
  {
      WaylandDisplay *display = static_cast<WaylandDisplay *>(data);
-@@ -457,6 +764,15 @@ void WaylandDisplay::registry_global(void *data, wl_registry *registry, uint32_t
+@@ -457,6 +771,15 @@ void WaylandDisplay::registry_global(void *data, wl_registry *registry, uint32_t
          parent->output = static_cast<wl_output *>(wl_registry_bind(registry, name, &wl_output_interface, bindVersion));
          wl_output_add_listener(parent->output, &s_outputListener, parent.get());
          display->m_parentOutputs.push_back(std::move(parent));
@@ -1145,7 +1156,7 @@ index 99bfadc..d0eb075 100644
      }
  }
  
-@@ -471,6 +787,10 @@ void WaylandDisplay::registry_global_remove(void *data, wl_registry *registry, u
+@@ -471,6 +794,10 @@ void WaylandDisplay::registry_global_remove(void *data, wl_registry *registry, u
          display->m_parentOutputs.erase(it);
          Q_EMIT display->parentModesChanged();
      }
@@ -1275,7 +1286,7 @@ index 626ae85..f87dce2 100644
      wl_registry *m_registry = nullptr;
      wl_shm *m_shm = nullptr;
 diff --git a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
-index 5cdbc99..5d2127e 100644
+index 5cdbc99..8925463 100644
 --- a/src/backends/wayland/wayland_output.cpp
 +++ b/src/backends/wayland/wayland_output.cpp
 @@ -191,6 +191,14 @@ WaylandOutput::WaylandOutput(const QString &name, WaylandBackend *backend)
@@ -1334,7 +1345,7 @@ index 5cdbc99..5d2127e 100644
      m_modeCache[key] = mode;
      return mode;
  }
-@@ -485,34 +501,93 @@ void WaylandOutput::rebuildModes(State &next, const QSize &nativeSize, const QSi
+@@ -485,34 +501,101 @@ void WaylandOutput::rebuildModes(State &next, const QSize &nativeSize, const QSi
          cur = nativeSize;
      }
  
@@ -1393,7 +1404,15 @@ index 5cdbc99..5d2127e 100644
 +        QList<QSize> hostSizes;
 +        for (const WaylandDisplay::HostMode &mode : hostModes) {
 +            hostSizes.append(mode.size);
-+            if (mode.size == nativeSize && std::abs(qint64(mode.refresh) - qint64(nativeRefresh)) <= 500) {
++            // Only the host mode that IS the native entry is skipped - compared
++            // EXACTLY. A host can advertise two modes of one size within half a
++            // hertz of each other (an EDID's 1920x1080 at 119.879 and 119.878 Hz),
++            // and the host's move can land on the sibling of the mode we asked
++            // for. Collapsing the sibling into the native entry made the mode
++            // KWin's OutputConfigurationStore remembered vanish from the list, so
++            // the store fell back to chooseMode() - the highest refresh at the
++            // preferred size - and re-applied 1920x1080 at 240 Hz.
++            if (mode.size == nativeSize && mode.refresh == nativeRefresh) {
 +                continue; // that IS the native entry
 +            }
 +            add(mode.size, mode.refresh);
@@ -1447,7 +1466,7 @@ index 5cdbc99..5d2127e 100644
  }
  
  void WaylandOutput::refreshModeLadder()
-@@ -525,6 +600,217 @@ void WaylandOutput::refreshModeLadder()
+@@ -525,6 +608,219 @@ void WaylandOutput::refreshModeLadder()
      setState(next);
  }
  
@@ -1489,13 +1508,6 @@ index 5cdbc99..5d2127e 100644
 +{
 +    return std::abs(qint64(a) - qint64(b)) <= 500;
 +}
-+
-+// Quasar (0004): how long after a host-driven change a user apply of a
-+// DIFFERENT host mode is treated as an echo of KScreen's previous state rather
-+// than as a pick. Observed echoes land 1-4 ms after the configure; a person
-+// cannot open Display Settings and pick within half a second of the display
-+// moving.
-+static constexpr qint64 kHostEchoWindowMs = 500;
 +
 +static const char *sourceName(OutputConfiguration::Source source)
 +{
@@ -1623,7 +1635,16 @@ index 5cdbc99..5d2127e 100644
 +            || !fitsNative(m_hostPick->size)) {
 +            return;
 +        }
-+        qCInfo(KWIN_WAYLAND_BACKEND) << "host moved to mode" << m_hostPick->size << "@" << current->refresh << "mHz";
++        if (current->refresh == m_hostPick->refresh) {
++            qCInfo(KWIN_WAYLAND_BACKEND) << "host moved to mode" << m_hostPick->size << "@" << current->refresh << "mHz";
++        } else {
++            // The host's move landed on a sibling mode of the same size within
++            // half a hertz. That mode, not the one asked for, is now native and
++            // current (rebuildModes() reads the head's current mode), so KWin and
++            // KScreen report exactly what the display runs at.
++            qCInfo(KWIN_WAYLAND_BACKEND) << "host moved to mode" << m_hostPick->size << "@" << current->refresh << "mHz (asked for"
++                                         << m_hostPick->refresh << "mHz; the host chose a sibling mode)";
++        }
 +        m_hostPick.reset();
 +        m_hostPickTimer.stop();
 +        // native size == pick: contentScale() is back to 1 / scale(), offset 0
@@ -1665,7 +1686,7 @@ index 5cdbc99..5d2127e 100644
  QSize WaylandOutput::parentLogicalSize() const
  {
      return m_parentLogicalSize;
-@@ -600,8 +886,63 @@ void WaylandOutput::applyChanges(const OutputConfiguration &config)
+@@ -600,8 +896,49 @@ void WaylandOutput::applyChanges(const OutputConfiguration &config)
      // Quasar: honour the picked resolution. It is remembered so the host's next
      // configure - which arrives at the SAME size, because the toplevel keeps
      // filling the host's area - does not snap it back.
@@ -1684,7 +1705,6 @@ index 5cdbc99..5d2127e 100644
 +    if (hostPick) {
 +        const QSize requested = props->currentMode->size();
 +        const uint32_t requestedRefresh = props->currentMode->refreshRate();
-+        const bool echo = userPick && m_lastHostChange.isValid() && m_lastHostChange.elapsed() < kHostEchoWindowMs;
 +        qCInfo(KWIN_WAYLAND_BACKEND) << sourceName(config.source) << "apply of host mode" << requested << "@" << requestedRefresh << "mHz;"
 +                                     << "native" << m_nativeSize << "@" << nativeRefreshRate(m_nativeSize) << "mHz,"
 +                                     << "pick in flight" << (m_hostPick ? m_hostPick->size : QSize()) << "@" << (m_hostPick ? m_hostPick->refresh : 0) << "mHz,"
@@ -1701,19 +1721,6 @@ index 5cdbc99..5d2127e 100644
 +            if (userPick) {
 +                m_lateHostPick.reset();
 +            }
-+        } else if (echo) {
-+            // A "user" apply of a different host mode moments after the host
-+            // moved us is not a person picking: it is a KScreen client
-+            // re-asserting the configuration it held BEFORE the move, in
-+            // reaction to the move itself (kde-output-management-v2 tags every
-+            // client apply Source::User, so the guard on Source::System above
-+            // cannot see it). Forwarding it bounced the display straight back,
-+            // and the next move drew the same echo the other way - observed
-+            // live as a 1080p/4K oscillation, each request 1-4 ms after the
-+            // host's configure. The output keeps the mode the host gave it, and
-+            // KScreen reads that back as the result of its apply.
-+            qCInfo(KWIN_WAYLAND_BACKEND) << "not forwarding" << requested << "@" << requestedRefresh << "mHz: it arrived"
-+                                         << m_lastHostChange.elapsed() << "ms after the host moved us, so it is an echo, not a pick";
 +        } else if (userPick) {
 +            // (including "back to where the host is" while a DIFFERENT pick is
 +            // pending: that one is superseded and this one adopted instead)
@@ -1730,7 +1737,23 @@ index 5cdbc99..5d2127e 100644
          if (requested.isValid() && !requested.isEmpty()
              && requested.width() <= m_nativeSize.width() && requested.height() <= m_nativeSize.height()) {
              if (requested == m_nativeSize) {
-@@ -713,8 +1054,18 @@ void WaylandOutput::applyConfigure(const QSize &size, quint32 serial)
+@@ -687,6 +1024,15 @@ void WaylandOutput::handleConfigure(const QSize &size, XdgShellSurface::States s
+     if (!m_ready) {
+         m_ready = true;
+ 
++        applyConfigure(size, serial);
++    } else if (m_hostPick) {
++        // Quasar (0004): the configure that answers a forwarded pick is applied
++        // at once, not one refresh later. Until it is acked and committed, every
++        // frame still commits the root surface at the size the host has just
++        // left - which a host may read as the client asking for that size
++        // back. A pick's move is a single configure, so there is nothing to
++        // coalesce; a throttled configure still pending is superseded by it.
++        m_configureThrottleTimer.stop();
+         applyConfigure(size, serial);
+     } else {
+         // LogicalOutput resizing is a resource intensive task, so the configure events are throttled.
+@@ -713,8 +1059,18 @@ void WaylandOutput::applyConfigure(const QSize &size, quint32 serial)
          // It also survives a same-size configure, which is what the host sends
          // right after a mode change (the toplevel deliberately keeps filling the
          // host's area, so from the host's side nothing changed).
@@ -1750,7 +1773,7 @@ index 5cdbc99..5d2127e 100644
          QSize current = m_userMode.value_or(m_nativeSize);
          if (current.width() > m_nativeSize.width() || current.height() > m_nativeSize.height()) {
 diff --git a/src/backends/wayland/wayland_output.h b/src/backends/wayland/wayland_output.h
-index 81c243e..fe8b0aa 100644
+index 81c243e..8b60aa9 100644
 --- a/src/backends/wayland/wayland_output.h
 +++ b/src/backends/wayland/wayland_output.h
 @@ -9,8 +9,11 @@
@@ -1806,8 +1829,9 @@ index 81c243e..fe8b0aa 100644
      /// into KWin's stored output configuration yet - see adoptHostScale()
      bool m_hostScalePending = false;
 +    // Quasar: a HOST mode the user picked and that was forwarded to the host.
-+    // Until the host's configure (and its wlr-output-management current mode)
-+    // arrive at it, the output keeps running at the old mode - no letterbox.
++    // It is the current mode from the apply on, presented inside the area the
++    // host still configures us at, until the host's configure (and its
++    // wlr-output-management current mode) arrive at it - see settleHostPick().
 +    struct HostPick
 +    {
 +        QSize size;
@@ -1821,8 +1845,7 @@ index 81c243e..fe8b0aa 100644
 +    /// move there after all, the letterbox is dropped (see settleHostPick())
 +    std::optional<QSize> m_lateHostPick;
 +    /// when the host last MOVED us (a configure at a new size, or a new current
-+    /// mode on its head); a user apply of a different host mode that follows within
-+    /// kHostEchoWindow is an echo, not a pick - see applyChanges()
++    /// mode on its head); logged with every apply of a host mode
 +    QElapsedTimer m_lastHostChange;
 +    /// the host head's current mode as last seen, to tell a real move from a
 +    /// head event that changed nothing about it
