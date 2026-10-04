@@ -11,10 +11,19 @@
 # compositor by BARE NAME, so shadowing that name is the only supported-ish way
 # to get the session's real mode onto the nested output.
 #
-# This wrapper must stay trivial: append two flags, exec the real binary. It
-# deliberately does NOT live in /usr/local/bin -- shadowing kwin_wayland for
-# every process in the image would be a much wider blast radius than the session.
+# This wrapper must stay trivial: one logging rule, append two flags, exec the
+# real binary. It deliberately does NOT live in /usr/local/bin -- shadowing
+# kwin_wayland for every process in the image would be a much wider blast radius
+# than the session.
 set -euo pipefail
+
+# The nested backend's own log lines (kwin/0004: "asked the host for mode",
+# "host moved to mode", the fallbacks) are qCInfo in the kwin_wayland_backend
+# category, which kwin declares at warning level. Without this rule a forwarded
+# display-mode pick leaves no trace in the container log, and a pick that goes
+# wrong cannot be attributed to kwin or to the host. Appended, so an operator's
+# own QT_LOGGING_RULES still applies.
+export QT_LOGGING_RULES="${QT_LOGGING_RULES:+${QT_LOGGING_RULES};}kwin_wayland_backend.info=true"
 
 exec /usr/bin/kwin_wayland \
   --width "${QUASAR_KDE_OUTPUT_WIDTH:-1920}" \
