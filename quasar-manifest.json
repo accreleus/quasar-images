@@ -52,8 +52,8 @@
       "display_name": "XFCE Desktop",
       "description": "XFCE 4 X11 desktop session with the Steam desktop client, user-level Flatpak (gnome-software), Firefox, and Quasar branding. Runs a rootful Xwayland nested under the Quasar compositor (there is no Wayland XFCE session); the whole mutable state lives in the /home/quasar volume (org.quasar.image.persist). Needs a host --shm-size bump and PUID/PGID matching the managed home, like Steam.",
       "kind": "prebuilt",
-      "version": "2026.09.30",
-      "registry_ref": "ghcr.io/accreleus/quasar-xfce@sha256:604fa552f570a316b568344527846717a756fd15f8656327e6a6f39f6a858c58",
+      "version": "2026.10.04",
+      "registry_ref": "ghcr.io/accreleus/quasar-xfce@sha256:98703c2b340a7bf8dbc1b13b684ab97be1bc4d9cabbadbd34d748e69c5a72daf",
       "runtime": {
         "preset_name": "XFCE Desktop",
         "gpu": true,
