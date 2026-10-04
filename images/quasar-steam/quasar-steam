@@ -279,9 +279,13 @@ gs_stats="$gs_tmpdir/stats.pipe"
 mkfifo -- "$gs_stats"
 mkfifo -- "$gs_socket"
 
-# Nested gamescope does not read the host compositor's wl_output mode -- it
-# sizes its virtual output from -W/-H/-r. So whatever it is given here is the
-# display Steam and every game it launches see. Quasar injects the session's
+# Nested gamescope sizes its virtual output from -W/-H/-r at launch, so whatever
+# it is given here is the display Steam and every game it launches START with.
+# Under a Quasar compositor that speaks wlr-output-management, the patched
+# gamescope then lists the host's real modes to games, forwards a game's pick to
+# the host, and follows the host's mode (size and refresh) when it moves
+# (quasar#447, gamescope-quasar-mode-forward.patch; GAMESCOPE_QUASAR_MODE_FORWARD=0
+# turns that off and restores plain scaling inside gamescope). Quasar injects the session's
 # streamed mode as QUASAR_STREAM_WIDTH/HEIGHT/FPS (quasar#384); before that the
 # baked 1920x1080x60 defaults below applied to every session, so a 1440p120
 # session rendered 1080p60 and the compositor upscaled it. An explicit
@@ -291,7 +295,20 @@ gs_width="${GAMESCOPE_WIDTH:-${QUASAR_STREAM_WIDTH:-1920}}"
 gs_height="${GAMESCOPE_HEIGHT:-${QUASAR_STREAM_HEIGHT:-1080}}"
 gs_refresh="${GAMESCOPE_REFRESH:-${QUASAR_STREAM_FPS:-60}}"
 
-log "starting Gamescope (mode=$ui_mode ${gs_width}x${gs_height}@${gs_refresh} flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0})"
+# Gamescope's own Xwayland: the patched build keeps the refresh of a game's
+# RandR pick (xwayland-quasar-emu-mode.patch). wlroots execs $WLR_XWAYLAND
+# instead of its compiled-in path. Forwarding off, or the binary missing, means
+# the system Xwayland exactly as before; an explicit WLR_XWAYLAND still wins.
+gs_xwayland=/usr/local/libexec/quasar-steam/Xwayland
+case "${GAMESCOPE_QUASAR_MODE_FORWARD:-1}" in
+  0|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|[Nn][Oo]) gs_mode_forward=0 ;;
+  *) gs_mode_forward=1 ;;
+esac
+if [[ -z "${WLR_XWAYLAND:-}" && "$gs_mode_forward" == 1 && -x "$gs_xwayland" ]]; then
+  export WLR_XWAYLAND="$gs_xwayland"
+fi
+
+log "starting Gamescope (mode=$ui_mode ${gs_width}x${gs_height}@${gs_refresh} flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0} mode_forward=$gs_mode_forward xwayland=${WLR_XWAYLAND:-system})"
 gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
   -W "$gs_width" \
   -H "$gs_height" \
