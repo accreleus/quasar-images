@@ -198,6 +198,24 @@ export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=KDE
 export DESKTOP_SESSION=plasma
 
+# --- Session logging into the container log ---------------------------------
+# Fedora's Qt is built with journald support and, when stderr is not a
+# terminal (it never is in a container), sends every qCWarning/qCInfo to the
+# journal -- which does not exist here. Without QT_FORCE_STDERR_LOGGING the
+# whole Plasma session (kwin included) therefore logged NOTHING to the
+# container log; found live on the console host, where not one line of kwin's
+# display-mode forwarding appeared. Forcing stderr makes the session's
+# warnings land in `docker logs` like every other Quasar image.
+#
+# The rules turn on exactly the display-mode story at a useful level: kwin's
+# nested backend (kwin/0004 forwarding decisions), and the two KScreen clients
+# that apply output configurations on their own -- the kscreen kded daemon
+# ("Change detected", "Applying known config", "Config applied") and the
+# Display Settings KCM (its apply and revert). Appended, so an operator's own
+# QT_LOGGING_RULES still applies.
+export QT_FORCE_STDERR_LOGGING=1
+export QT_LOGGING_RULES="${QT_LOGGING_RULES:+${QT_LOGGING_RULES};}kwin_wayland_backend.info=true;kscreen.kded.debug=true;kscreen.kcm.debug=true"
+
 # --- Overlay (subsurface) offloading OFF: the black-stream fix ---------------
 # BLOCKING BUG, live-diagnosed on the dev box 2026-08-13 under the real Quasar
 # stack (RTX 5090): the session came up perfectly -- kwin 1920x1080, Xwayland,

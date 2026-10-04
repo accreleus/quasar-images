@@ -335,6 +335,8 @@ docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "$QV_GUARD"'
   # kwin/0004 logs every forwarded mode pick at info level; the shim turns that
   # category on so a live pick can be attributed from the container log.
   grep -q "kwin_wayland_backend.info=true" "$shim"
+  grep -q "QT_FORCE_STDERR_LOGGING=1" "$shim"
+  grep -q "QT_FORCE_STDERR_LOGGING=1" "$kde"
   grep -q "/usr/local/libexec/quasar-kde" "$kde"
 
   # kwin'"'"'s cap_sys_nice=ep FILE capability must be stripped (setcap -r in the
