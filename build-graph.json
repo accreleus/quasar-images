@@ -74,7 +74,7 @@
       "needs": ["quasar-base"],
       "tier": "spine",
       "args": { "BASE_IMAGE": "@tag:quasar-base", "VERSION": "@version" },
-      "verify": [],
+      "verify": ["scripts/verify-app.sh"],
       "ci": true,
       "publish": true
     },

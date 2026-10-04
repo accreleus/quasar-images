@@ -1,12 +1,12 @@
 /*
- * quasar-xfce-modes: the display-mode bridge between a rootful Xwayland and the Quasar
+ * quasar-display-bridge: the display-mode bridge between a rootful Xwayland and the Quasar
  * compositor it runs on (quasar #445).
  *
- * Why it exists. XFCE is an X11 desktop on a rootful Xwayland. A rootful Xwayland ignores
- * the compositor's wl_output mode list entirely (hw/xwayland/xwayland-output.c,
+ * Why it exists. Any X11 desktop here runs on a rootful Xwayland, and a rootful Xwayland
+ * ignores the compositor's wl_output mode list entirely (hw/xwayland/xwayland-output.c,
  * xwl_screen_init_randr_fixed): it builds its own RandR mode table, every entry at a
- * hard-coded 60 Hz, and a RandR mode change only resizes its own window. So XFCE's display
- * settings could never list the monitor's real modes, and a choice never reached the
+ * hard-coded 60 Hz, and a RandR mode change only resizes its own window. So the desktop's
+ * display settings could never list the monitor's real modes, and a choice never reached the
  * compositor. Wayland has no client request for a mode change; the protocol for it is
  * wlr-output-management-unstable-v1, which the Quasar compositor implements (one head, the
  * monitor's modes, each with its own refresh).
@@ -16,7 +16,7 @@
  *   1. On every wlr `done`, mirror the head's modes into RandR as user modes on the
  *      XWAYLAND0 output (XRRCreateMode + XRRAddOutputMode), skipping a mode Xwayland already
  *      lists at the same size and whole-hertz rate, and dropping user modes the compositor
- *      no longer advertises. XFCE's display settings then list them, with their refresh.
+ *      no longer advertises. The desktop's display settings then list them, with their refresh.
  *   2. On every RandR CRTC change (the user applied a mode), find the compositor mode of
  *      that size with the nearest refresh and apply it through wlr-output-management.
  *      Xwayland has already resized its own window to the new size; the compositor letterboxes
@@ -93,7 +93,7 @@ static void logf_(const char *fmt, ...)
     struct tm tm;
     localtime_r(&now, &tm);
     strftime(ts, sizeof ts, "%FT%T%z", &tm);
-    fprintf(stderr, "%s quasar-xfce-modes: ", ts);
+    fprintf(stderr, "%s quasar-display-bridge: ", ts);
     va_list ap;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
