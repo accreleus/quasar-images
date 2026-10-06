@@ -110,10 +110,17 @@ What the image does:
   corrupt band at the bottom of every 4K mode on the NVIDIA driver (upstream
   [gamescope#2309](https://github.com/ValveSoftware/gamescope/issues/2309)).
   `QUASAR_STEAM_GBM_SCANOUT=1|0` forces it on or off.
+- Sound: the launcher drops any `PULSE_*` it was given and runs Steam as
+  `dbus-run-session -- /usr/local/libexec/quasar-steam/direct-session`, which
+  starts PipeWire, WirePlumber and `pipewire-pulse` in that session bus (with the
+  private `XDG_RUNTIME_DIR`) and then execs Steam. WirePlumber picks the default
+  output; Steam's Settings > Audio lists the others. A nested session starts none
+  of this and keeps the agent's `PULSE_SERVER`.
 - The nested-only pieces (`QUASAR_STREAM_*`, `GAMESCOPE_WIDTH/HEIGHT/REFRESH`, the
   mode-forwarding Xwayland) are not used.
 
-How to know it worked: the log has `seatd ready: /run/seatd.sock`, then
+How to know it worked: the log has `seatd ready: /run/seatd.sock`,
+`audio: PipeWire, WirePlumber and the PulseAudio shim started`, then
 `starting Gamescope on the display (direct; ... 3840x2160@240 ... gbm_scanout=1 ...)`,
 and gamescope's own `Overriding from environment variable: gamescope.convars.drm_gbm_scanout.value = 1`.
 

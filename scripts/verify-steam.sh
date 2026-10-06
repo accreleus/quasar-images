@@ -21,7 +21,7 @@ STEAM_IMAGE="${QUASAR_STEAM_IMAGE:-quasar-steam:$TAG}"
 echo "checking the session executables in $STEAM_IMAGE"
 qv_image_has "$STEAM_IMAGE" \
   steam gamescope bwrap quasar-steam quasar-steam-client dbus-daemon NetworkManager \
-  seatd drm_info jq
+  seatd drm_info jq pipewire wireplumber pipewire-pulse
 
 docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   steam=/usr/local/bin/quasar-steam
@@ -134,6 +134,11 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
     grep -q "QUASAR_DIRECT_DISPLAY" "$hook"
   done
   seatd -h 2>&1 | grep -q -- "-u <user>"
+  # Direct-mode sound: the helper that starts PipeWire, WirePlumber and the
+  # Pulse shim inside Steam'"'"'s session bus (behaviour: verify-steam-launcher.sh).
+  test -x /usr/local/libexec/quasar-steam/direct-session
+  grep -q "pipewire-pulse" /usr/local/libexec/quasar-steam/direct-session
+  grep -q "unset PULSE_SERVER PULSE_SINK PULSE_SOURCE PULSE_COOKIE" "$steam"
   grep -q "QUASAR_DIRECT_DISPLAY" "$steam"
 
   # ALSA-only clients route to the injected PulseAudio sink.

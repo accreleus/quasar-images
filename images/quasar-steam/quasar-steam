@@ -13,6 +13,9 @@ if [[ "${QUASAR_DIRECT_DISPLAY:-}" == "1" ]]; then
   # Nothing of a parent compositor may reach gamescope (it would pick the
   # Wayland or SDL backend) or Steam (it must bind gamescope's Xwayland).
   unset WAYLAND_DISPLAY DISPLAY
+  # Nor the agent's streamed-session audio: in direct mode sound is the console's
+  # own card, served by the PipeWire stack direct-session starts (below).
+  unset PULSE_SERVER PULSE_SINK PULSE_SOURCE PULSE_COOKIE
 fi
 
 # --- Wayland socket handoff (quasar#379) -------------------------------------
@@ -114,6 +117,11 @@ if [[ -e /usr/lib64/libGLX_nvidia.so.0 ]] \
 fi
 
 client=(dbus-run-session -- /usr/local/bin/quasar-steam-client "$@")
+if [[ "$direct_display" == 1 ]]; then
+  # Same place in the tree, same bus: the helper starts PipeWire, WirePlumber
+  # and pipewire-pulse inside this session bus, then execs quasar-steam-client.
+  client=(dbus-run-session -- /usr/local/libexec/quasar-steam/direct-session "$@")
+fi
 
 # --- Graceful shutdown: launcher-owned sequenced relay (quasar-images#1) -----
 # images/quasar-base/Dockerfile's tini no longer runs with -g, so `docker stop`

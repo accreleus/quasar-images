@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
-# Test stub for dbus-run-session: records what Steam would have been started
-# with, then exits as a Steam that quit cleanly.
+# Test stub for dbus-run-session: records what it was asked to run and the
+# environment, then stands in for a session bus. A nested launch asks for
+# quasar-steam-client, which the stub does not run (it exits as a Steam that
+# quit cleanly); a direct launch asks for the direct-session helper, which IS
+# the code under test, so the stub execs it on a fake bus address.
 set -euo pipefail
 log="${STUB_LOG:?STUB_LOG must name the case log directory}"
 printf '%s\n' "$@" > "$log/client.args"
 {
-  for v in DISPLAY WAYLAND_DISPLAY GAMESCOPE_WAYLAND_DISPLAY STEAM_STARTUP_FLAGS gamescope_drm_gbm_scanout; do
+  for v in DISPLAY WAYLAND_DISPLAY GAMESCOPE_WAYLAND_DISPLAY STEAM_STARTUP_FLAGS gamescope_drm_gbm_scanout \
+           PULSE_SERVER PULSE_SINK PULSE_SOURCE PULSE_COOKIE; do
     if [[ -v $v ]]; then printf '%s=%s\n' "$v" "${!v}"; else printf '%s<unset>\n' "$v"; fi
   done
 } > "$log/client.env"
+[[ "${1:-}" == "--" ]] && shift
+if [[ "${1:-}" == /usr/local/libexec/quasar-steam/direct-session ]]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$STUB_LOG/stub-bus"
+  exec "$@"
+fi
 exit 0

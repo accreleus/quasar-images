@@ -40,13 +40,20 @@ run_launcher() {
   local name="$1"; shift
   log="/tmp/cases/$name"
   rm -rf "$log" && mkdir -p "$log/home"
-  : > "$log/gamescope.args"; : > "$log/gamescope.env"; : > "$log/client.env"
+  : > "$log/gamescope.args"; : > "$log/gamescope.env"; : > "$log/client.env"; : > "$log/steam.env"
   local rc=0
   env -i PATH="$T/stubs:/usr/local/bin:/usr/bin:/bin" HOME="$log/home" STUB_LOG="$log" \
     "$@" timeout 60 "$LAUNCHER" >"$log/launcher.out" 2>&1 || rc=$?
   # The gamescope stub idles like a compositor; the launcher does not kill it
   # on a clean Steam exit (nor does it in production -- the container exits).
   pkill -f "^sleep 300$" 2>/dev/null || true
+  # Direct mode backgrounds the audio daemons just before exec'ing Steam; give
+  # their stubs a moment to write before the case reads the log.
+  local i
+  for i in $(seq 1 20); do
+    [[ ! -e "$log/audio.log" || "$(wc -l < "$log/audio.log")" -ge 3 ]] && break
+    sleep 0.1
+  done
   if [[ "$rc" != 0 ]]; then
     fail "$name: launcher exited $rc"
     sed 's/^/      /' "$log/launcher.out" >&2
@@ -91,7 +98,8 @@ drm_info_called() { [[ -s "$log/drm_info.calls" ]]; }
 # 1. Nested: today's command line, byte for byte, and no direct-display state.
 run_launcher nested \
   XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
-  QUASAR_STREAM_WIDTH=2560 QUASAR_STREAM_HEIGHT=1440 QUASAR_STREAM_FPS=120
+  QUASAR_STREAM_WIDTH=2560 QUASAR_STREAM_HEIGHT=1440 QUASAR_STREAM_FPS=120 \
+  PULSE_SERVER=unix:/run/quasar-pulse/native PULSE_SINK=quasar_output
 expect_argv nested "-e -b -R <ready-fifo> -T <stats-fifo> -W 2560 -H 1440 -r 120"
 expect_env gamescope.env nested "WAYLAND_DISPLAY=/run/quasar-wayland/wayland-3"
 expect_env gamescope.env nested "WLR_XWAYLAND=/usr/local/libexec/quasar-steam/Xwayland"
@@ -100,6 +108,19 @@ expect_env gamescope.env nested "LIBSEAT_BACKEND<unset>"
 expect_env client.env nested "DISPLAY=:7"
 expect_env client.env nested "WAYLAND_DISPLAY<unset>"
 if drm_info_called; then fail "nested: drm_info must not be consulted"; else pass "nested: drm_info not consulted"; fi
+# Nested audio is the agent's: its PULSE_* reach Steam and no daemon starts.
+expect_env client.env nested "PULSE_SERVER=unix:/run/quasar-pulse/native"
+expect_env client.env nested "PULSE_SINK=quasar_output"
+if [[ -s "$log/audio.log" ]]; then
+  fail "nested: audio daemons started: $(paste -sd';' "$log/audio.log")"
+else
+  pass "nested: no audio daemon started"
+fi
+if [[ "$(sed -n 2p "$log/client.args")" == /usr/local/bin/quasar-steam-client ]]; then
+  pass "nested: Steam runs as dbus-run-session -- quasar-steam-client"
+else
+  fail "nested: dbus-run-session ran $(paste -sd' ' "$log/client.args")"
+fi
 
 # 1b. Nested with anything other than exactly "1" stays nested.
 run_launcher nested-not-one \
@@ -113,7 +134,9 @@ expect_env gamescope.env nested-not-one "gamescope_drm_gbm_scanout<unset>"
 run_launcher direct-nvidia \
   QUASAR_DIRECT_DISPLAY=1 STUB_DRM_INFO="$T/fixtures/nvidia-4k240.json" \
   XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 DISPLAY=:99 \
-  QUASAR_STREAM_WIDTH=1920 QUASAR_STREAM_HEIGHT=1080 QUASAR_STREAM_FPS=60
+  QUASAR_STREAM_WIDTH=1920 QUASAR_STREAM_HEIGHT=1080 QUASAR_STREAM_FPS=60 \
+  PULSE_SERVER=unix:/run/quasar-pulse/native PULSE_SINK=quasar_output \
+  PULSE_SOURCE=quasar_input PULSE_COOKIE=/run/quasar-pulse/cookie
 expect_argv direct-nvidia "--backend drm -e -R <ready-fifo> -T <stats-fifo> -W 3840 -H 2160 -r 240 --force-composition"
 expect_env gamescope.env direct-nvidia "gamescope_drm_gbm_scanout=1"
 expect_env gamescope.env direct-nvidia "LIBSEAT_BACKEND=seatd"
@@ -123,6 +146,34 @@ expect_env gamescope.env direct-nvidia "WLR_XWAYLAND<unset>"
 expect_env client.env direct-nvidia "DISPLAY=:7"
 expect_env client.env direct-nvidia "WAYLAND_DISPLAY<unset>"
 expect_env client.env direct-nvidia "STEAM_STARTUP_FLAGS=-bigpicture"
+# Direct audio: PipeWire first, then WirePlumber and the Pulse shim, all with the
+# launcher's private runtime dir and in the same session bus Steam then gets;
+# the agent's PULSE_* never reach Steam.
+priv_rt="$log/home/.runtime"
+bus="unix:path=$log/stub-bus"
+if [[ "$(sed -n 2p "$log/client.args")" == /usr/local/libexec/quasar-steam/direct-session ]]; then
+  pass "direct-nvidia: Steam runs as dbus-run-session -- direct-session"
+else
+  fail "direct-nvidia: dbus-run-session ran $(paste -sd' ' "$log/client.args")"
+fi
+if [[ "$(head -n1 "$log/audio.log" 2>/dev/null | cut -d' ' -f1)" == pipewire ]]; then
+  pass "direct-nvidia: pipewire started first"
+else
+  fail "direct-nvidia: first audio daemon was '$(head -n1 "$log/audio.log" 2>/dev/null)'"
+fi
+for daemon in pipewire wireplumber pipewire-pulse; do
+  if grep -qxF "$daemon XDG_RUNTIME_DIR=$priv_rt DBUS_SESSION_BUS_ADDRESS=$bus" "$log/audio.log" 2>/dev/null; then
+    pass "direct-nvidia: $daemon started in Steam's bus with the private runtime dir"
+  else
+    fail "direct-nvidia: $daemon not started as expected; audio.log: $(paste -sd';' "$log/audio.log" 2>/dev/null)"
+  fi
+done
+expect_env steam.env direct-nvidia "DBUS_SESSION_BUS_ADDRESS=$bus"
+expect_env steam.env direct-nvidia "XDG_RUNTIME_DIR=$priv_rt"
+for v in PULSE_SERVER PULSE_SINK PULSE_SOURCE PULSE_COOKIE; do
+  expect_env steam.env direct-nvidia "$v<unset>"
+done
+expect_env steam.env direct-nvidia "DISPLAY=:7"
 if grep -q '^/run/quasar-wayland' "$log/gamescope.env"; then
   fail "direct-nvidia: gamescope's runtime dir is the agent's socket dir"
 else

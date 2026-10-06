@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Test stub for the Steam client wrapper, as direct-session execs it: records
+# its arguments and the environment Steam would start with, then exits.
+set -euo pipefail
+log="${STUB_LOG:?STUB_LOG must name the case log directory}"
+printf '%s\n' "$@" > "$log/steam.args"
+{
+  for v in DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR \
+           PULSE_SERVER PULSE_SINK PULSE_SOURCE PULSE_COOKIE; do
+    if [[ -v $v ]]; then printf '%s=%s\n' "$v" "${!v}"; else printf '%s<unset>\n' "$v"; fi
+  done
+} > "$log/steam.env"
+exit 0

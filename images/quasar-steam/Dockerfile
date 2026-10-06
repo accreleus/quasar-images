@@ -96,8 +96,17 @@ LABEL org.opencontainers.image.title="Quasar Steam application" \
 # builtin backend), started by 25-steam-direct-seatd.sh; drm_info reports the
 # kernel's mode list, from which the launcher picks the panel's native size at
 # its highest refresh. Both are inert in a nested session.
+#
+# PipeWire, WirePlumber, the PulseAudio shim, the ALSA plugin and the pw-* tools
+# are direct display's sound (quasar#457): a console session plays through the
+# host's card, and /usr/local/libexec/quasar-steam/direct-session starts the
+# daemons inside Steam's session bus. Nothing else starts them (no systemd user
+# manager, no autostart), so a nested session is unchanged: no daemon runs and
+# the agent-injected PULSE_SERVER still wins. ALSA's default stays on Pulse in
+# both modes (/etc/asound.conf from quasar-app); in direct mode Pulse IS the shim.
 RUN dnf --setopt=install_weak_deps=False -y install \
       gamescope seatd drm_info \
+      pipewire wireplumber pipewire-pulseaudio pipewire-alsa pipewire-utils \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -105,10 +114,12 @@ COPY --from=gamescope-builder /build/gamescope/build/src/gamescope /usr/bin/game
 COPY --from=gamescope-builder /build/xserver/build/hw/xwayland/Xwayland /usr/local/libexec/quasar-steam/Xwayland
 COPY images/quasar-steam/quasar-steam /usr/local/bin/quasar-steam
 COPY images/quasar-steam/steam-wrapper /usr/local/bin/quasar-steam-client
+COPY images/quasar-steam/direct-session /usr/local/libexec/quasar-steam/direct-session
 COPY images/quasar-steam/overlay/etc/quasar/init.d/24-steam-direct-device-groups.sh \
      images/quasar-steam/overlay/etc/quasar/init.d/25-steam-direct-seatd.sh \
      /etc/quasar/init.d/
 RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client \
+      /usr/local/libexec/quasar-steam/direct-session \
       /etc/quasar/init.d/24-steam-direct-device-groups.sh /etc/quasar/init.d/25-steam-direct-seatd.sh
 
 # No baked GAMESCOPE_WIDTH/HEIGHT/REFRESH: a baked value is non-empty, so it
