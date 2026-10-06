@@ -57,6 +57,13 @@ masked paths (the `systempaths=masked` default) block that mount even with `secc
 already in place — so `flatpak install` works but `flatpak run` fails without it
 (live-verified 2026-08-13). Set it `true` only on images that actually need it.
 
+`direct_display` (bool, default `false` when absent; additive, quasar#453) says the image can
+run as a **console session**: started with `QUASAR_DIRECT_DISPLAY=1`, its desktop drives the
+host's monitor itself instead of running nested in Quasar's compositor. It rides `runtime_spec`
+too. Quasar offers only these images as a host's console default app and refuses a direct
+launch of any other. Set it only alongside a `registry_ref` whose build has the direct entry;
+older Quasar releases ignore the key. Today: `kde-desktop`.
+
 ## Pinning discipline
 
 `registry_ref` and `version` are always concrete. Publishing a new build of an image is a

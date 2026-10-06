@@ -22,6 +22,10 @@ echo "checking the session executables in $KDE_IMAGE"
 qv_image_has "$KDE_IMAGE" \
   startplasma-wayland kwin_wayland dbus-run-session flatpak steam bwrap \
   quasar-kde xdg-user-dirs-update firefox
+# The direct-display entry's audio stack (quasar#453): without these a console
+# session is silent. scripts/verify-kde-launcher.sh asserts they are STARTED in
+# direct mode and not in nested mode; this asserts they exist.
+qv_image_has "$KDE_IMAGE" pipewire wireplumber pipewire-pulse pw-cli
 
 # --- Patched KWin (nested mode ladder) --------------------------------------
 # The image MUST run the kwin rebuilt from images/quasar-kde/kwin/*.patch, not
@@ -326,6 +330,13 @@ docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "$QV_GUARD"'
     echo "FAIL: unset WAYLAND_DISPLAY present in $kde (kwin needs it for the whole nested session)" >&2
     exit 1
   fi
+  # The DIRECT entry (quasar#453) is the one place it is dropped, in its own
+  # helper, so the nested launcher above can never lose it by accident. That
+  # entry is tested by behaviour in scripts/verify-kde-launcher.sh.
+  direct=/usr/local/libexec/quasar-kde/direct-session
+  test -x "$direct"
+  grep -q "unset WAYLAND_DISPLAY DISPLAY" "$direct"
+  grep -q "QUASAR_DIRECT_DISPLAY" "$kde"
 
   # Sizing shim (quasar#384): PATH-shadowing kwin_wayland wrapper is the only
   # way to get the session'"'"'s mode onto the nested kwin output on Plasma 6.7.

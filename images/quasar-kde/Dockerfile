@@ -149,6 +149,21 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
+# Audio for the DIRECT-DISPLAY entry (quasar#453): a console session plays
+# through the host's sound device, so the desktop needs its own audio stack --
+# PipeWire, WirePlumber, the PulseAudio shim (Plasma's volume applet and most
+# apps speak Pulse), the ALSA plugin and the pw-* tools. The launcher's
+# direct-session helper starts the daemons inside the session; nothing else
+# does (no systemd user manager, no autostart entry ships with them), so a
+# STREAMED session is unchanged: no daemon runs, and the agent-injected
+# PULSE_SERVER still wins. ALSA's default also stays on Pulse in both modes:
+# /etc/asound.conf (quasar-app) is read after the 99-pipewire-default drop-in
+# this adds, and in direct mode Pulse IS the PipeWire shim.
+RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
+      pipewire wireplumber pipewire-pulseaudio pipewire-alsa pipewire-utils \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
 # Install the patched kwin over the distro package. Same N-V-R plus a .quasar1
 # %dist suffix, so this is an ordinary upgrade of the same package, not a
 # replacement by a different one -- every other Plasma package's `Requires:
@@ -230,11 +245,16 @@ COPY images/quasar-kde/quasar-kde /usr/local/bin/quasar-kde
 # only. Full rationale in both files.
 COPY images/quasar-kde/kwin_wayland /usr/local/libexec/quasar-kde/kwin_wayland
 
+# The direct-display entry's session helper (quasar#453): run by quasar-kde
+# only when QUASAR_DIRECT_DISPLAY=1. Same directory as the shim, never on PATH.
+COPY images/quasar-kde/direct-session /usr/local/libexec/quasar-kde/direct-session
+
 RUN chmod 0644 /etc/xdg/kscreenlockerrc /etc/xdg/baloofilerc /etc/xdg/kwalletrc \
       /usr/share/icons/hicolor/scalable/apps/quasar.svg \
       /usr/share/icons/hicolor/256x256/apps/quasar.png \
       /usr/share/plasma/look-and-feel/org.fedoraproject.fedora.desktop/contents/plasmoidsetupscripts/org.kde.plasma.kickoff.js \
-    && chmod 0755 /usr/local/bin/quasar-kde /usr/local/libexec/quasar-kde/kwin_wayland
+    && chmod 0755 /usr/local/bin/quasar-kde /usr/local/libexec/quasar-kde/kwin_wayland \
+      /usr/local/libexec/quasar-kde/direct-session
 
 # Strip kwin's cap_sys_nice=ep FILE capability (same fix games-on-whales applies
 # to sway: `setcap -r /usr/sbin/sway` in their base-app image). Linux refuses
