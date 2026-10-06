@@ -26,6 +26,15 @@ qv_image_has "$KDE_IMAGE" \
 # session is silent. scripts/verify-kde-launcher.sh asserts they are STARTED in
 # direct mode and not in nested mode; this asserts they exist.
 qv_image_has "$KDE_IMAGE" pipewire wireplumber pipewire-pulse pw-cli
+# Plasma's volume applet: in a console session it is the only place to pick the
+# output (monitor HDMI/DP or the sound card). Without it the tray has no audio icon.
+if docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc \
+    'test -d /usr/lib64/qt6/qml/org/kde/plasma/private/volume'; then
+  printf '  ok    plasma volume applet (plasma-pa)\n'
+else
+  printf 'FAIL: the plasma volume applet (plasma-pa) is missing from %s\n' "$KDE_IMAGE" >&2
+  exit 1
+fi
 
 # --- Patched KWin (nested mode ladder) --------------------------------------
 # The image MUST run the kwin rebuilt from images/quasar-kde/kwin/*.patch, not

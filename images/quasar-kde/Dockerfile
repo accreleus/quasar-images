@@ -152,7 +152,8 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
 # Audio for the DIRECT-DISPLAY entry (quasar#453): a console session plays
 # through the host's sound device, so the desktop needs its own audio stack --
 # PipeWire, WirePlumber, the PulseAudio shim (Plasma's volume applet and most
-# apps speak Pulse), the ALSA plugin and the pw-* tools. The launcher's
+# apps speak Pulse), the ALSA plugin, the pw-* tools, and the volume applet
+# itself (plasma-pa), where the console user picks the output. The launcher's
 # direct-session helper starts the daemons inside the session; nothing else
 # does (no systemd user manager, no autostart entry ships with them), so a
 # STREAMED session is unchanged: no daemon runs, and the agent-injected
@@ -161,6 +162,7 @@ RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
 # this adds, and in direct mode Pulse IS the PipeWire shim.
 RUN dnf --setopt=install_weak_deps=False --setopt=tsflags=nodocs -y install \
       pipewire wireplumber pipewire-pulseaudio pipewire-alsa pipewire-utils \
+      plasma-pa \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
