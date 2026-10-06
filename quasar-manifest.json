@@ -17,6 +17,7 @@
         "preset_name": "Steam",
         "gpu": true,
         "no_new_privileges": false,
+        "direct_display": true,
         "managed_home": true,
         "home_container_path": "/home/quasar",
         "network": "bridge",
@@ -24,7 +25,7 @@
         "env": {},
         "mounts": []
       },
-      "notes": "no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'. network MUST be \"bridge\": Steam's first boot downloads steamui.so and clean-exits fatal under the hardened --network none default (first-run-experience spec §S2, #463) — this maps onto the runtime_presets.network column, hardened default stays \"none\" for every other image."
+      "notes": "direct_display: the image can run as a console session, gamescope on its own DRM backend, when the agent sets QUASAR_DIRECT_DISPLAY=1 (quasar#453); true of builds from quasar#457 on, so the registry_ref must reach such a build (the next catalog pin) before any Quasar release acts on it. no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'. network MUST be \"bridge\": Steam's first boot downloads steamui.so and clean-exits fatal under the hardened --network none default (first-run-experience spec §S2, #463) — this maps onto the runtime_presets.network column, hardened default stays \"none\" for every other image."
     },
     {
       "id": "kde-desktop",

@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- Display: nested (default) or direct (quasar#453/#457) -------------------
+# Nested: gamescope is a Wayland client of the node-agent's compositor, which
+# captures and streams it. Direct: the agent sets QUASAR_DIRECT_DISPLAY=1 and
+# gamescope drives the monitor itself on its DRM backend, under the seatd the
+# 25-steam-direct-seatd.sh init hook started. Exactly "1" selects direct; any
+# other value, or none, is nested and behaves as it always did.
+direct_display=0
+if [[ "${QUASAR_DIRECT_DISPLAY:-}" == "1" ]]; then
+  direct_display=1
+  # Nothing of a parent compositor may reach gamescope (it would pick the
+  # Wayland or SDL backend) or Steam (it must bind gamescope's Xwayland).
+  unset WAYLAND_DISPLAY DISPLAY
+  # Nor the agent's streamed-session audio: in direct mode sound is the console's
+  # own card, served by the PipeWire stack direct-session starts (below).
+  unset PULSE_SERVER PULSE_SINK PULSE_SOURCE PULSE_COOKIE
+fi
+
 # --- Wayland socket handoff (quasar#379) -------------------------------------
 # The node-agent provides XDG_RUNTIME_DIR + WAYLAND_DISPLAY for ITS compositor
 # socket (a file bind at $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY, e.g.
@@ -100,6 +117,11 @@ if [[ -e /usr/lib64/libGLX_nvidia.so.0 ]] \
 fi
 
 client=(dbus-run-session -- /usr/local/bin/quasar-steam-client "$@")
+if [[ "$direct_display" == 1 ]]; then
+  # Same place in the tree, same bus: the helper starts PipeWire, WirePlumber
+  # and pipewire-pulse inside this session bus, then execs quasar-steam-client.
+  client=(dbus-run-session -- /usr/local/libexec/quasar-steam/direct-session "$@")
+fi
 
 # --- Graceful shutdown: launcher-owned sequenced relay (quasar-images#1) -----
 # images/quasar-base/Dockerfile's tini no longer runs with -g, so `docker stop`
@@ -240,7 +262,10 @@ wait_for_exit() {
   return "$rc"
 }
 
-if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
+if [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" && "$direct_display" == 1 ]]; then
+  # Without gamescope there is no display server on the direct path at all.
+  log "QUASAR_STEAM_GAMESCOPE=${QUASAR_STEAM_GAMESCOPE} ignored: direct display needs gamescope"
+elif [[ "${QUASAR_STEAM_GAMESCOPE:-1}" != "1" ]]; then
   # Re-check right before backgrounding: a TERM/INT could have landed during
   # the diagnostics above (on_term already ran -- shutting_down=1, nothing
   # left to relay to since client_pid isn't set yet). Don't start Steam into
@@ -279,41 +304,141 @@ gs_stats="$gs_tmpdir/stats.pipe"
 mkfifo -- "$gs_stats"
 mkfifo -- "$gs_socket"
 
-# Nested gamescope sizes its virtual output from -W/-H/-r at launch, so whatever
-# it is given here is the display Steam and every game it launches START with.
-# Under a Quasar compositor that speaks wlr-output-management, the patched
-# gamescope then lists the host's real modes to games, forwards a game's pick to
-# the host, and follows the host's mode (size and refresh) when it moves
-# (quasar#447, gamescope-quasar-mode-forward.patch; GAMESCOPE_QUASAR_MODE_FORWARD=0
-# turns that off and restores plain scaling inside gamescope). Quasar injects the session's
-# streamed mode as QUASAR_STREAM_WIDTH/HEIGHT/FPS (quasar#384); before that the
-# baked 1920x1080x60 defaults below applied to every session, so a 1440p120
-# session rendered 1080p60 and the compositor upscaled it. An explicit
-# GAMESCOPE_* still wins (per-app pin, and what Quasar's compatibility shim
-# sets); the literals are the last resort for a standalone `docker run`.
-gs_width="${GAMESCOPE_WIDTH:-${QUASAR_STREAM_WIDTH:-1920}}"
-gs_height="${GAMESCOPE_HEIGHT:-${QUASAR_STREAM_HEIGHT:-1080}}"
-gs_refresh="${GAMESCOPE_REFRESH:-${QUASAR_STREAM_FPS:-60}}"
+if [[ "$direct_display" == 1 ]]; then
+  # --- Direct display: gamescope on its own DRM backend ------------------------
+  # Mode. With no -W/-H/-r gamescope lights the connector's PREFERRED mode, which
+  # on a high-refresh panel is usually the 60 Hz one (the 2026-10-05 spike got
+  # 3840x2160@60 on a 240 Hz monitor). The console wants the panel's native size
+  # at its HIGHEST refresh, so the launcher names that mode -- and it has to name
+  # it EXACTLY: gamescope's find_mode() (src/Backends/DRMBackend.cpp) matches
+  # -W/-H/-r against the kernel's mode list with `!=`, and a miss falls back to
+  # the preferred mode while -r still pins g_nNestedRefresh, which the vblank
+  # timer prefers over the real output refresh (vblankmanager.cpp). A "-r 1000,
+  # let it clamp" shortcut would therefore light 60 Hz and pace at 1000.
+  #
+  # The kernel's own list (sizes AND integer vrefresh, the same numbers gamescope
+  # compares against) comes from `drm_info -j`; sysfs `modes` has no refresh and
+  # an EDID parse can list modes the driver rejected. Only an unambiguous answer
+  # is used: one connected connector across the visible cards. Two connected
+  # panels (which one gamescope takes depends on its Vulkan device and connector
+  # priorities), nothing connected, or no drm_info, and no mode is named.
+  # QUASAR_STEAM_DIRECT_ARGS replaces the detected -W/-H/-r verbatim (word-split;
+  # any other gamescope flags may ride along, e.g. "-W 2560 -H 1440 -r 165 -O DP-2").
+  #
+  # Output: "<width> <height> <refresh> <gbm> <note>", "-" where unknown; gbm is
+  # 1 when the card holding that connector (or, with no single connector, any
+  # visible card) is nvidia-drm.
+  direct_detect() {
+    local cards=()
+    shopt -s nullglob
+    cards=(/dev/dri/card*)
+    shopt -u nullglob
+    timeout 10 drm_info -j "${cards[@]}" 2>/dev/null | jq -r '
+      def bit($b): ((. / $b) | floor) % 2 == 1;
+      ([ to_entries[] | select(.value | type == "object" and has("connectors")) ]) as $devs
+      | ([ $devs[] | .value.driver.name as $drv
+           | .value.connectors[] | select(.status == 1 and (.modes | length) > 0)
+           | { drv: $drv, modes: [ .modes[] | select(.flags | bit(16) | not) ] } ]) as $conn
+      | ([ $devs[] | .value.driver.name ] | any(. == "nvidia-drm")) as $any_nv
+      | if ($conn | length) != 1 or ($conn[0].modes | length) == 0 then
+          "- - - \(if $any_nv then 1 else 0 end) \($conn | length)-connected"
+        else
+          $conn[0] as $c
+          | (([ $c.modes[] | select(.type | bit(8)) ] | first) // $c.modes[0]) as $p
+          | ([ $c.modes[] | select(.hdisplay == $p.hdisplay and .vdisplay == $p.vdisplay) | .vrefresh ] | max) as $r
+          | (if $c.drv == "nvidia-drm" then 1 else 0 end) as $nv
+          # gamescope never lights 4096x2160 (its g_badModes list), so naming it
+          # would miss; leave that panel to gamescope.
+          | if $p.hdisplay == 4096 and $p.vdisplay == 2160 then "- - - \($nv) 4096x2160-blocklisted"
+            else "\($p.hdisplay) \($p.vdisplay) \($r) \($nv) \($c.drv)" end
+        end' 2>/dev/null
+  }
+  read -r gs_w gs_h gs_r gs_detect_nv gs_note <<<"$(direct_detect || true)" || true
+  gs_w="${gs_w:--}" gs_h="${gs_h:--}" gs_r="${gs_r:--}" gs_detect_nv="${gs_detect_nv:--}" gs_note="${gs_note:-drm_info-unavailable}"
 
-# Gamescope's own Xwayland: the patched build keeps the refresh of a game's
-# RandR pick (xwayland-quasar-emu-mode.patch). wlroots execs $WLR_XWAYLAND
-# instead of its compiled-in path. Forwarding off, or the binary missing, means
-# the system Xwayland exactly as before; an explicit WLR_XWAYLAND still wins.
-gs_xwayland=/usr/local/libexec/quasar-steam/Xwayland
-case "${GAMESCOPE_QUASAR_MODE_FORWARD:-1}" in
-  0|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|[Nn][Oo]) gs_mode_forward=0 ;;
-  *) gs_mode_forward=1 ;;
-esac
-if [[ -z "${WLR_XWAYLAND:-}" && "$gs_mode_forward" == 1 && -x "$gs_xwayland" ]]; then
-  export WLR_XWAYLAND="$gs_xwayland"
+  gs_mode_args=()
+  if [[ -n "${QUASAR_STEAM_DIRECT_ARGS:-}" ]]; then
+    read -r -a gs_mode_args <<<"$QUASAR_STEAM_DIRECT_ARGS"
+    gs_mode_desc="QUASAR_STEAM_DIRECT_ARGS"
+  elif [[ "$gs_w" =~ ^[0-9]+$ && "$gs_h" =~ ^[0-9]+$ && "$gs_r" =~ ^[0-9]+$ ]]; then
+    gs_mode_args=(-W "$gs_w" -H "$gs_h" -r "$gs_r")
+    gs_mode_desc="${gs_w}x${gs_h}@${gs_r} (native size, highest refresh; $gs_note)"
+  else
+    gs_mode_desc="gamescope's choice ($gs_note)"
+  fi
+
+  # GBM-allocated scanout + forced composition: the workaround for scanout
+  # corruption at every 4K mode on the NVIDIA proprietary driver (upstream
+  # ValveSoftware/gamescope#2309, gamescope-gbm-scanout.patch). Its switch is a
+  # gamescope ConVar read from the environment (gamescope-convar-env-override.patch)
+  # and is given to gamescope alone, never exported. Forced composition keeps a
+  # client's own (Vulkan-allocated) buffer off the plane, so everything on screen
+  # goes through the GBM buffer. auto = on when the display's card is nvidia-drm;
+  # with nothing to detect from, the loaded nvidia_drm module stands in.
+  case "${QUASAR_STEAM_GBM_SCANOUT:-auto}" in
+    1|[Tt][Rr][Uu][Ee]|[Oo][Nn]|[Yy][Ee][Ss]) gs_gbm=1 ;;
+    0|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|[Nn][Oo]) gs_gbm=0 ;;
+    *)
+      if [[ "$gs_detect_nv" == 1 || "$gs_detect_nv" == 0 ]]; then
+        gs_gbm="$gs_detect_nv"
+      elif [[ -d /sys/module/nvidia_drm ]]; then
+        gs_gbm=1
+      else
+        gs_gbm=0
+      fi
+      ;;
+  esac
+
+  gs_env=(LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-seatd}")
+  gs_args=(--backend drm -e -R "$gs_socket" -T "$gs_stats" "${gs_mode_args[@]}")
+  if [[ "$gs_gbm" == 1 ]]; then
+    gs_env+=(gamescope_drm_gbm_scanout=1)
+    gs_args+=(--force-composition)
+  fi
+  if [[ "${LIBSEAT_BACKEND:-seatd}" == seatd && ! -S /run/seatd.sock ]]; then
+    log "WARNING: /run/seatd.sock is missing; gamescope cannot take the display without seatd (init hook 25-steam-direct-seatd.sh)"
+  fi
+
+  log "starting Gamescope on the display (direct; mode=$ui_mode $gs_mode_desc gbm_scanout=$gs_gbm flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0})"
+  env "${gs_env[@]}" gamescope "${gs_args[@]}" &
+  gs_pid=$!
+else
+  # Nested gamescope sizes its virtual output from -W/-H/-r at launch, so whatever
+  # it is given here is the display Steam and every game it launches START with.
+  # Under a Quasar compositor that speaks wlr-output-management, the patched
+  # gamescope then lists the host's real modes to games, forwards a game's pick to
+  # the host, and follows the host's mode (size and refresh) when it moves
+  # (quasar#447, gamescope-quasar-mode-forward.patch; GAMESCOPE_QUASAR_MODE_FORWARD=0
+  # turns that off and restores plain scaling inside gamescope). Quasar injects the session's
+  # streamed mode as QUASAR_STREAM_WIDTH/HEIGHT/FPS (quasar#384); before that the
+  # baked 1920x1080x60 defaults below applied to every session, so a 1440p120
+  # session rendered 1080p60 and the compositor upscaled it. An explicit
+  # GAMESCOPE_* still wins (per-app pin, and what Quasar's compatibility shim
+  # sets); the literals are the last resort for a standalone `docker run`.
+  gs_width="${GAMESCOPE_WIDTH:-${QUASAR_STREAM_WIDTH:-1920}}"
+  gs_height="${GAMESCOPE_HEIGHT:-${QUASAR_STREAM_HEIGHT:-1080}}"
+  gs_refresh="${GAMESCOPE_REFRESH:-${QUASAR_STREAM_FPS:-60}}"
+
+  # Gamescope's own Xwayland: the patched build keeps the refresh of a game's
+  # RandR pick (xwayland-quasar-emu-mode.patch). wlroots execs $WLR_XWAYLAND
+  # instead of its compiled-in path. Forwarding off, or the binary missing, means
+  # the system Xwayland exactly as before; an explicit WLR_XWAYLAND still wins.
+  gs_xwayland=/usr/local/libexec/quasar-steam/Xwayland
+  case "${GAMESCOPE_QUASAR_MODE_FORWARD:-1}" in
+    0|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|[Nn][Oo]) gs_mode_forward=0 ;;
+    *) gs_mode_forward=1 ;;
+  esac
+  if [[ -z "${WLR_XWAYLAND:-}" && "$gs_mode_forward" == 1 && -x "$gs_xwayland" ]]; then
+    export WLR_XWAYLAND="$gs_xwayland"
+  fi
+
+  log "starting Gamescope (mode=$ui_mode ${gs_width}x${gs_height}@${gs_refresh} flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0} mode_forward=$gs_mode_forward xwayland=${WLR_XWAYLAND:-system})"
+  gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
+    -W "$gs_width" \
+    -H "$gs_height" \
+    -r "$gs_refresh" &
+  gs_pid=$!
 fi
-
-log "starting Gamescope (mode=$ui_mode ${gs_width}x${gs_height}@${gs_refresh} flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0} mode_forward=$gs_mode_forward xwayland=${WLR_XWAYLAND:-system})"
-gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
-  -W "$gs_width" \
-  -H "$gs_height" \
-  -r "$gs_refresh" &
-gs_pid=$!
 
 # Readiness window. 5s was too tight: gamescope's own startup (Xwayland +
 # xkbcomp keysym compile + Vulkan/EGL init) measured 4.5-10.6s on Tower with the

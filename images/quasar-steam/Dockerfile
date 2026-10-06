@@ -18,6 +18,19 @@ ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
 # beside it for gamescope only (WLR_XWAYLAND, set by the launcher); the system
 # /usr/bin/Xwayland is untouched. Both builds run in this one stage, in order, so
 # an image build never compiles them in parallel.
+# Direct display (quasar#453/#457): with QUASAR_DIRECT_DISPLAY=1 gamescope drives
+# the monitor on its own DRM backend instead of nesting. On the NVIDIA driver its
+# Vulkan-allocated scanout buffers corrupt the bottom of every 4K mode (upstream
+# ValveSoftware/gamescope#2309); gamescope-gbm-scanout.patch allocates them with
+# GBM instead, behind the ConVar drm_gbm_scanout, which the launcher sets only on
+# that path. The lineage stays on 3.16.23 -- the patch is NightHammer1000's
+# 3.16.25-based branch rebased here without code conflicts, while moving to
+# 3.16.25 would mean re-proving both Quasar patches against a wlroots 0.19 bump.
+# The one 3.16.24 piece the patch's switch relies on, ConVars read from
+# gamescope_<name> environment variables, is backported unchanged as
+# gamescope-convar-env-override.patch. Patch order matters: the GBM patch is
+# rebased on top of the mode-forward one. libgbm-devel makes HAVE_GBM=1; the
+# build fails if it did not, rather than shipping a switch that does nothing.
 # Builds from ${APP_IMAGE}, not the Steam runtime: the builder only needs the
 # Fedora toolchain + `dnf builddep gamescope`, so keeping it on quasar-app
 # leaves it independent of the runtime layer (and its build cache).
@@ -25,7 +38,7 @@ FROM ${APP_IMAGE} AS gamescope-builder
 
 RUN dnf --setopt=install_weak_deps=False -y install \
       git meson ninja-build gcc gcc-c++ \
-      xorg-x11-server-Xwayland-devel libXrandr-devel \
+      xorg-x11-server-Xwayland-devel libXrandr-devel mesa-libgbm-devel \
     && (dnf -y install dnf5-plugins || dnf -y install dnf-plugins-core) \
     && (dnf builddep -y gamescope || dnf builddep -y --enablerepo="*source*" gamescope) \
     && (dnf builddep -y xorg-x11-server-Xwayland || dnf builddep -y --enablerepo="*source*" xorg-x11-server-Xwayland) \
@@ -33,13 +46,18 @@ RUN dnf --setopt=install_weak_deps=False -y install \
 
 WORKDIR /build
 COPY images/quasar-steam/gamescope-nested-pointer-warp.patch \
-     images/quasar-steam/gamescope-quasar-mode-forward.patch /build/
+     images/quasar-steam/gamescope-quasar-mode-forward.patch \
+     images/quasar-steam/gamescope-convar-env-override.patch \
+     images/quasar-steam/gamescope-gbm-scanout.patch /build/
 RUN git clone --branch 3.16.23 --depth 1 --recurse-submodules https://github.com/ValveSoftware/gamescope.git \
     && cd gamescope \
     && git apply /build/gamescope-nested-pointer-warp.patch \
     && git apply /build/gamescope-quasar-mode-forward.patch \
+    && git apply /build/gamescope-convar-env-override.patch \
+    && git apply /build/gamescope-gbm-scanout.patch \
     && cp subprojects/wlroots/protocol/wlr-output-management-unstable-v1.xml protocol/ \
     && meson setup build --buildtype=release -Denable_openvr_support=false \
+    && grep -q -- '-DHAVE_GBM=1' build/compile_commands.json \
     && ninja -C build
 
 # Same meson options as Fedora's xorg-x11-server-Xwayland.spec (plus --prefix,
@@ -72,8 +90,23 @@ LABEL org.opencontainers.image.title="Quasar Steam application" \
 # is what drags in gamescope's shared-library dependencies -- without it the
 # patched binary has 8 unresolved sonames (libSDL2, libseat, libinput, libavif,
 # libXRes, libXmu, libeis, libluajit). Verified with ldd inside the image.
+#
+# seatd and drm_info serve direct display only (quasar#457): seatd is the seat
+# daemon gamescope's DRM backend reaches through libseat (Fedora's libseat has no
+# builtin backend), started by 25-steam-direct-seatd.sh; drm_info reports the
+# kernel's mode list, from which the launcher picks the panel's native size at
+# its highest refresh. Both are inert in a nested session.
+#
+# PipeWire, WirePlumber, the PulseAudio shim, the ALSA plugin and the pw-* tools
+# are direct display's sound (quasar#457): a console session plays through the
+# host's card, and /usr/local/libexec/quasar-steam/direct-session starts the
+# daemons inside Steam's session bus. Nothing else starts them (no systemd user
+# manager, no autostart), so a nested session is unchanged: no daemon runs and
+# the agent-injected PULSE_SERVER still wins. ALSA's default stays on Pulse in
+# both modes (/etc/asound.conf from quasar-app); in direct mode Pulse IS the shim.
 RUN dnf --setopt=install_weak_deps=False -y install \
-      gamescope \
+      gamescope seatd drm_info \
+      pipewire wireplumber pipewire-pulseaudio pipewire-alsa pipewire-utils \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -81,7 +114,13 @@ COPY --from=gamescope-builder /build/gamescope/build/src/gamescope /usr/bin/game
 COPY --from=gamescope-builder /build/xserver/build/hw/xwayland/Xwayland /usr/local/libexec/quasar-steam/Xwayland
 COPY images/quasar-steam/quasar-steam /usr/local/bin/quasar-steam
 COPY images/quasar-steam/steam-wrapper /usr/local/bin/quasar-steam-client
-RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client
+COPY images/quasar-steam/direct-session /usr/local/libexec/quasar-steam/direct-session
+COPY images/quasar-steam/overlay/etc/quasar/init.d/24-steam-direct-device-groups.sh \
+     images/quasar-steam/overlay/etc/quasar/init.d/25-steam-direct-seatd.sh \
+     /etc/quasar/init.d/
+RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client \
+      /usr/local/libexec/quasar-steam/direct-session \
+      /etc/quasar/init.d/24-steam-direct-device-groups.sh /etc/quasar/init.d/25-steam-direct-seatd.sh
 
 # No baked GAMESCOPE_WIDTH/HEIGHT/REFRESH: a baked value is non-empty, so it
 # would shadow the session mode Quasar injects as QUASAR_STREAM_* and pin every

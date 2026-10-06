@@ -62,8 +62,10 @@ already in place — so `flatpak install` works but `flatpak run` fails without 
 **direct-display console session**: given `QUASAR_DIRECT_DISPLAY=1` and the
 direct run shape, it drives the monitor itself instead of nesting in the
 agent's compositor. It describes a capability of the image; it does not make
-every session direct, and an agent that does not know the key ignores it. Today
-only `steam` sets it (see `images/quasar-steam/README.md`, "Direct display").
+every session direct, and an agent that does not know the key ignores it. Set it
+only alongside a `registry_ref` whose build has the direct entry (or say in
+`notes` that the next pin must reach one). Today `kde-desktop` and `steam` set it
+(see each image's README, "Direct display").
 
 ## Pinning discipline
 
