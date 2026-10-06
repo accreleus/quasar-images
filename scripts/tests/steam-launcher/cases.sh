@@ -13,7 +13,8 @@
 #     and forced composition on NVIDIA (upstream gamescope #2309); nothing of
 #     the nested parent (its socket, the stream mode, the mode-forward Xwayland)
 #     leaks in.
-#   * the seatd and sound-group hooks act only in direct mode.
+#   * the seatd and device-group hooks act only in direct mode, and no init
+#     hook changes anything under /dev/input then (it is the host's directory).
 set -Eeuo pipefail
 trap 'printf "FAIL: cases.sh line %s exited %s\n      %s\n" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
 
@@ -178,8 +179,8 @@ expect_argv direct-gamescope-off "--backend drm -e -R <ready-fifo> -T <stats-fif
 # --- init hook cases -----------------------------------------------------------
 
 SEATD_HOOK=/etc/quasar/init.d/25-steam-direct-seatd.sh
-SOUND_HOOK=/etc/quasar/init.d/24-steam-direct-sound-groups.sh
-for hook in "$SEATD_HOOK" "$SOUND_HOOK"; do
+GROUPS_HOOK=/etc/quasar/init.d/24-steam-direct-device-groups.sh
+for hook in "$SEATD_HOOK" "$GROUPS_HOOK"; do
   if [[ -x "$hook" ]]; then pass "hook present: $hook"; else fail "hook missing or not executable: $hook"; fi
 done
 
@@ -224,28 +225,96 @@ else
   fail "seatd-direct: hook failed"
 fi
 
-# 12. Sound groups: in direct mode the app user joins the group owning each
-#     /dev/snd node (it plays to the real card); never gid 0; and NOT the
-#     /dev/input groups -- gamescope gets input devices from seatd, and an app
-#     that can open keyboard/mouse nodes itself can EVIOCGRAB them away from it.
+# 12. Device groups: in direct mode the app user joins the groups owning
+#     /dev/input/event* and /dev/hidraw* (Steam Input reads physical controllers
+#     itself; gamescope's own devices still come from seatd) and /dev/snd (sound
+#     on the console's card). Never gid 0 or 65534, nothing for a world-rw node,
+#     and nothing at all in a nested session.
 mkdir -p /dev/snd /dev/input
-mknod_node() { rm -f "$1"; mknod "$1" c "$2" "$3"; chgrp "$4" "$1"; chmod 0660 "$1"; }
+mknod_node() { rm -f "$1"; mknod "$1" c "$2" "$3"; chgrp "$4" "$1"; chmod "${5:-0660}" "$1"; }
 mknod_node /dev/snd/controlC0 116 0 4301
 mknod_node /dev/snd/pcmC0D0p 116 16 0
 mknod_node /dev/input/event7 13 71 4302
+mknod_node /dev/hidraw3 240 3 4304
+mknod_node /dev/input/event8 13 72 65534
+mknod_node /dev/input/event9 13 73 4305 0666
 in_group() { id -G "$APP_USER" | tr ' ' '\n' | grep -qx "$1"; }
 
-if [[ -x "$SOUND_HOOK" ]] && env -i PATH=/usr/local/bin:/usr/bin:/bin PUID=1000 PGID=1000 "$SOUND_HOOK"; then
-  in_group 4301 && fail "sound-nested: joined gid 4301 without direct display" || pass "sound-nested: no membership"
+if [[ -x "$GROUPS_HOOK" ]] && env -i PATH=/usr/local/bin:/usr/bin:/bin PUID=1000 PGID=1000 "$GROUPS_HOOK"; then
+  if in_group 4301 || in_group 4302 || in_group 4304; then fail "groups-nested: joined a device group without direct display"; else pass "groups-nested: no membership"; fi
 else
-  fail "sound-nested: hook failed"
+  fail "groups-nested: hook failed"
 fi
-if [[ -x "$SOUND_HOOK" ]] && env -i PATH=/usr/local/bin:/usr/bin:/bin PUID=1000 PGID=1000 QUASAR_DIRECT_DISPLAY=1 "$SOUND_HOOK"; then
-  in_group 4301 && pass "sound-direct: joined the /dev/snd group (gid 4301)" || fail "sound-direct: not a member of gid 4301"
-  in_group 0 && fail "sound-direct: granted gid 0" || pass "sound-direct: gid 0 never granted"
-  in_group 4302 && fail "sound-direct: joined the /dev/input group" || pass "sound-direct: /dev/input group left to seatd"
+if [[ -x "$GROUPS_HOOK" ]] && env -i PATH=/usr/local/bin:/usr/bin:/bin PUID=1000 PGID=1000 QUASAR_DIRECT_DISPLAY=1 "$GROUPS_HOOK"; then
+  in_group 4301 && pass "groups-direct: joined the /dev/snd group (gid 4301)" || fail "groups-direct: not a member of gid 4301 (/dev/snd)"
+  in_group 4302 && pass "groups-direct: joined the /dev/input group (gid 4302)" || fail "groups-direct: not a member of gid 4302 (/dev/input)"
+  in_group 4304 && pass "groups-direct: joined the /dev/hidraw group (gid 4304)" || fail "groups-direct: not a member of gid 4304 (/dev/hidraw)"
+  in_group 0 && fail "groups-direct: granted gid 0" || pass "groups-direct: gid 0 never granted"
+  in_group 65534 && fail "groups-direct: granted gid 65534" || pass "groups-direct: gid 65534 never granted"
+  in_group 4305 && fail "groups-direct: joined the group of a world-rw node" || pass "groups-direct: world-rw node skipped"
 else
-  fail "sound-direct: hook failed"
+  fail "groups-direct: hook failed"
+fi
+rm -f /dev/hidraw3 /dev/input/event8 /dev/input/event9
+
+# 13. Direct display bind-mounts the HOST's /dev/input, so no init hook may
+#     change anything under it: not a mode, an owner, a group, or a node. The
+#     whole inherited chain runs (quasar-base, quasar-steam-runtime, this image)
+#     as quasar-entrypoint runs it, against a joystick node that 15- WOULD open
+#     up in a nested session, with every chmod/chown/chgrp/mknod/setfacl/rm/mv
+#     recorded on the way. The nested run is the control: it must touch the node,
+#     or this case could not see a change at all.
+SHIMS=/tmp/devshims
+mkdir -p "$SHIMS"
+for tool in chmod chown chgrp mknod setfacl rm mv ln install; do
+  real="$(command -v "$tool" || true)"
+  [[ -n "$real" ]] || continue
+  printf '#!/bin/bash\nprintf "%%s %%s\\n" %q "$*" >> /tmp/devshims.log\nexec %q "$@"\n' "$tool" "$real" > "$SHIMS/$tool"
+  chmod 0755 "$SHIMS/$tool"
+done
+pad_minor=77
+pad=/dev/input/event$((pad_minor - 64))
+mknod_node "$pad" 13 "$pad_minor" 4303
+mkdir -p /run/udev/data
+printf 'E:ID_INPUT=1\nE:ID_INPUT_JOYSTICK=1\n' > "/run/udev/data/c13:$pad_minor"
+# Numeric owner/group: a hook may legitimately NAME a host gid in the
+# container's /etc/group (that is how membership works), which changes %g but
+# not the node.
+snapshot_input() { find /dev/input -mindepth 1 -printf '%p %y %m %U:%G %Y\n' | sort; }
+
+run_init_chain() {
+  : > /tmp/devshims.log
+  local hook
+  for hook in /etc/quasar/init.d/*.sh; do
+    [[ -x "$hook" ]] || continue
+    env -i PATH="$SHIMS:/usr/local/bin:/usr/bin:/bin" PUID=1000 PGID=1000 \
+      QUASAR_STEAM_SYSTEM_SERVICES=0 "$@" "$hook" >/dev/null 2>&1 \
+      || fail "init-chain($*): $(basename "$hook") failed"
+  done
+  pkill -x seatd 2>/dev/null || true
+}
+
+before="$(snapshot_input)"
+run_init_chain QUASAR_DIRECT_DISPLAY=1
+after="$(snapshot_input)"
+if [[ "$before" == "$after" ]]; then
+  pass "init-chain(direct): /dev/input unchanged"
+else
+  fail "init-chain(direct): /dev/input changed"
+  printf '      before: %s\n' "$before" >&2
+  printf '      after:  %s\n' "$after" >&2
+fi
+if grep -q '/dev/input' /tmp/devshims.log; then
+  fail "init-chain(direct): a hook ran a file-changing command on /dev/input: $(grep '/dev/input' /tmp/devshims.log | paste -sd';')"
+else
+  pass "init-chain(direct): no chmod/chown/chgrp/mknod/setfacl/rm/mv on /dev/input"
+fi
+
+run_init_chain
+if [[ "$(stat -c %a "$pad")" == 666 ]] && grep -q "chmod 0666 $pad" /tmp/devshims.log; then
+  pass "init-chain(nested control): 15-input-device-perms.sh still opens the gamepad node"
+else
+  fail "init-chain(nested control): gamepad node is $(stat -c %a "$pad"); the case cannot detect a change"
 fi
 
 if (( failures )); then

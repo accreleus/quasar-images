@@ -93,10 +93,12 @@ What the image does:
   VT-bound, with `/run/seatd.sock` owned by the app user and group. gamescope
   reaches it through libseat (`LIBSEAT_BACKEND=seatd`); seatd opens the card and
   input nodes for it.
-- `24-steam-direct-sound-groups.sh` makes the app user a member of the groups
-  owning `/dev/snd/*`, so sound plays on the console's card. Not `/dev/input`:
-  gamescope gets input from seatd, and an app that can open keyboard nodes can
-  grab them away from it.
+- `24-steam-direct-device-groups.sh` makes the app user a member of the groups
+  owning `/dev/input/event*`, `/dev/hidraw*` and `/dev/snd/*`: Steam Input reads
+  physical controllers itself, and sound plays on the console's card (gamescope's
+  own devices still come through seatd). Never gid 0 or 65534. It never changes a
+  node: `/dev/input` is the host's directory, and quasar-base's
+  `15-input-device-perms.sh` does nothing in this mode either.
 - The launcher starts `gamescope --backend drm -e` at the panel's native size and
   highest refresh: the preferred mode's size, and the highest refresh the kernel
   lists at that size (read with `drm_info -j`). It names a mode only when exactly

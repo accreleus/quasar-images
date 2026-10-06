@@ -126,7 +126,7 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   fi
   # seatd from an init hook, and only in direct mode (the behaviour is pinned by
   # verify-steam-launcher.sh); its socket path is fixed in seatd 0.9.x.
-  for hook in /etc/quasar/init.d/24-steam-direct-sound-groups.sh /etc/quasar/init.d/25-steam-direct-seatd.sh; do
+  for hook in /etc/quasar/init.d/24-steam-direct-device-groups.sh /etc/quasar/init.d/25-steam-direct-seatd.sh; do
     if [ ! -x "$hook" ]; then
       echo "FAIL: $hook missing or not executable" >&2
       exit 1

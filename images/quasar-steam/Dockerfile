@@ -105,11 +105,11 @@ COPY --from=gamescope-builder /build/gamescope/build/src/gamescope /usr/bin/game
 COPY --from=gamescope-builder /build/xserver/build/hw/xwayland/Xwayland /usr/local/libexec/quasar-steam/Xwayland
 COPY images/quasar-steam/quasar-steam /usr/local/bin/quasar-steam
 COPY images/quasar-steam/steam-wrapper /usr/local/bin/quasar-steam-client
-COPY images/quasar-steam/overlay/etc/quasar/init.d/24-steam-direct-sound-groups.sh \
+COPY images/quasar-steam/overlay/etc/quasar/init.d/24-steam-direct-device-groups.sh \
      images/quasar-steam/overlay/etc/quasar/init.d/25-steam-direct-seatd.sh \
      /etc/quasar/init.d/
 RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client \
-      /etc/quasar/init.d/24-steam-direct-sound-groups.sh /etc/quasar/init.d/25-steam-direct-seatd.sh
+      /etc/quasar/init.d/24-steam-direct-device-groups.sh /etc/quasar/init.d/25-steam-direct-seatd.sh
 
 # No baked GAMESCOPE_WIDTH/HEIGHT/REFRESH: a baked value is non-empty, so it
 # would shadow the session mode Quasar injects as QUASAR_STREAM_* and pin every
