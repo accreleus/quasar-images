@@ -14,7 +14,15 @@
 # discovery: no record, or a keyboard/mouse/pointer record, leaves the node
 # root-owned and therefore invisible to the app.
 # Best-effort: images without passed devices simply have nothing to match.
+#
+# NOT in a direct-display session (QUASAR_DIRECT_DISPLAY=1, quasar#453): there
+# /dev/input is the host's own directory, bind-mounted, so a chmod here would
+# open the host's real nodes to every user on the host. The desktop owns all
+# input in that session anyway; an image that needs the nodes grants them by
+# group membership in its own direct-mode hook, never by changing the node.
 set -euo pipefail
+
+[[ "${QUASAR_DIRECT_DISPLAY:-}" == "1" ]] && exit 0
 
 shopt -s nullglob
 for node in /dev/input/event*; do
