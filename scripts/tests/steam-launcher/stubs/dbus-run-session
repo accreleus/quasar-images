@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Test stub for dbus-run-session: records what Steam would have been started
+# with, then exits as a Steam that quit cleanly.
+set -euo pipefail
+log="${STUB_LOG:?STUB_LOG must name the case log directory}"
+printf '%s\n' "$@" > "$log/client.args"
+{
+  for v in DISPLAY WAYLAND_DISPLAY GAMESCOPE_WAYLAND_DISPLAY STEAM_STARTUP_FLAGS gamescope_drm_gbm_scanout; do
+    if [[ -v $v ]]; then printf '%s=%s\n' "$v" "${!v}"; else printf '%s<unset>\n' "$v"; fi
+  done
+} > "$log/client.env"
+exit 0

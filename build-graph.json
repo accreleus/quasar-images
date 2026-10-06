@@ -109,7 +109,7 @@
         "STEAM_RUNTIME_IMAGE": "@tag:quasar-steam-runtime",
         "VERSION": "@version"
       },
-      "verify": ["scripts/verify-steam.sh"],
+      "verify": ["scripts/verify-steam.sh", "scripts/verify-steam-launcher.sh"],
       "ci": true,
       "publish": true
     },

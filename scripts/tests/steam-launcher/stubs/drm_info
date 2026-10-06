@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Test stub for drm_info: prints the fixture named by STUB_DRM_INFO (the JSON
+# shape of `drm_info -j`), or fails like drm_info with no readable card node.
+set -euo pipefail
+log="${STUB_LOG:?STUB_LOG must name the case log directory}"
+printf '%s\n' "$*" >> "$log/drm_info.calls"
+if [[ -z "${STUB_DRM_INFO:-}" ]]; then
+  echo "drmGetDevices: No such file or directory" >&2
+  exit 1
+fi
+cat "$STUB_DRM_INFO"

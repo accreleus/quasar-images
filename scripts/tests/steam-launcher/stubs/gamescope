@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Test stub for gamescope: records its argv and the environment the launcher
+# gave it, answers the -R ready handshake the way gamescope does
+# ("<X display> <wayland socket name>"), then idles like a running compositor.
+set -euo pipefail
+log="${STUB_LOG:?STUB_LOG must name the case log directory}"
+printf '%s\n' "$@" > "$log/gamescope.args"
+{
+  for v in WAYLAND_DISPLAY DISPLAY LIBSEAT_BACKEND gamescope_drm_gbm_scanout WLR_XWAYLAND XDG_RUNTIME_DIR; do
+    if [[ -v $v ]]; then printf '%s=%s\n' "$v" "${!v}"; else printf '%s<unset>\n' "$v"; fi
+  done
+} > "$log/gamescope.env"
+ready=""
+while (( $# )); do
+  if [[ "$1" == "-R" ]]; then ready="$2"; shift; fi
+  shift
+done
+[[ -n "$ready" ]] && printf ':7 gamescope-0\n' > "$ready"
+exec sleep 300
