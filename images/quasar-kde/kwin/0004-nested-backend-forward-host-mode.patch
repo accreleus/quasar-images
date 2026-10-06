@@ -1,0 +1,1855 @@
+Subject: [PATCH] nested wayland backend: forward a picked host mode to the host
+ through wlr-output-management
+
+Quasar patch against kwin 6.7.4 (Fedora 43: kwin-6.7.4-1.fc43).
+Applies on top of 0001-nested-backend-mode-ladder.patch,
+0002-nested-backend-kscreen-scale.patch and
+0003-nested-backend-host-scale-hint.patch.
+
+PROBLEM
+-------
+0001 lists the host's mode SIZES in Display Settings and "applies" a pick by
+letterboxing: the content is scaled into the area the host configured us at.
+That can only ever show a smaller picture inside an unchanged host mode. It
+cannot change the refresh rate, cannot go LARGER than the configured size, and
+never moves the display.
+
+In a Quasar console session that is the wrong answer. The host (Quasar's
+compositor) drives a real monitor, advertises that monitor's real modes on
+wl_output - each with its own refresh, e.g. 3840x2160 at 59.996 and at
+119.879 Hz - and implements wlr-output-management-unstable-v1 (v4): one head,
+its modes, and `apply` of a configuration that picks one. The host then moves
+the monitor and re-configures every toplevel at the new size. The nested KWin
+just has to ASK, and 0001 drops the refresh and never asks.
+
+WHAT THIS PATCH DOES
+--------------------
+1. `wayland_display.{h,cpp}`: bind the host's `zwlr_output_manager_v1` (up to
+   v4) and mirror its first head - modes (size + refresh in mHz), current mode
+   and the configuration serial. `requestHostMode()` sends one configuration:
+
+       create_configuration(serial) -> enable_head(head)
+         -> set_mode(the head's mode of that size, refresh within 500 mHz)
+         -> apply
+
+   and reports `succeeded` / `failed` / `cancelled` through
+   `hostModeRequestFinished()`. One request in flight at a time. The protocol
+   XML is vendored under src/backends/wayland/protocols/ and generated with
+   ecm_add_wayland_client_protocol (an OBJECT library, as src/wayland does), so
+   the build needs no new dependency.
+
+2. `wayland_output.cpp rebuildModes()`: under a host with wlr-output-management
+   the mode list is the head's modes, each with ITS OWN refresh (the same size
+   at 60 and 120 Hz is two entries), larger sizes included. The native mode
+   runs at the host's current refresh. The extra standard rungs
+   (KWIN_NESTED_EXTRA_MODES) stay, at the current refresh, for sizes the host
+   does not advertise. Without the protocol the list is exactly 0001's.
+
+   Only the host mode that IS the native entry is left out, compared exactly.
+   A monitor can advertise two modes of one size within half a hertz (an EDID's
+   1920x1080 at 119.879 and at 119.878 Hz), and a move can land on the sibling
+   of the mode asked for. Collapsing the sibling into the native entry made the
+   mode the OutputConfigurationStore remembered vanish, and the store then fell
+   back to chooseMode() - the highest refresh at the preferred size - and
+   re-applied 1920x1080 at 240 Hz (seen live on the console host).
+
+3. `applyChanges()`: a USER pick (OutputConfiguration::Source::User, i.e.
+   Display Settings / kscreen-doctor) of a HOST mode is forwarded AND adopted at
+   once: from the apply on, the pick (its size and its refresh) is the output's
+   current mode - and its Preferred mode - presented inside the area the host
+   still configures us at (letterboxed like 0001's path; a pick larger than that
+   area is scaled down into it the same way). When the host's configure arrives
+   at the picked size and its head reports the picked mode as current, the pick
+   is satisfied: it IS the native mode, contentScale() is 1/scale() and the
+   offset 0, and because size, refresh and Preferred flag are unchanged the
+   current OutputMode object is the very same one (unless the host landed on a
+   sibling mode, see below). The two arrive in either
+   order; `settleHostPick()` checks on both. A same-size refresh change needs
+   only the head's current mode (its letterbox is geometrically a no-op, but the
+   current mode carries the new refresh at once).
+
+   WHY ADOPT AT ONCE. KScreen (the KCM, the kscreen kded daemon) reads the
+   output back the moment its apply returns, and records whatever KWin reports
+   as current. Adopting the pick makes that the pick, and when the host's
+   configure lands at it the current OutputMode object is unchanged (same size,
+   refresh and Preferred flag) unless the host settled on a sibling mode (point
+   2), in which case the output reports the mode the host really runs.
+
+   THE BOUNCE THAT WAS NOT KSCREEN. Earlier live runs saw a pick revert, and
+   then oscillate 1080p -> 4K -> 1080p, each request 1-4 ms after the host's
+   configure. Those runs had no KWin logging (Qt logged to a journal the
+   container does not have), and the bounce was put down to a KScreen client
+   re-applying its old mode as Source::User; an earlier revision of this patch
+   swallowed such applies for 500 ms after every host move. The first run with
+   logging (2026-10-04) showed no KScreen re-apply at all: after the pick, the
+   only applies were the store's Source::System ones, and the request that sent
+   the host back came from the host's own follow-client-size fallback, which
+   reads a fullscreen client's committed root surface as a mode request. Until
+   it acks the host's configure, this backend commits its root surface at the
+   size the host has just left (the root is a single-pixel buffer viewported to
+   the configured area). The host stands that fallback down while a
+   wlr-output-management client is bound. Here, the echo window is gone (it
+   could only swallow a genuine quick re-pick), and the configure that answers
+   a pick in flight is applied at once rather than after the one-refresh
+   configure throttle, so the stale-size window is only the frames already on
+   the wire.
+
+   So: a re-apply of the pick still in flight is a no-op (it is already the
+   current mode), and a re-apply of where the host already is changes nothing.
+   A DIFFERENT user pick is forwarded (while another is in flight it supersedes
+   it and is adopted in its place). A configure never forwards anything: only
+   applyChanges() with Source::User does.
+
+   Fallback: `failed`, a second `cancelled` (the first is retried once with the
+   fresh serial, which precedes it on the wire), or no move within 2 s ->
+   keep the pick's size letterboxed exactly as 0001 does, at the native
+   refresh (a letterbox cannot change the refresh). A pick larger than the
+   host's area is not kept scaled down indefinitely: it is dropped with a
+   warning and the output returns to the native mode. If the host gets there
+   after the 2 s anyway, the letterbox is dropped again.
+
+   A pick of an extra rung, and any pick under a host without the protocol,
+   take 0001's letterbox path unchanged.
+
+4. A configure WITHOUT a pending pick (the node agent moved the display, a
+   stream-resolution step) is handled as before: it becomes the native mode,
+   and 0001's stickiness keeps a letterboxed pick only while it still fits.
+
+5. KWin's OutputConfigurationStore re-applies its remembered mode
+   (Source::System) on every configure and at startup. Such a re-apply of a
+   HOST mode is never forwarded and is otherwise ignored unless it is the mode
+   the host is already in: the host owns which of its modes is current, and
+   KWin must not move the physical display on its own initiative. (The store
+   remembers a user pick through `desiredMode`, so after the host moves, its
+   re-apply names the new current mode and clears any letterbox.)
+
+6. `framePresented()` compares the presentation rate with `m_refreshRate`, not
+   with the current mode's refresh. Those were the same value before; now the
+   mode carries the host's advertised refresh (59996 mHz) and presentation
+   feedback its own rounding (59995), and comparing the two would rebuild the
+   mode list on every frame.
+
+7. Logging, category kwin_wayland_backend at info level (the image enables
+   it): "host offers wlr-output-management" once per session; every apply
+   that names a host mode, with its source, the native mode, the pick in flight
+   and the time since the host last moved us; "asked the host for mode" (the
+   refresh of the host mode object actually sent, and the asked-for one when
+   they differ); "host configured us at"; "host head moved to"; "host moved to
+   mode" (naming a sibling landing); and the fallbacks as warnings.
+
+Nothing changes against a host that lacks wlr-output-management: no bind, no
+request, no mode forwarding, the 0001 ladder and letterbox.
+
+KScreen's "keep this configuration?" revert works for free: the revert is
+another user apply, so it forwards the previous mode back to the host.
+
+UPSTREAMABILITY
+---------------
+The forwarding (points 1 and 3) is a self-contained "nested KWin asks its
+parent for a mode" feature that upstream could take on its own merits, with
+upstream's single-mode list in place of 0001's ladder. Point 6 is a latent
+upstream assumption (mode refresh == presentation refresh) that only holds
+while the backend invents the refresh itself.
+
+diff --git a/src/backends/wayland/CMakeLists.txt b/src/backends/wayland/CMakeLists.txt
+index 437abf8..20f1cd8 100644
+--- a/src/backends/wayland/CMakeLists.txt
++++ b/src/backends/wayland/CMakeLists.txt
+@@ -9,4 +9,21 @@ target_sources(kwin PRIVATE
+     wayland_qpainter_backend.cpp
+ )
+ 
++# Quasar: client side of wlr-output-management, used to forward a mode picked in
++# Display Settings to the host compositor. The XML is vendored next to this file
++# (MIT-style licence in its header) rather than added as a build dependency.
++# An OBJECT library for the same reason src/wayland uses one: target_sources() of
++# a file generated outside the directory that created `kwin` does not resolve.
++find_package(WaylandScanner REQUIRED QUIET)
++add_library(QuasarWlrOutputManagement OBJECT)
++set_property(TARGET QuasarWlrOutputManagement PROPERTY POSITION_INDEPENDENT_CODE ON)
++target_link_libraries(QuasarWlrOutputManagement Wayland::Client)
++ecm_add_wayland_client_protocol(QuasarWlrOutputManagement
++    PROTOCOL ${CMAKE_CURRENT_SOURCE_DIR}/protocols/wlr-output-management-unstable-v1.xml
++    BASENAME wlr-output-management-unstable-v1
++    PRIVATE_CODE
++)
++target_link_libraries(kwin PRIVATE QuasarWlrOutputManagement)
++target_include_directories(kwin PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
++
+ target_link_libraries(kwin PRIVATE Plasma::KWaylandClient Wayland::Client gbm::gbm)
+diff --git a/src/backends/wayland/protocols/wlr-output-management-unstable-v1.xml b/src/backends/wayland/protocols/wlr-output-management-unstable-v1.xml
+new file mode 100644
+index 0000000..541284a
+--- /dev/null
++++ b/src/backends/wayland/protocols/wlr-output-management-unstable-v1.xml
+@@ -0,0 +1,611 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="wlr_output_management_unstable_v1">
++  <copyright>
++    Copyright © 2019 Purism SPC
++
++    Permission to use, copy, modify, distribute, and sell this
++    software and its documentation for any purpose is hereby granted
++    without fee, provided that the above copyright notice appear in
++    all copies and that both that copyright notice and this permission
++    notice appear in supporting documentation, and that the name of
++    the copyright holders not be used in advertising or publicity
++    pertaining to distribution of the software without specific,
++    written prior permission.  The copyright holders make no
++    representations about the suitability of this software for any
++    purpose.  It is provided "as is" without express or implied
++    warranty.
++
++    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
++    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
++    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
++    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
++    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
++    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
++    THIS SOFTWARE.
++  </copyright>
++
++  <description summary="protocol to configure output devices">
++    This protocol exposes interfaces to obtain and modify output device
++    configuration.
++
++    Warning! The protocol described in this file is experimental and
++    backward incompatible changes may be made. Backward compatible changes
++    may be added together with the corresponding interface version bump.
++    Backward incompatible changes are done by bumping the version number in
++    the protocol and interface names and resetting the interface version.
++    Once the protocol is to be declared stable, the 'z' prefix and the
++    version number in the protocol and interface names are removed and the
++    interface version number is reset.
++  </description>
++
++  <interface name="zwlr_output_manager_v1" version="4">
++    <description summary="output device configuration manager">
++      This interface is a manager that allows reading and writing the current
++      output device configuration.
++
++      Output devices that display pixels (e.g. a physical monitor or a virtual
++      output in a window) are represented as heads. Heads cannot be created nor
++      destroyed by the client, but they can be enabled or disabled and their
++      properties can be changed. Each head may have one or more available modes.
++
++      Whenever a head appears (e.g. a monitor is plugged in), it will be
++      advertised via the head event. Immediately after the output manager is
++      bound, all current heads are advertised.
++
++      Whenever a head's properties change, the relevant wlr_output_head events
++      will be sent. Not all head properties will be sent: only properties that
++      have changed need to.
++
++      Whenever a head disappears (e.g. a monitor is unplugged), a
++      wlr_output_head.finished event will be sent.
++
++      After one or more heads appear, change or disappear, the done event will
++      be sent. It carries a serial which can be used in a create_configuration
++      request to update heads properties.
++
++      The information obtained from this protocol should only be used for output
++      configuration purposes. This protocol is not designed to be a generic
++      output property advertisement protocol for regular clients. Instead,
++      protocols such as xdg-output should be used.
++    </description>
++
++    <event name="head">
++      <description summary="introduce a new head">
++        This event introduces a new head. This happens whenever a new head
++        appears (e.g. a monitor is plugged in) or after the output manager is
++        bound.
++      </description>
++      <arg name="head" type="new_id" interface="zwlr_output_head_v1"/>
++    </event>
++
++    <event name="done">
++      <description summary="sent all information about current configuration">
++        This event is sent after all information has been sent after binding to
++        the output manager object and after any subsequent changes. This applies
++        to child head and mode objects as well. In other words, this event is
++        sent whenever a head or mode is created or destroyed and whenever one of
++        their properties has been changed. Not all state is re-sent each time
++        the current configuration changes: only the actual changes are sent.
++
++        This allows changes to the output configuration to be seen as atomic,
++        even if they happen via multiple events.
++
++        A serial is sent to be used in a future create_configuration request.
++      </description>
++      <arg name="serial" type="uint" summary="current configuration serial"/>
++    </event>
++
++    <request name="create_configuration">
++      <description summary="create a new output configuration object">
++        Create a new output configuration object. This allows to update head
++        properties.
++      </description>
++      <arg name="id" type="new_id" interface="zwlr_output_configuration_v1"/>
++      <arg name="serial" type="uint"/>
++    </request>
++
++    <request name="stop">
++      <description summary="stop sending events">
++        Indicates the client no longer wishes to receive events for output
++        configuration changes. However the compositor may emit further events,
++        until the finished event is emitted.
++
++        The client must not send any more requests after this one.
++      </description>
++    </request>
++
++    <event name="finished" type="destructor">
++      <description summary="the compositor has finished with the manager">
++        This event indicates that the compositor is done sending manager events.
++        The compositor will destroy the object immediately after sending this
++        event, so it will become invalid and the client should release any
++        resources associated with it.
++      </description>
++    </event>
++  </interface>
++
++  <interface name="zwlr_output_head_v1" version="4">
++    <description summary="output device">
++      A head is an output device. The difference between a wl_output object and
++      a head is that heads are advertised even if they are turned off. A head
++      object only advertises properties and cannot be used directly to change
++      them.
++
++      A head has some read-only properties: modes, name, description and
++      physical_size. These cannot be changed by clients.
++
++      Other properties can be updated via a wlr_output_configuration object.
++
++      Properties sent via this interface are applied atomically via the
++      wlr_output_manager.done event. No guarantees are made regarding the order
++      in which properties are sent.
++    </description>
++
++    <event name="name">
++      <description summary="head name">
++        This event describes the head name.
++
++        The naming convention is compositor defined, but limited to alphanumeric
++        characters and dashes (-). Each name is unique among all wlr_output_head
++        objects, but if a wlr_output_head object is destroyed the same name may
++        be reused later. The names will also remain consistent across sessions
++        with the same hardware and software configuration.
++
++        Examples of names include 'HDMI-A-1', 'WL-1', 'X11-1', etc. However, do
++        not assume that the name is a reflection of an underlying DRM
++        connector, X11 connection, etc.
++
++        If this head matches a wl_output, the wl_output.name event must report
++        the same name.
++
++        The name event is sent after a wlr_output_head object is created. This
++        event is only sent once per object, and the name does not change over
++        the lifetime of the wlr_output_head object.
++      </description>
++      <arg name="name" type="string"/>
++    </event>
++
++    <event name="description">
++      <description summary="head description">
++        This event describes a human-readable description of the head.
++
++        The description is a UTF-8 string with no convention defined for its
++        contents. Examples might include 'Foocorp 11" Display' or 'Virtual X11
++        output via :1'. However, do not assume that the name is a reflection of
++        the make, model, serial of the underlying DRM connector or the display
++        name of the underlying X11 connection, etc.
++
++        If this head matches a wl_output, the wl_output.description event must
++        report the same name.
++
++        The description event is sent after a wlr_output_head object is created.
++        This event is only sent once per object, and the description does not
++        change over the lifetime of the wlr_output_head object.
++      </description>
++      <arg name="description" type="string"/>
++    </event>
++
++    <event name="physical_size">
++      <description summary="head physical size">
++        This event describes the physical size of the head. This event is only
++        sent if the head has a physical size (e.g. is not a projector or a
++        virtual device).
++
++        The physical size event is sent after a wlr_output_head object is created. This
++        event is only sent once per object, and the physical size does not change over
++        the lifetime of the wlr_output_head object.
++      </description>
++      <arg name="width" type="int" summary="width in millimeters of the output"/>
++      <arg name="height" type="int" summary="height in millimeters of the output"/>
++    </event>
++
++    <event name="mode">
++      <description summary="introduce a mode">
++        This event introduces a mode for this head. It is sent once per
++        supported mode.
++      </description>
++      <arg name="mode" type="new_id" interface="zwlr_output_mode_v1"/>
++    </event>
++
++    <event name="enabled">
++      <description summary="head is enabled or disabled">
++        This event describes whether the head is enabled. A disabled head is not
++        mapped to a region of the global compositor space.
++
++        When a head is disabled, some properties (current_mode, position,
++        transform and scale) are irrelevant.
++      </description>
++      <arg name="enabled" type="int" summary="zero if disabled, non-zero if enabled"/>
++    </event>
++
++    <event name="current_mode">
++      <description summary="current mode">
++        This event describes the mode currently in use for this head. It is only
++        sent if the output is enabled.
++      </description>
++      <arg name="mode" type="object" interface="zwlr_output_mode_v1"/>
++    </event>
++
++    <event name="position">
++      <description summary="current position">
++        This events describes the position of the head in the global compositor
++        space. It is only sent if the output is enabled.
++      </description>
++      <arg name="x" type="int"
++        summary="x position within the global compositor space"/>
++      <arg name="y" type="int"
++        summary="y position within the global compositor space"/>
++    </event>
++
++    <event name="transform">
++      <description summary="current transformation">
++        This event describes the transformation currently applied to the head.
++        It is only sent if the output is enabled.
++      </description>
++      <arg name="transform" type="int" enum="wl_output.transform"/>
++    </event>
++
++    <event name="scale">
++      <description summary="current scale">
++        This events describes the scale of the head in the global compositor
++        space. It is only sent if the output is enabled.
++      </description>
++      <arg name="scale" type="fixed"/>
++    </event>
++
++    <event name="finished">
++      <description summary="the head has disappeared">
++        This event indicates that the head is no longer available. The head
++        object becomes inert. Clients should send a destroy request and release
++        any resources associated with it.
++      </description>
++    </event>
++
++    <!-- Version 2 additions -->
++
++    <event name="make" since="2">
++      <description summary="head manufacturer">
++        This event describes the manufacturer of the head.
++
++        Together with the model and serial_number events the purpose is to
++        allow clients to recognize heads from previous sessions and for example
++        load head-specific configurations back.
++
++        It is not guaranteed this event will be ever sent. A reason for that
++        can be that the compositor does not have information about the make of
++        the head or the definition of a make is not sensible in the current
++        setup, for example in a virtual session. Clients can still try to
++        identify the head by available information from other events but should
++        be aware that there is an increased risk of false positives.
++
++        If sent, the make event is sent after a wlr_output_head object is
++        created and only sent once per object. The make does not change over
++        the lifetime of the wlr_output_head object.
++
++        It is not recommended to display the make string in UI to users. For
++        that the string provided by the description event should be preferred.
++      </description>
++      <arg name="make" type="string"/>
++    </event>
++
++    <event name="model" since="2">
++      <description summary="head model">
++        This event describes the model of the head.
++
++        Together with the make and serial_number events the purpose is to
++        allow clients to recognize heads from previous sessions and for example
++        load head-specific configurations back.
++
++        It is not guaranteed this event will be ever sent. A reason for that
++        can be that the compositor does not have information about the model of
++        the head or the definition of a model is not sensible in the current
++        setup, for example in a virtual session. Clients can still try to
++        identify the head by available information from other events but should
++        be aware that there is an increased risk of false positives.
++
++        If sent, the model event is sent after a wlr_output_head object is
++        created and only sent once per object. The model does not change over
++        the lifetime of the wlr_output_head object.
++
++        It is not recommended to display the model string in UI to users. For
++        that the string provided by the description event should be preferred.
++      </description>
++      <arg name="model" type="string"/>
++    </event>
++
++    <event name="serial_number" since="2">
++      <description summary="head serial number">
++        This event describes the serial number of the head.
++
++        Together with the make and model events the purpose is to allow clients
++        to recognize heads from previous sessions and for example load head-
++        specific configurations back.
++
++        It is not guaranteed this event will be ever sent. A reason for that
++        can be that the compositor does not have information about the serial
++        number of the head or the definition of a serial number is not sensible
++        in the current setup. Clients can still try to identify the head by
++        available information from other events but should be aware that there
++        is an increased risk of false positives.
++
++        If sent, the serial number event is sent after a wlr_output_head object
++        is created and only sent once per object. The serial number does not
++        change over the lifetime of the wlr_output_head object.
++
++        It is not recommended to display the serial_number string in UI to
++        users. For that the string provided by the description event should be
++        preferred.
++      </description>
++      <arg name="serial_number" type="string"/>
++    </event>
++
++    <!-- Version 3 additions -->
++
++    <request name="release" type="destructor" since="3">
++      <description summary="destroy the head object">
++        This request indicates that the client will no longer use this head
++        object.
++      </description>
++    </request>
++
++    <!-- Version 4 additions -->
++
++    <enum name="adaptive_sync_state" since="4">
++      <entry name="disabled" value="0" summary="adaptive sync is disabled"/>
++      <entry name="enabled" value="1" summary="adaptive sync is enabled"/>
++    </enum>
++
++    <event name="adaptive_sync" since="4">
++      <description summary="current adaptive sync state">
++        This event describes whether adaptive sync is currently enabled for
++        the head or not. Adaptive sync is also known as Variable Refresh
++        Rate or VRR.
++      </description>
++      <arg name="state" type="uint" enum="adaptive_sync_state"/>
++    </event>
++  </interface>
++
++  <interface name="zwlr_output_mode_v1" version="3">
++    <description summary="output mode">
++      This object describes an output mode.
++
++      Some heads don't support output modes, in which case modes won't be
++      advertised.
++
++      Properties sent via this interface are applied atomically via the
++      wlr_output_manager.done event. No guarantees are made regarding the order
++      in which properties are sent.
++    </description>
++
++    <event name="size">
++      <description summary="mode size">
++        This event describes the mode size. The size is given in physical
++        hardware units of the output device. This is not necessarily the same as
++        the output size in the global compositor space. For instance, the output
++        may be scaled or transformed.
++      </description>
++      <arg name="width" type="int" summary="width of the mode in hardware units"/>
++      <arg name="height" type="int" summary="height of the mode in hardware units"/>
++    </event>
++
++    <event name="refresh">
++      <description summary="mode refresh rate">
++        This event describes the mode's fixed vertical refresh rate. It is only
++        sent if the mode has a fixed refresh rate.
++      </description>
++      <arg name="refresh" type="int" summary="vertical refresh rate in mHz"/>
++    </event>
++
++    <event name="preferred">
++      <description summary="mode is preferred">
++        This event advertises this mode as preferred.
++      </description>
++    </event>
++
++    <event name="finished">
++      <description summary="the mode has disappeared">
++        This event indicates that the mode is no longer available. The mode
++        object becomes inert. Clients should send a destroy request and release
++        any resources associated with it.
++      </description>
++    </event>
++
++    <!-- Version 3 additions -->
++
++    <request name="release" type="destructor" since="3">
++      <description summary="destroy the mode object">
++        This request indicates that the client will no longer use this mode
++        object.
++      </description>
++    </request>
++  </interface>
++
++  <interface name="zwlr_output_configuration_v1" version="4">
++    <description summary="output configuration">
++      This object is used by the client to describe a full output configuration.
++
++      First, the client needs to setup the output configuration. Each head can
++      be either enabled (and configured) or disabled. It is a protocol error to
++      send two enable_head or disable_head requests with the same head. It is a
++      protocol error to omit a head in a configuration.
++
++      Then, the client can apply or test the configuration. The compositor will
++      then reply with a succeeded, failed or cancelled event. Finally the client
++      should destroy the configuration object.
++    </description>
++
++    <enum name="error">
++      <entry name="already_configured_head" value="1"
++        summary="head has been configured twice"/>
++      <entry name="unconfigured_head" value="2"
++        summary="head has not been configured"/>
++      <entry name="already_used" value="3"
++        summary="request sent after configuration has been applied or tested"/>
++    </enum>
++
++    <request name="enable_head">
++      <description summary="enable and configure a head">
++        Enable a head. This request creates a head configuration object that can
++        be used to change the head's properties.
++      </description>
++      <arg name="id" type="new_id" interface="zwlr_output_configuration_head_v1"
++        summary="a new object to configure the head"/>
++      <arg name="head" type="object" interface="zwlr_output_head_v1"
++        summary="the head to be enabled"/>
++    </request>
++
++    <request name="disable_head">
++      <description summary="disable a head">
++        Disable a head.
++      </description>
++      <arg name="head" type="object" interface="zwlr_output_head_v1"
++        summary="the head to be disabled"/>
++    </request>
++
++    <request name="apply">
++      <description summary="apply the configuration">
++        Apply the new output configuration.
++
++        In case the configuration is successfully applied, there is no guarantee
++        that the new output state matches completely the requested
++        configuration. For instance, a compositor might round the scale if it
++        doesn't support fractional scaling.
++
++        After this request has been sent, the compositor must respond with an
++        succeeded, failed or cancelled event. Sending a request that isn't the
++        destructor is a protocol error.
++      </description>
++    </request>
++
++    <request name="test">
++      <description summary="test the configuration">
++        Test the new output configuration. The configuration won't be applied,
++        but will only be validated.
++
++        Even if the compositor succeeds to test a configuration, applying it may
++        fail.
++
++        After this request has been sent, the compositor must respond with an
++        succeeded, failed or cancelled event. Sending a request that isn't the
++        destructor is a protocol error.
++      </description>
++    </request>
++
++    <event name="succeeded">
++      <description summary="configuration changes succeeded">
++        Sent after the compositor has successfully applied the changes or
++        tested them.
++
++        Upon receiving this event, the client should destroy this object.
++
++        If the current configuration has changed, events to describe the changes
++        will be sent followed by a wlr_output_manager.done event.
++      </description>
++    </event>
++
++    <event name="failed">
++      <description summary="configuration changes failed">
++        Sent if the compositor rejects the changes or failed to apply them. The
++        compositor should revert any changes made by the apply request that
++        triggered this event.
++
++        Upon receiving this event, the client should destroy this object.
++      </description>
++    </event>
++
++    <event name="cancelled">
++      <description summary="configuration has been cancelled">
++        Sent if the compositor cancels the configuration because the state of an
++        output changed and the client has outdated information (e.g. after an
++        output has been hotplugged).
++
++        The client can create a new configuration with a newer serial and try
++        again.
++
++        Upon receiving this event, the client should destroy this object.
++      </description>
++    </event>
++
++    <request name="destroy" type="destructor">
++      <description summary="destroy the output configuration">
++        Using this request a client can tell the compositor that it is not going
++        to use the configuration object anymore. Any changes to the outputs
++        that have not been applied will be discarded.
++
++        This request also destroys wlr_output_configuration_head objects created
++        via this object.
++      </description>
++    </request>
++  </interface>
++
++  <interface name="zwlr_output_configuration_head_v1" version="4">
++    <description summary="head configuration">
++      This object is used by the client to update a single head's configuration.
++
++      It is a protocol error to set the same property twice.
++    </description>
++
++    <enum name="error">
++      <entry name="already_set" value="1" summary="property has already been set"/>
++      <entry name="invalid_mode" value="2" summary="mode doesn't belong to head"/>
++      <entry name="invalid_custom_mode" value="3" summary="mode is invalid"/>
++      <entry name="invalid_transform" value="4" summary="transform value outside enum"/>
++      <entry name="invalid_scale" value="5" summary="scale negative or zero"/>
++      <entry name="invalid_adaptive_sync_state" value="6" since="4"
++        summary="invalid enum value used in the set_adaptive_sync request"/>
++    </enum>
++
++    <request name="set_mode">
++      <description summary="set the mode">
++        This request sets the head's mode.
++      </description>
++      <arg name="mode" type="object" interface="zwlr_output_mode_v1"/>
++    </request>
++
++    <request name="set_custom_mode">
++      <description summary="set a custom mode">
++        This request assigns a custom mode to the head. The size is given in
++        physical hardware units of the output device. If set to zero, the
++        refresh rate is unspecified.
++
++        It is a protocol error to set both a mode and a custom mode.
++      </description>
++      <arg name="width" type="int" summary="width of the mode in hardware units"/>
++      <arg name="height" type="int" summary="height of the mode in hardware units"/>
++      <arg name="refresh" type="int" summary="vertical refresh rate in mHz or zero"/>
++    </request>
++
++    <request name="set_position">
++      <description summary="set the position">
++        This request sets the head's position in the global compositor space.
++      </description>
++      <arg name="x" type="int" summary="x position in the global compositor space"/>
++      <arg name="y" type="int" summary="y position in the global compositor space"/>
++    </request>
++
++    <request name="set_transform">
++      <description summary="set the transform">
++        This request sets the head's transform.
++      </description>
++      <arg name="transform" type="int" enum="wl_output.transform"/>
++    </request>
++
++    <request name="set_scale">
++      <description summary="set the scale">
++        This request sets the head's scale.
++      </description>
++      <arg name="scale" type="fixed"/>
++    </request>
++
++    <!-- Version 4 additions -->
++
++    <request name="set_adaptive_sync" since="4">
++      <description summary="enable/disable adaptive sync">
++        This request enables/disables adaptive sync. Adaptive sync is also
++        known as Variable Refresh Rate or VRR.
++      </description>
++      <arg name="state" type="uint" enum="zwlr_output_head_v1.adaptive_sync_state"/>
++    </request>
++  </interface>
++</protocol>
+diff --git a/src/backends/wayland/wayland_display.cpp b/src/backends/wayland/wayland_display.cpp
+index 99bfadc..accedcc 100644
+--- a/src/backends/wayland/wayland_display.cpp
++++ b/src/backends/wayland/wayland_display.cpp
+@@ -25,6 +25,7 @@
+ #include <QWaitCondition>
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <drm_fourcc.h>
+ #include <fcntl.h>
+ #include <poll.h>
+@@ -49,6 +50,8 @@
+ #include "wayland-xdg-decoration-unstable-v1-client-protocol.h"
+ #include "wayland-xdg-shell-client-protocol.h"
+ #include "wayland-xdg-toplevel-icon-v1-client-protocol.h"
++// Quasar: generated from protocols/wlr-output-management-unstable-v1.xml
++#include "wayland-wlr-output-management-unstable-v1-client-protocol.h"
+ 
+ namespace KWin
+ {
+@@ -189,6 +192,8 @@ WaylandDisplay::~WaylandDisplay()
+         wl_output_destroy(parent->output);
+     }
+     m_parentOutputs.clear();
++    // Quasar: host wlr-output-management proxies used to forward a mode pick
++    destroyHostOutputManagement();
+ 
+     if (m_shm) {
+         wl_shm_destroy(m_shm);
+@@ -390,6 +395,315 @@ const wl_output_listener WaylandDisplay::s_outputListener{
+     .scale = &WaylandDisplay::output_scale,
+ };
+ 
++// Quasar: wlr-output-management client --------------------------------------
++//
++// The nested output's size is whatever the host configures its xdg_toplevel
++// at; there is no Wayland CLIENT request for "please change your mode". The
++// one protocol that carries such a request is wlr-output-management, which
++// Quasar's host implements with exactly one head whose modes are the real
++// display's modes, each with its own refresh. These listeners keep a mirror of
++// that head (modes, current mode, configuration serial) and answer the one
++// configuration requestHostMode() may have in flight. Only the FIRST head is
++// tracked: the nested compositor is one toplevel, and Quasar's host has one.
++struct HostOutputManagementListeners
++{
++    static WaylandDisplay::HostOutputMode *modeRecord(WaylandDisplay *display, zwlr_output_mode_v1 *proxy)
++    {
++        for (const auto &mode : display->m_hostModes) {
++            if (mode->proxy == proxy) {
++                return mode.get();
++            }
++        }
++        return nullptr;
++    }
++
++    // zwlr_output_manager_v1
++    static void managerHead(void *data, zwlr_output_manager_v1 *, zwlr_output_head_v1 *head)
++    {
++        auto display = static_cast<WaylandDisplay *>(data);
++        if (display->m_hostHead) {
++            // Not ours to manage; no listener, so its events are dropped.
++            qCDebug(KWIN_WAYLAND_BACKEND) << "host output management: ignoring a second head";
++            return;
++        }
++        display->m_hostHead = head;
++        zwlr_output_head_v1_add_listener(head, &HostOutputManagementListeners::head, display);
++    }
++    static void managerDone(void *data, zwlr_output_manager_v1 *, uint32_t serial)
++    {
++        auto display = static_cast<WaylandDisplay *>(data);
++        if (!display->m_hostHasSerial) {
++            // Once per session: says whether mode picks CAN be forwarded, and
++            // proves the backend's info logging reaches the session log.
++            qCInfo(KWIN_WAYLAND_BACKEND) << "host offers wlr-output-management:" << display->m_hostModes.size() << "mode(s) on its head";
++        }
++        display->m_hostSerial = serial;
++        display->m_hostHasSerial = true;
++        Q_EMIT display->hostModesChanged();
++    }
++    static void managerFinished(void *data, zwlr_output_manager_v1 *)
++    {
++        auto display = static_cast<WaylandDisplay *>(data);
++        qCDebug(KWIN_WAYLAND_BACKEND) << "host output management finished";
++        display->destroyHostOutputManagement();
++        Q_EMIT display->hostModesChanged();
++    }
++    static constexpr zwlr_output_manager_v1_listener manager{
++        .head = managerHead,
++        .done = managerDone,
++        .finished = managerFinished,
++    };
++
++    // zwlr_output_head_v1: only `mode`, `current_mode` and `finished` matter here
++    static void headName(void *, zwlr_output_head_v1 *, const char *)
++    {
++    }
++    static void headDescription(void *, zwlr_output_head_v1 *, const char *)
++    {
++    }
++    static void headPhysicalSize(void *, zwlr_output_head_v1 *, int32_t, int32_t)
++    {
++    }
++    static void headMode(void *data, zwlr_output_head_v1 *, zwlr_output_mode_v1 *proxy)
++    {
++        auto display = static_cast<WaylandDisplay *>(data);
++        auto mode = std::make_unique<WaylandDisplay::HostOutputMode>();
++        mode->display = display;
++        mode->proxy = proxy;
++        zwlr_output_mode_v1_add_listener(proxy, &HostOutputManagementListeners::mode, mode.get());
++        display->m_hostModes.push_back(std::move(mode));
++    }
++    static void headEnabled(void *, zwlr_output_head_v1 *, int32_t)
++    {
++    }
++    static void headCurrentMode(void *data, zwlr_output_head_v1 *, zwlr_output_mode_v1 *proxy)
++    {
++        auto display = static_cast<WaylandDisplay *>(data);
++        display->m_hostCurrentMode = modeRecord(display, proxy);
++    }
++    static void headPosition(void *, zwlr_output_head_v1 *, int32_t, int32_t)
++    {
++    }
++    static void headTransform(void *, zwlr_output_head_v1 *, int32_t)
++    {
++    }
++    static void headScale(void *, zwlr_output_head_v1 *, wl_fixed_t)
++    {
++    }
++    static void headFinished(void *data, zwlr_output_head_v1 *)
++    {
++        auto display = static_cast<WaylandDisplay *>(data);
++        display->destroyHostHead();
++    }
++    static void headMake(void *, zwlr_output_head_v1 *, const char *)
++    {
++    }
++    static void headModel(void *, zwlr_output_head_v1 *, const char *)
++    {
++    }
++    static void headSerialNumber(void *, zwlr_output_head_v1 *, const char *)
++    {
++    }
++    static void headAdaptiveSync(void *, zwlr_output_head_v1 *, uint32_t)
++    {
++    }
++    static constexpr zwlr_output_head_v1_listener head{
++        .name = headName,
++        .description = headDescription,
++        .physical_size = headPhysicalSize,
++        .mode = headMode,
++        .enabled = headEnabled,
++        .current_mode = headCurrentMode,
++        .position = headPosition,
++        .transform = headTransform,
++        .scale = headScale,
++        .finished = headFinished,
++        .make = headMake,
++        .model = headModel,
++        .serial_number = headSerialNumber,
++        .adaptive_sync = headAdaptiveSync,
++    };
++
++    // zwlr_output_mode_v1
++    static void modeSize(void *data, zwlr_output_mode_v1 *, int32_t width, int32_t height)
++    {
++        static_cast<WaylandDisplay::HostOutputMode *>(data)->mode.size = QSize(width, height);
++    }
++    static void modeRefresh(void *data, zwlr_output_mode_v1 *, int32_t refresh)
++    {
++        static_cast<WaylandDisplay::HostOutputMode *>(data)->mode.refresh = refresh > 0 ? uint32_t(refresh) : 0;
++    }
++    static void modePreferred(void *data, zwlr_output_mode_v1 *)
++    {
++        static_cast<WaylandDisplay::HostOutputMode *>(data)->mode.preferred = true;
++    }
++    static void modeFinished(void *data, zwlr_output_mode_v1 *proxy)
++    {
++        auto record = static_cast<WaylandDisplay::HostOutputMode *>(data);
++        WaylandDisplay *display = record->display;
++        if (display->m_hostCurrentMode == record) {
++            display->m_hostCurrentMode = nullptr;
++        }
++        WaylandDisplay::releaseHostMode(proxy);
++        std::erase_if(display->m_hostModes, [record](const auto &mode) {
++            return mode.get() == record;
++        });
++        // the next manager `done` announces the change
++    }
++    static constexpr zwlr_output_mode_v1_listener mode{
++        .size = modeSize,
++        .refresh = modeRefresh,
++        .preferred = modePreferred,
++        .finished = modeFinished,
++    };
++
++    // zwlr_output_configuration_v1
++    static void configurationSucceeded(void *data, zwlr_output_configuration_v1 *)
++    {
++        static_cast<WaylandDisplay *>(data)->finishHostConfiguration(WaylandDisplay::HostModeRequestResult::Succeeded);
++    }
++    static void configurationFailed(void *data, zwlr_output_configuration_v1 *)
++    {
++        static_cast<WaylandDisplay *>(data)->finishHostConfiguration(WaylandDisplay::HostModeRequestResult::Failed);
++    }
++    static void configurationCancelled(void *data, zwlr_output_configuration_v1 *)
++    {
++        static_cast<WaylandDisplay *>(data)->finishHostConfiguration(WaylandDisplay::HostModeRequestResult::Cancelled);
++    }
++    static constexpr zwlr_output_configuration_v1_listener configuration{
++        .succeeded = configurationSucceeded,
++        .failed = configurationFailed,
++        .cancelled = configurationCancelled,
++    };
++};
++
++void WaylandDisplay::releaseHostMode(zwlr_output_mode_v1 *proxy)
++{
++    // `release` exists since v3; before it, forgetting the proxy is all there is.
++    if (zwlr_output_mode_v1_get_version(proxy) >= ZWLR_OUTPUT_MODE_V1_RELEASE_SINCE_VERSION) {
++        zwlr_output_mode_v1_release(proxy);
++    } else {
++        zwlr_output_mode_v1_destroy(proxy);
++    }
++}
++
++void WaylandDisplay::destroyHostHead()
++{
++    m_hostCurrentMode = nullptr;
++    for (const auto &mode : m_hostModes) {
++        releaseHostMode(mode->proxy);
++    }
++    m_hostModes.clear();
++    if (m_hostHead) {
++        if (zwlr_output_head_v1_get_version(m_hostHead) >= ZWLR_OUTPUT_HEAD_V1_RELEASE_SINCE_VERSION) {
++            zwlr_output_head_v1_release(m_hostHead);
++        } else {
++            zwlr_output_head_v1_destroy(m_hostHead);
++        }
++        m_hostHead = nullptr;
++    }
++}
++
++void WaylandDisplay::destroyHostOutputManagement()
++{
++    if (m_hostConfiguration) {
++        zwlr_output_configuration_v1_destroy(m_hostConfiguration);
++        m_hostConfiguration = nullptr;
++    }
++    destroyHostHead();
++    if (m_hostOutputManager) {
++        zwlr_output_manager_v1_destroy(m_hostOutputManager);
++        m_hostOutputManager = nullptr;
++    }
++    m_hostOutputManagerName = 0;
++    m_hostHasSerial = false;
++}
++
++void WaylandDisplay::finishHostConfiguration(HostModeRequestResult result)
++{
++    if (m_hostConfiguration) {
++        zwlr_output_configuration_v1_destroy(m_hostConfiguration);
++        m_hostConfiguration = nullptr;
++    }
++    Q_EMIT hostModeRequestFinished(result);
++}
++
++bool WaylandDisplay::hasHostOutputManagement() const
++{
++    return m_hostOutputManager && m_hostHead && m_hostHasSerial && !m_hostModes.empty();
++}
++
++QList<WaylandDisplay::HostMode> WaylandDisplay::hostModes() const
++{
++    if (!hasHostOutputManagement()) {
++        return {};
++    }
++    QList<HostMode> modes;
++    modes.reserve(m_hostModes.size());
++    for (const auto &mode : m_hostModes) {
++        if (!mode->mode.size.isEmpty() && mode->mode.refresh > 0) {
++            modes.append(mode->mode);
++        }
++    }
++    return modes;
++}
++
++std::optional<WaylandDisplay::HostMode> WaylandDisplay::hostCurrentMode() const
++{
++    if (!hasHostOutputManagement() || !m_hostCurrentMode) {
++        return std::nullopt;
++    }
++    return m_hostCurrentMode->mode;
++}
++
++bool WaylandDisplay::requestHostMode(const QSize &size, uint32_t refresh)
++{
++    if (!hasHostOutputManagement()) {
++        return false;
++    }
++    if (m_hostConfiguration) {
++        qCWarning(KWIN_WAYLAND_BACKEND) << "host output management: a mode request is still unanswered; not sending another";
++        return false;
++    }
++    // Same tolerance as the host: two rates within half a hertz name one mode.
++    HostOutputMode *best = nullptr;
++    for (const auto &mode : m_hostModes) {
++        if (mode->mode.size != size) {
++            continue;
++        }
++        const auto distance = std::abs(qint64(mode->mode.refresh) - qint64(refresh));
++        if (distance > 500) {
++            continue;
++        }
++        if (!best || distance < std::abs(qint64(best->mode.refresh) - qint64(refresh))) {
++            best = mode.get();
++        }
++    }
++    if (!best) {
++        return false;
++    }
++    m_hostConfiguration = zwlr_output_manager_v1_create_configuration(m_hostOutputManager, m_hostSerial);
++    zwlr_output_configuration_v1_add_listener(m_hostConfiguration, &HostOutputManagementListeners::configuration, this);
++    zwlr_output_configuration_head_v1 *configHead = zwlr_output_configuration_v1_enable_head(m_hostConfiguration, m_hostHead);
++    zwlr_output_configuration_head_v1_set_mode(configHead, best->proxy);
++    // The per-head object has no destructor request; dropping the proxy is all
++    // the client side does with it.
++    zwlr_output_configuration_head_v1_destroy(configHead);
++    zwlr_output_configuration_v1_apply(m_hostConfiguration);
++    // Send now rather than on the event thread's next turn: this runs from an
++    // applyChanges(), not from an event dispatch.
++    wl_display_flush(m_display);
++    // The refresh logged is the host mode object actually sent in set_mode,
++    // which can differ (by up to 500 mHz) from the refresh that was asked for.
++    if (best->mode.refresh == refresh) {
++        qCInfo(KWIN_WAYLAND_BACKEND) << "asked the host for mode" << size << "@" << best->mode.refresh << "mHz";
++    } else {
++        qCInfo(KWIN_WAYLAND_BACKEND) << "asked the host for mode" << size << "@" << best->mode.refresh << "mHz (the host's mode nearest to"
++                                     << refresh << "mHz)";
++    }
++    return true;
++}
++
+ void WaylandDisplay::registry_global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version)
+ {
+     WaylandDisplay *display = static_cast<WaylandDisplay *>(data);
+@@ -457,6 +771,15 @@ void WaylandDisplay::registry_global(void *data, wl_registry *registry, uint32_t
+         parent->output = static_cast<wl_output *>(wl_registry_bind(registry, name, &wl_output_interface, bindVersion));
+         wl_output_add_listener(parent->output, &s_outputListener, parent.get());
+         display->m_parentOutputs.push_back(std::move(parent));
++    } else if (strcmp(interface, zwlr_output_manager_v1_interface.name) == 0 && !display->m_hostOutputManager) {
++        // Quasar: the host's wlr-output-management, used ONLY to forward a mode
++        // the user picks in Display Settings to the host (see
++        // WaylandOutput::applyChanges). v4 is what Quasar's host implements; every
++        // event up to it is handled below, adaptive_sync included.
++        display->m_hostOutputManagerName = name;
++        display->m_hostOutputManager = static_cast<zwlr_output_manager_v1 *>(
++            wl_registry_bind(registry, name, &zwlr_output_manager_v1_interface, std::min(version, 4u)));
++        zwlr_output_manager_v1_add_listener(display->m_hostOutputManager, &HostOutputManagementListeners::manager, display);
+     }
+ }
+ 
+@@ -471,6 +794,10 @@ void WaylandDisplay::registry_global_remove(void *data, wl_registry *registry, u
+         display->m_parentOutputs.erase(it);
+         Q_EMIT display->parentModesChanged();
+     }
++    if (display->m_hostOutputManager && display->m_hostOutputManagerName == name) {
++        display->destroyHostOutputManagement();
++        Q_EMIT display->hostModesChanged();
++    }
+ }
+ 
+ // Quasar: host wl_output mode-ladder tracking ---------------------------------
+diff --git a/src/backends/wayland/wayland_display.h b/src/backends/wayland/wayland_display.h
+index 626ae85..f87dce2 100644
+--- a/src/backends/wayland/wayland_display.h
++++ b/src/backends/wayland/wayland_display.h
+@@ -11,12 +11,18 @@
+ #include <QObject>
+ #include <QSize>
+ 
++#include <cstdint>
+ #include <memory>
++#include <optional>
+ #include <vector>
+ 
+ struct wl_display;
+ struct wl_output;
+ struct wl_output_listener;
++struct zwlr_output_manager_v1;
++struct zwlr_output_head_v1;
++struct zwlr_output_mode_v1;
++struct zwlr_output_configuration_v1;
+ struct wl_registry;
+ struct wl_shm;
+ struct zwp_linux_dmabuf_v1;
+@@ -102,6 +108,50 @@ public:
+      */
+     QList<QSize> parentModeSizes() const;
+ 
++    /**
++     * Quasar: one mode of the host compositor's output, as described by
++     * wlr-output-management (size in pixels, refresh in mHz).
++     */
++    struct HostMode
++    {
++        QSize size;
++        uint32_t refresh = 0;
++        bool preferred = false;
++    };
++
++    /**
++     * Quasar: whether the host implements wlr-output-management, has described
++     * its head and handed out a configuration serial - i.e. whether a mode pick
++     * CAN be forwarded to it with requestHostMode(). False against any host that
++     * lacks the protocol; the nested backend then behaves exactly as before.
++     */
++    bool hasHostOutputManagement() const;
++    /**
++     * Quasar: the host head's modes, each with its own refresh, in the order the
++     * host described them. Empty without hasHostOutputManagement().
++     */
++    QList<HostMode> hostModes() const;
++    /**
++     * Quasar: the mode the host reports as current on its head, if any.
++     */
++    std::optional<HostMode> hostCurrentMode() const;
++
++    enum class HostModeRequestResult {
++        Succeeded,
++        Failed,
++        Cancelled,
++    };
++    /**
++     * Quasar: ask the host, through wlr-output-management, to move its output to
++     * the advertised mode of this size whose refresh is nearest @p refresh (within
++     * half a hertz). Returns false - and sends nothing - when the host has no
++     * output management, has no such mode, or a previous request is still
++     * unanswered. Otherwise the answer arrives as hostModeRequestFinished(); a
++     * `Succeeded` answer only means the host ACCEPTED the pick, the change itself
++     * arrives later as an xdg_toplevel.configure.
++     */
++    bool requestHostMode(const QSize &size, uint32_t refresh);
++
+ public Q_SLOTS:
+     void flush();
+ 
+@@ -110,6 +160,15 @@ Q_SIGNALS:
+      * Quasar: emitted when the host compositor's advertised mode list changes.
+      */
+     void parentModesChanged();
++    /**
++     * Quasar: emitted on every wlr-output-management `done` - the host's mode
++     * list or its current mode may have changed.
++     */
++    void hostModesChanged();
++    /**
++     * Quasar: the host answered the configuration sent by requestHostMode().
++     */
++    void hostModeRequestFinished(HostModeRequestResult result);
+ 
+ private:
+     static void registry_global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version);
+@@ -133,6 +192,27 @@ private:
+ 
+     std::vector<std::unique_ptr<ParentOutput>> m_parentOutputs;
+ 
++    // Quasar: host wlr-output-management client, for forwarding a mode pick.
++    struct HostOutputMode
++    {
++        WaylandDisplay *display = nullptr;
++        zwlr_output_mode_v1 *proxy = nullptr;
++        HostMode mode;
++    };
++    void destroyHostOutputManagement();
++    void destroyHostHead();
++    void finishHostConfiguration(HostModeRequestResult result);
++    static void releaseHostMode(zwlr_output_mode_v1 *proxy);
++    zwlr_output_manager_v1 *m_hostOutputManager = nullptr;
++    uint32_t m_hostOutputManagerName = 0;
++    zwlr_output_head_v1 *m_hostHead = nullptr;
++    std::vector<std::unique_ptr<HostOutputMode>> m_hostModes;
++    HostOutputMode *m_hostCurrentMode = nullptr;
++    uint32_t m_hostSerial = 0;
++    bool m_hostHasSerial = false;
++    zwlr_output_configuration_v1 *m_hostConfiguration = nullptr;
++    friend struct HostOutputManagementListeners;
++
+     wl_display *m_display = nullptr;
+     wl_registry *m_registry = nullptr;
+     wl_shm *m_shm = nullptr;
+diff --git a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+index 5cdbc99..8925463 100644
+--- a/src/backends/wayland/wayland_output.cpp
++++ b/src/backends/wayland/wayland_output.cpp
+@@ -191,6 +191,14 @@ WaylandOutput::WaylandOutput(const QString &name, WaylandBackend *backend)
+ 
+     // Quasar: the host's mode ladder can arrive/change after the output exists.
+     connect(backend->display(), &WaylandDisplay::parentModesChanged, this, &WaylandOutput::refreshModeLadder);
++    // Quasar (0004): host mode forwarding through wlr-output-management.
++    connect(backend->display(), &WaylandDisplay::hostModesChanged, this, &WaylandOutput::handleHostModesChanged);
++    connect(backend->display(), &WaylandDisplay::hostModeRequestFinished, this, &WaylandOutput::handleHostModeRequestFinished);
++    m_hostPickTimer.setSingleShot(true);
++    m_hostPickTimer.setInterval(2000);
++    connect(&m_hostPickTimer, &QTimer::timeout, this, [this]() {
++        fallBackFromHostPick("no configure within 2 s", true);
++    });
+ 
+     connect(m_xdgShellSurface.get(), &XdgShellSurface::configureRequested, this, &WaylandOutput::handleConfigure);
+     connect(m_xdgShellSurface.get(), &XdgShellSurface::closeRequested, qApp, &QCoreApplication::quit);
+@@ -373,7 +381,12 @@ void WaylandOutput::frameDiscarded()
+ 
+ void WaylandOutput::framePresented(std::chrono::nanoseconds timestamp, uint32_t refreshRate)
+ {
+-    if (refreshRate != this->refreshRate()) {
++    // Quasar (0004): compare with the PRESENTATION rate, not the current mode's.
++    // Under a host with wlr-output-management the current mode carries the
++    // host's advertised refresh (e.g. 59996 mHz) while presentation feedback
++    // reports its own rounding of it (59995) - comparing against the mode would
++    // rebuild the whole mode list on every single frame.
++    if (refreshRate != m_refreshRate) {
+         m_refreshRate = refreshRate;
+         // Quasar: rebuild the whole ladder at the new rate rather than collapsing
+         // it to the single current mode.
+@@ -456,11 +469,14 @@ static QList<QSize> standardRungs(const QSize &nativeSize)
+     return rungs;
+ }
+ 
+-std::shared_ptr<OutputMode> WaylandOutput::modeFor(const QSize &size, bool preferred)
++std::shared_ptr<OutputMode> WaylandOutput::modeFor(const QSize &size, uint32_t refresh, bool preferred)
+ {
+-    const auto key = std::make_pair(size.width(), size.height());
++    // Quasar (0004): keyed by refresh too - a host advertises the same size at
++    // several rates (60 and 120 Hz are two modes), and each needs its own stable
++    // OutputMode identity.
++    const auto key = std::make_tuple(size.width(), size.height(), refresh);
+     auto it = m_modeCache.find(key);
+-    if (it != m_modeCache.end() && it->second->refreshRate() == m_refreshRate
++    if (it != m_modeCache.end()
+         && bool(it->second->flags() & OutputModeline::Flag::Preferred) == preferred) {
+         return it->second;
+     }
+@@ -468,7 +484,7 @@ std::shared_ptr<OutputMode> WaylandOutput::modeFor(const QSize &size, bool prefe
+     if (preferred) {
+         flags |= OutputModeline::Flag::Preferred;
+     }
+-    auto mode = std::make_shared<OutputMode>(OutputModeline(size, m_refreshRate, flags));
++    auto mode = std::make_shared<OutputMode>(OutputModeline(size, refresh, flags));
+     m_modeCache[key] = mode;
+     return mode;
+ }
+@@ -485,34 +501,101 @@ void WaylandOutput::rebuildModes(State &next, const QSize &nativeSize, const QSi
+         cur = nativeSize;
+     }
+ 
+-    QList<QSize> sizes;
+-    sizes.append(nativeSize);
+-    if (!sizes.contains(cur)) {
+-        sizes.append(cur);
++    // Quasar (0004): every entry is a (size, refresh) pair. The native mode runs
++    // at the host's current refresh (nativeRefreshRate()); a letterboxed pick and
++    // the extra standard rungs are presented INSIDE the native mode, so they run
++    // at that same rate - they cannot change the refresh.
++    const uint32_t nativeRefresh = nativeRefreshRate(nativeSize);
++    std::pair<QSize, uint32_t> current(cur, nativeRefresh);
++    std::pair<QSize, uint32_t> preferred(nativeSize, nativeRefresh);
++    if (m_hostPick) {
++        // Quasar (0004): a HOST mode forwarded to the host is the current mode
++        // from the moment it is picked, at its own size AND refresh - see
++        // forwardModeToHost() for why. It is presented inside the area the host
++        // still configures us at (contentScale() letterboxes a smaller pick and
++        // scales down a larger one) until the host's configure arrives at it.
++        // It is also the Preferred mode meanwhile: the mode the host is about to
++        // make native. That keeps the pick's OutputMode identity unchanged when
++        // the configure lands (same size, refresh and flag -> modeFor() cache
++        // hit), and anything that falls back to "the preferred mode" lands on
++        // the pick rather than on the mode being left.
++        current = {m_hostPick->size, m_hostPick->refresh};
++        preferred = current;
+     }
+-    QList<QSize> candidates = m_backend->display()->parentModeSizes();
+-    candidates.append(standardRungs(nativeSize));
+-    for (const QSize &candidate : std::as_const(candidates)) {
+-        // Only rungs at or below the size the host configured us at: the surface
+-        // must keep covering the host's area, never overflow it.
+-        if (candidate.width() > nativeSize.width() || candidate.height() > nativeSize.height()) {
+-            continue;
++    QList<std::pair<QSize, uint32_t>> entries;
++    const auto add = [&entries](const QSize &size, uint32_t refresh) {
++        const std::pair<QSize, uint32_t> entry(size, refresh);
++        if (!entries.contains(entry)) {
++            entries.append(entry);
+         }
+-        if (!sizes.contains(candidate)) {
+-            sizes.append(candidate);
++    };
++    add(nativeSize, nativeRefresh);
++    add(current.first, current.second);
++
++    const QList<WaylandDisplay::HostMode> hostModes = m_backend->display()->hostModes();
++    if (!hostModes.isEmpty()) {
++        // Quasar (0004): the host implements wlr-output-management, so its modes
++        // are FORWARDABLE (applyChanges() asks the host to move) and are listed
++        // with their own refresh - including sizes LARGER than the one we are
++        // configured at, which only the host can grant. The head's mode list is
++        // used instead of wl_output's: wl_output only sends its full list at bind
++        // time, while the head retires and adds modes properly.
++        QList<QSize> hostSizes;
++        for (const WaylandDisplay::HostMode &mode : hostModes) {
++            hostSizes.append(mode.size);
++            // Only the host mode that IS the native entry is skipped - compared
++            // EXACTLY. A host can advertise two modes of one size within half a
++            // hertz of each other (an EDID's 1920x1080 at 119.879 and 119.878 Hz),
++            // and the host's move can land on the sibling of the mode we asked
++            // for. Collapsing the sibling into the native entry made the mode
++            // KWin's OutputConfigurationStore remembered vanish from the list, so
++            // the store fell back to chooseMode() - the highest refresh at the
++            // preferred size - and re-applied 1920x1080 at 240 Hz.
++            if (mode.size == nativeSize && mode.refresh == nativeRefresh) {
++                continue; // that IS the native entry
++            }
++            add(mode.size, mode.refresh);
++        }
++        // Extra rungs (letterboxed, current refresh) only where the host has no
++        // mode of that size - otherwise picking the size would be ambiguous.
++        for (const QSize &rung : standardRungs(nativeSize)) {
++            if (!hostSizes.contains(rung)) {
++                add(rung, nativeRefresh);
++            }
++        }
++    } else {
++        // No wlr-output-management: exactly the 0001 ladder - sizes only, all at
++        // the current refresh, never larger than the configured size.
++        QList<QSize> candidates = m_backend->display()->parentModeSizes();
++        candidates.append(standardRungs(nativeSize));
++        for (const QSize &candidate : std::as_const(candidates)) {
++            // Only rungs at or below the size the host configured us at: the surface
++            // must keep covering the host's area, never overflow it.
++            if (candidate.width() > nativeSize.width() || candidate.height() > nativeSize.height()) {
++                continue;
++            }
++            add(candidate, nativeRefresh);
+         }
+     }
+-    std::sort(sizes.begin(), sizes.end(), [](const QSize &a, const QSize &b) {
+-        return a.width() * qint64(a.height()) > b.width() * qint64(b.height());
++    std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
++        const qint64 areaA = a.first.width() * qint64(a.first.height());
++        const qint64 areaB = b.first.width() * qint64(b.first.height());
++        if (areaA != areaB) {
++            return areaA > areaB;
++        }
++        if (a.first.width() != b.first.width()) {
++            return a.first.width() > b.first.width();
++        }
++        return a.second > b.second;
+     });
+ 
+     QList<std::shared_ptr<OutputMode>> modes;
+-    modes.reserve(sizes.size());
+-    for (const QSize &size : std::as_const(sizes)) {
+-        modes.append(modeFor(size, size == nativeSize));
++    modes.reserve(entries.size());
++    for (const auto &[size, refresh] : std::as_const(entries)) {
++        modes.append(modeFor(size, refresh, std::make_pair(size, refresh) == preferred));
+     }
+     next.modes = modes;
+-    next.currentMode = modeFor(cur, cur == nativeSize);
++    next.currentMode = modeFor(current.first, current.second, current == preferred);
+ }
+ 
+ void WaylandOutput::refreshModeLadder()
+@@ -525,6 +608,219 @@ void WaylandOutput::refreshModeLadder()
+     setState(next);
+ }
+ 
++// Quasar (0004): forwarding a picked HOST mode to the host ----------------------
++//
++// Letterboxing (above) can only show a SMALLER picture inside the area the host
++// gives us; it can never change the refresh or the physical display's mode.
++// Under Quasar's host that is not good enough: in a console session the host is
++// driving a real monitor, advertises that monitor's real modes, and accepts a
++// pick through wlr-output-management. So a pick of one of the HOST's modes is
++// forwarded to it, and the change then arrives the normal way - the host
++// configures our toplevel at the new size - at which point the pick is simply
++// the native mode and nothing is letterboxed. Picks of the extra rungs, and any
++// pick under a host without the protocol, keep the letterbox path.
++
++// The refresh of the native mode: the host's current mode when it is the size we
++// are configured at, else the host mode of that size closest to the presentation
++// rate, else the presentation rate (no wlr-output-management: today's value).
++uint32_t WaylandOutput::nativeRefreshRate(const QSize &nativeSize) const
++{
++    const WaylandDisplay *display = m_backend->display();
++    if (const auto current = display->hostCurrentMode(); current && current->size == nativeSize) {
++        return current->refresh;
++    }
++    std::optional<uint32_t> best;
++    for (const WaylandDisplay::HostMode &mode : display->hostModes()) {
++        if (mode.size != nativeSize) {
++            continue;
++        }
++        if (!best || std::abs(qint64(mode.refresh) - qint64(m_refreshRate)) < std::abs(qint64(*best) - qint64(m_refreshRate))) {
++            best = mode.refresh;
++        }
++    }
++    return best.value_or(m_refreshRate);
++}
++
++// Same tolerance as the host: two rates within half a hertz name one mode.
++static bool sameRefresh(uint32_t a, uint32_t b)
++{
++    return std::abs(qint64(a) - qint64(b)) <= 500;
++}
++
++static const char *sourceName(OutputConfiguration::Source source)
++{
++    return source == OutputConfiguration::Source::User ? "user" : "system";
++}
++
++bool WaylandOutput::isHostMode(const QSize &size, uint32_t refresh) const
++{
++    const auto modes = m_backend->display()->hostModes();
++    return std::ranges::any_of(modes, [&](const WaylandDisplay::HostMode &mode) {
++        return mode.size == size && sameRefresh(mode.refresh, refresh);
++    });
++}
++
++// Is (size, refresh) where the host already is? Either our native mode, or the
++// host's own current mode - the two differ by a pixel under a fractional UI
++// scale (configure size * scale rounds), and asking the host for the mode it is
++// already in would only wait for a configure that never comes.
++bool WaylandOutput::isCurrentHostMode(const QSize &size, uint32_t refresh) const
++{
++    if (size == m_nativeSize && sameRefresh(refresh, nativeRefreshRate(m_nativeSize))) {
++        return true;
++    }
++    const auto current = m_backend->display()->hostCurrentMode();
++    return current && current->size == size && sameRefresh(current->refresh, refresh);
++}
++
++void WaylandOutput::forwardModeToHost(const QSize &size, uint32_t refresh)
++{
++    if (!m_backend->display()->requestHostMode(size, refresh)) {
++        // Only possible while a previous request is still unanswered (a few
++        // milliseconds): keep the output as it is rather than letterbox a mode
++        // the host may be about to grant anyway.
++        qCWarning(KWIN_WAYLAND_BACKEND) << "could not forward mode" << size << "@" << refresh << "mHz to the host";
++        return;
++    }
++    // The pick becomes the CURRENT mode right away (rebuildModes() reads
++    // m_hostPick; the caller rebuilds), presented letterboxed - or scaled down,
++    // for a pick larger than the host's area - inside the area the host still
++    // configures us at, until the host's configure arrives at it and
++    // settleHostPick() makes it the native mode.
++    //
++    // It must not wait for the host. The apply that got us here came from
++    // KScreen (Display Settings, kscreen-doctor) over kde-output-management-v2,
++    // and KScreen reads the output's state back the moment that apply returns:
++    // the KCM's config and the kscreen kded daemon's monitored config (which the
++    // daemon writes to its per-setup file 300 ms after any change) take
++    // whatever KWin reports as current. If the output still reported the old
++    // mode here, KScreen would record the OLD mode as the user's configuration,
++    // and when the host then moved us, the daemon would put its recorded mode
++    // back - another Source::User apply, so it is forwarded too, and the host
++    // bounces straight back to the mode the user just left. Observed live: every
++    // resolution pick reverted about 60 ms after the host had moved. Adopting
++    // the pick first makes KScreen record the pick, its later re-applies name
++    // the mode we are already in (a no-op in applyChanges()), and the host's
++    // configure at the pick changes nothing KScreen can see: the pick's mode
++    // object stays the same one.
++    m_hostPick = HostPick{.size = size, .refresh = refresh};
++    m_lateHostPick.reset();
++    m_hostPickTimer.start();
++}
++
++void WaylandOutput::handleHostModeRequestFinished(WaylandDisplay::HostModeRequestResult result)
++{
++    if (!m_hostPick) {
++        return;
++    }
++    switch (result) {
++    case WaylandDisplay::HostModeRequestResult::Succeeded:
++        // Accepted only. The host changes NOTHING on apply; the move arrives as a
++        // configure (settleHostPick()) or not at all (m_hostPickTimer).
++        qCDebug(KWIN_WAYLAND_BACKEND) << "host accepted mode" << m_hostPick->size << "@" << m_hostPick->refresh << "mHz";
++        return;
++    case WaylandDisplay::HostModeRequestResult::Cancelled:
++        // A stale serial: the host re-described its head between our `done` and
++        // the `apply`. The fresh serial has already arrived (it precedes the
++        // `cancelled` on the wire), so retry once with it.
++        if (!m_hostPick->retried && m_backend->display()->requestHostMode(m_hostPick->size, m_hostPick->refresh)) {
++            m_hostPick->retried = true;
++            return;
++        }
++        fallBackFromHostPick("cancelled by the host", false);
++        return;
++    case WaylandDisplay::HostModeRequestResult::Failed:
++        fallBackFromHostPick("refused by the host", false);
++        return;
++    }
++}
++
++void WaylandOutput::handleHostModesChanged()
++{
++    std::optional<std::pair<QSize, uint32_t>> hostCurrent;
++    if (const auto current = m_backend->display()->hostCurrentMode()) {
++        hostCurrent = std::make_pair(current->size, current->refresh);
++    }
++    if (hostCurrent != m_lastHostCurrent) {
++        if (m_lastHostCurrent && hostCurrent) {
++            qCInfo(KWIN_WAYLAND_BACKEND) << "host head moved to" << hostCurrent->first << "@" << hostCurrent->second << "mHz";
++            m_lastHostChange.start();
++        }
++        m_lastHostCurrent = hostCurrent;
++    }
++    if (m_hostPick && !m_backend->display()->hasHostOutputManagement()) {
++        fallBackFromHostPick("the host withdrew output management", false);
++        return;
++    }
++    settleHostPick();
++    refreshModeLadder();
++}
++
++// The forwarded pick is satisfied once BOTH have arrived: the host reports it as
++// its current mode (that carries the refresh) and the host has configured our
++// toplevel at its size (that is what we actually render at). They arrive as a
++// configure plus a wlr-output-management `done`, in either order. Members only;
++// the caller rebuilds the mode list.
++void WaylandOutput::settleHostPick()
++{
++    const auto fitsNative = [this](const QSize &size) {
++        // configure size * fractional scale can round a pixel either way
++        return std::abs(size.width() - m_nativeSize.width()) <= 2 && std::abs(size.height() - m_nativeSize.height()) <= 2;
++    };
++    if (m_hostPick) {
++        const auto current = m_backend->display()->hostCurrentMode();
++        if (!current || current->size != m_hostPick->size || !sameRefresh(current->refresh, m_hostPick->refresh)
++            || !fitsNative(m_hostPick->size)) {
++            return;
++        }
++        if (current->refresh == m_hostPick->refresh) {
++            qCInfo(KWIN_WAYLAND_BACKEND) << "host moved to mode" << m_hostPick->size << "@" << current->refresh << "mHz";
++        } else {
++            // The host's move landed on a sibling mode of the same size within
++            // half a hertz. That mode, not the one asked for, is now native and
++            // current (rebuildModes() reads the head's current mode), so KWin and
++            // KScreen report exactly what the display runs at.
++            qCInfo(KWIN_WAYLAND_BACKEND) << "host moved to mode" << m_hostPick->size << "@" << current->refresh << "mHz (asked for"
++                                         << m_hostPick->refresh << "mHz; the host chose a sibling mode)";
++        }
++        m_hostPick.reset();
++        m_hostPickTimer.stop();
++        // native size == pick: contentScale() is back to 1 / scale(), offset 0
++        m_userMode.reset();
++    } else if (m_lateHostPick && fitsNative(*m_lateHostPick)) {
++        // A timed-out pick was letterboxed, and the host got there after all.
++        m_lateHostPick.reset();
++        m_userMode.reset();
++    }
++}
++
++// The host did not take the pick: letterbox it, which is what this backend did
++// before it could forward anything, so the user still gets the size they asked
++// for. A pick LARGER than the host's area cannot be letterboxed; it is dropped.
++void WaylandOutput::fallBackFromHostPick(const char *reason, bool late)
++{
++    if (!m_hostPick) {
++        return;
++    }
++    const HostPick pick = *m_hostPick;
++    m_hostPick.reset();
++    m_hostPickTimer.stop();
++    if (pick.size.width() <= m_nativeSize.width() && pick.size.height() <= m_nativeSize.height()) {
++        qCWarning(KWIN_WAYLAND_BACKEND) << "host did not move to mode" << pick.size << "@" << pick.refresh << "mHz (" << reason << ") - letterboxing it instead";
++        if (pick.size == m_nativeSize) {
++            m_userMode.reset();
++        } else {
++            m_userMode = pick.size;
++        }
++        if (late) {
++            m_lateHostPick = pick.size;
++        }
++    } else {
++        qCWarning(KWIN_WAYLAND_BACKEND) << "host did not move to mode" << pick.size << "@" << pick.refresh << "mHz (" << reason << ") - it is larger than the host's area" << m_nativeSize << ", keeping the current mode";
++    }
++    refreshModeLadder();
++}
++
+ QSize WaylandOutput::parentLogicalSize() const
+ {
+     return m_parentLogicalSize;
+@@ -600,8 +896,49 @@ void WaylandOutput::applyChanges(const OutputConfiguration &config)
+     // Quasar: honour the picked resolution. It is remembered so the host's next
+     // configure - which arrives at the SAME size, because the toplevel keeps
+     // filling the host's area - does not snap it back.
+-    if (props->currentMode && m_nativeSize.isValid() && !m_nativeSize.isEmpty()) {
++    //
++    // Quasar (0004): a pick of one of the HOST's modes is not letterboxed but
++    // forwarded to the host, which moves the display and then configures us at
++    // the new size (see forwardModeToHost()). Only a USER pick is forwarded:
++    // KWin's OutputConfigurationStore re-applies its remembered mode (Source::
++    // System) on every configure and at startup, and that must never move the
++    // physical display on KWin's own initiative - the host owns which of its
++    // modes is current, so such a re-apply of a host mode is ignored.
++    const bool userPick = config.source == OutputConfiguration::Source::User;
++    const bool hostPick = props->currentMode && m_nativeSize.isValid() && !m_nativeSize.isEmpty()
++        && isHostMode(props->currentMode->size(), props->currentMode->refreshRate());
++    if (hostPick) {
++        const QSize requested = props->currentMode->size();
++        const uint32_t requestedRefresh = props->currentMode->refreshRate();
++        qCInfo(KWIN_WAYLAND_BACKEND) << sourceName(config.source) << "apply of host mode" << requested << "@" << requestedRefresh << "mHz;"
++                                     << "native" << m_nativeSize << "@" << nativeRefreshRate(m_nativeSize) << "mHz,"
++                                     << "pick in flight" << (m_hostPick ? m_hostPick->size : QSize()) << "@" << (m_hostPick ? m_hostPick->refresh : 0) << "mHz,"
++                                     << "last host change" << (m_lastHostChange.isValid() ? m_lastHostChange.elapsed() : -1) << "ms ago";
++        if (m_hostPick && requested == m_hostPick->size && sameRefresh(requestedRefresh, m_hostPick->refresh)) {
++            // The pick in flight, again: it is already the current mode (see
++            // forwardModeToHost()). This is KScreen re-asserting the config it
++            // recorded, or the store re-applying the user's pick on a configure;
++            // forwarding it a second time would only queue a duplicate request.
++        } else if (isCurrentHostMode(requested, requestedRefresh) && !(userPick && m_hostPick)) {
++            // Already there: this also drops a letterboxed pick, as 0001 does for
++            // a pick of the native size.
++            m_userMode.reset();
++            if (userPick) {
++                m_lateHostPick.reset();
++            }
++        } else if (userPick) {
++            // (including "back to where the host is" while a DIFFERENT pick is
++            // pending: that one is superseded and this one adopted instead)
++            forwardModeToHost(requested, requestedRefresh);
++        }
++    } else if (props->currentMode && m_nativeSize.isValid() && !m_nativeSize.isEmpty()) {
+         const QSize requested = props->currentMode->size();
++        if (userPick) {
++            // A letterbox pick supersedes a forwarded one still in flight.
++            m_hostPick.reset();
++            m_hostPickTimer.stop();
++            m_lateHostPick.reset();
++        }
+         if (requested.isValid() && !requested.isEmpty()
+             && requested.width() <= m_nativeSize.width() && requested.height() <= m_nativeSize.height()) {
+             if (requested == m_nativeSize) {
+@@ -687,6 +1024,15 @@ void WaylandOutput::handleConfigure(const QSize &size, XdgShellSurface::States s
+     if (!m_ready) {
+         m_ready = true;
+ 
++        applyConfigure(size, serial);
++    } else if (m_hostPick) {
++        // Quasar (0004): the configure that answers a forwarded pick is applied
++        // at once, not one refresh later. Until it is acked and committed, every
++        // frame still commits the root surface at the size the host has just
++        // left - which a host may read as the client asking for that size
++        // back. A pick's move is a single configure, so there is nothing to
++        // coalesce; a throttled configure still pending is superseded by it.
++        m_configureThrottleTimer.stop();
+         applyConfigure(size, serial);
+     } else {
+         // LogicalOutput resizing is a resource intensive task, so the configure events are throttled.
+@@ -713,8 +1059,18 @@ void WaylandOutput::applyConfigure(const QSize &size, quint32 serial)
+         // It also survives a same-size configure, which is what the host sends
+         // right after a mode change (the toplevel deliberately keeps filling the
+         // host's area, so from the host's side nothing changed).
++        const QSize previousNative = m_nativeSize;
+         m_parentLogicalSize = size;
+         m_nativeSize = size * m_pendingScale;
++        if (m_nativeSize != previousNative) {
++            m_lastHostChange.start();
++            qCInfo(KWIN_WAYLAND_BACKEND) << "host configured us at" << m_nativeSize << "(was" << previousNative << ")"
++                                         << (m_hostPick ? "with a pick in flight" : "");
++        }
++        // Quasar (0004): a configure at a forwarded pick's size satisfies it;
++        // any other configure (the agent, a stream-resolution step) just
++        // becomes the new native mode below, exactly as before.
++        settleHostPick();
+ 
+         QSize current = m_userMode.value_or(m_nativeSize);
+         if (current.width() > m_nativeSize.width() || current.height() > m_nativeSize.height()) {
+diff --git a/src/backends/wayland/wayland_output.h b/src/backends/wayland/wayland_output.h
+index 81c243e..8b60aa9 100644
+--- a/src/backends/wayland/wayland_output.h
++++ b/src/backends/wayland/wayland_output.h
+@@ -9,8 +9,11 @@
+ #pragma once
+ 
+ #include "core/backendoutput.h"
++// Quasar: WaylandDisplay::HostModeRequestResult (host mode forwarding)
++#include "wayland_display.h"
+ 
+ #include <KWayland/Client/xdgshell.h>
++#include <QElapsedTimer>
+ #include <QObject>
+ #include <QPointF>
+ #include <QSize>
+@@ -18,6 +21,7 @@
+ #include <deque>
+ #include <map>
+ #include <optional>
++#include <tuple>
+ #include <utility>
+ 
+ namespace KWayland
+@@ -148,9 +152,18 @@ private:
+     void updateColor();
+     void inhibitShortcuts(bool inhibit);
+     // Quasar: mode-ladder helpers
+-    std::shared_ptr<OutputMode> modeFor(const QSize &size, bool preferred);
++    std::shared_ptr<OutputMode> modeFor(const QSize &size, uint32_t refresh, bool preferred);
+     void rebuildModes(State &next, const QSize &nativeSize, const QSize &currentSize);
+     void refreshModeLadder();
++    // Quasar: forwarding a picked HOST mode to the host (wlr-output-management)
++    uint32_t nativeRefreshRate(const QSize &nativeSize) const;
++    bool isHostMode(const QSize &size, uint32_t refresh) const;
++    bool isCurrentHostMode(const QSize &size, uint32_t refresh) const;
++    void forwardModeToHost(const QSize &size, uint32_t refresh);
++    void handleHostModeRequestFinished(WaylandDisplay::HostModeRequestResult result);
++    void handleHostModesChanged();
++    void settleHostPick();
++    void fallBackFromHostPick(const char *reason, bool late);
+     // Quasar: adopt the host's fractional-scale hint as the configured scale
+     void adoptHostScale();
+ 
+@@ -204,11 +217,34 @@ private:
+     /// Never affects the output mode - the buffer keeps the host-configured
+     /// pixel size, only the logical size (mode / scale) moves.
+     std::optional<qreal> m_userScale;
+-    /// stable OutputMode identities, so KScreen does not see the ladder churn
+-    std::map<std::pair<int, int>, std::shared_ptr<OutputMode>> m_modeCache;
++    /// stable OutputMode identities, so KScreen does not see the ladder churn;
++    /// keyed by (width, height, refresh mHz) since host modes carry their own rate
++    std::map<std::tuple<int, int, uint32_t>, std::shared_ptr<OutputMode>> m_modeCache;
+     /// a host wp_fractional_scale_v1 hint changed value and has not been adopted
+     /// into KWin's stored output configuration yet - see adoptHostScale()
+     bool m_hostScalePending = false;
++    // Quasar: a HOST mode the user picked and that was forwarded to the host.
++    // It is the current mode from the apply on, presented inside the area the
++    // host still configures us at, until the host's configure (and its
++    // wlr-output-management current mode) arrive at it - see settleHostPick().
++    struct HostPick
++    {
++        QSize size;
++        uint32_t refresh = 0;
++        bool retried = false;
++    };
++    std::optional<HostPick> m_hostPick;
++    /// how long the host gets to move before the pick is letterboxed instead
++    QTimer m_hostPickTimer;
++    /// a forwarded pick that timed out and was letterboxed; if the host does
++    /// move there after all, the letterbox is dropped (see settleHostPick())
++    std::optional<QSize> m_lateHostPick;
++    /// when the host last MOVED us (a configure at a new size, or a new current
++    /// mode on its head); logged with every apply of a host mode
++    QElapsedTimer m_lastHostChange;
++    /// the host head's current mode as last seen, to tell a real move from a
++    /// head event that changed nothing about it
++    std::optional<std::pair<QSize, uint32_t>> m_lastHostCurrent;
+ };
+ 
+ } // namespace Wayland

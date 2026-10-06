@@ -1,0 +1,66 @@
+gamescope: let any ConVar be set from a gamescope_<name> environment variable
+
+Backport of upstream commit 0799dcfb20f39a5629b8c34a263d6f0f15b33f65
+("main: allow overriding the value of any ConVar with a suitably named
+environment variable", Olivier Tilloy, first released in gamescope 3.16.24),
+unchanged, onto 3.16.23.
+
+Why it is carried: gamescope-gbm-scanout.patch is switched on by its ConVar,
+and the launcher sets ConVars the way upstream does from 3.16.24 on, through
+the environment (gamescope_drm_gbm_scanout=1). On 3.16.23 without this patch
+that variable is silently ignored. Drop this patch when the gamescope pin moves
+to 3.16.24 or later.
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 1397028e7..441879410 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -3,6 +3,7 @@
+ #include <X11/Xlib.h>
+ 
+ #include <cstdio>
++#include <format>
+ #include <thread>
+ #include <mutex>
+ #include <vector>
+@@ -700,6 +701,8 @@ bool g_bRt = false;
+ int g_argc;
+ char **g_argv;
+ 
++extern char **environ;
++
+ int main(int argc, char **argv)
+ {
+ 	g_argc = argc;
+@@ -872,6 +875,31 @@ int main(int argc, char **argv)
+ 	{
+ 		gamescope::CScriptScopedLock script;
+ 		script.Manager().RunDefaultScripts();
++
++		// Allow overriding the value of any ConVar with a suitably named environment variable
++		// (gamescope_ConVar_name=override_value). This takes precedence over the ConVar's
++		// default value and over values assigned by default scripts.
++		char **s = environ;
++		const char *prefix = "gamescope_";
++		size_t prefix_len = strlen( prefix );
++		for ( ; *s; s++ )
++		{
++			char *envvar = strdup( *s );
++			if ( strncmp( envvar, prefix, prefix_len ) == 0 ) {
++				std::string_view name( strtok( envvar, "=" ) + prefix_len );
++				if ( ! name.empty() )
++				{
++					std::string_view value( strtok( nullptr, "=" ) );
++					if ( script.Manager().Gamescope().Convars.Base[name].valid() )
++					{
++						auto override_script = std::format( "gamescope.convars.{}.value = {}", name, value );
++						console_log.infof( "Overriding from environment variable: %s", override_script.c_str() );
++						script->script( override_script );
++					}
++				}
++			}
++			free( envvar );
++		}
+ 	}
+ 
+ 	XInitThreads();

@@ -7,8 +7,8 @@
       "display_name": "Steam",
       "description": "Steam in a game-console experience through nested Gamescope (legacy Big Picture, the games-on-whales-validated game-foreground path). Needs a host --shm-size bump, 32-bit graphics libraries, and PUID/PGID matching the managed home.",
       "kind": "prebuilt",
-      "version": "2026.09.30",
-      "registry_ref": "ghcr.io/accreleus/quasar-steam@sha256:fed599cc1c20dc2d0721d88a815f720c888bdeab1e074ca807879939ef0f3c5d",
+      "version": "2026.10.06",
+      "registry_ref": "ghcr.io/accreleus/quasar-steam@sha256:f96a9e6493ff074d2472a76c3d08f8baf5b34a630a81786076bcb06966656cbe",
       "library_provider": "steam",
       "artwork": {
         "tile": "images/quasar-steam/artwork/tile.png"
@@ -17,6 +17,7 @@
         "preset_name": "Steam",
         "gpu": true,
         "no_new_privileges": false,
+        "direct_display": true,
         "managed_home": true,
         "home_container_path": "/home/quasar",
         "network": "bridge",
@@ -24,20 +25,21 @@
         "env": {},
         "mounts": []
       },
-      "notes": "no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'. network MUST be \"bridge\": Steam's first boot downloads steamui.so and clean-exits fatal under the hardened --network none default (first-run-experience spec §S2, #463) — this maps onto the runtime_presets.network column, hardened default stays \"none\" for every other image."
+      "notes": "direct_display: the image can run as a console session, gamescope on its own DRM backend, when the agent sets QUASAR_DIRECT_DISPLAY=1 (quasar#453); no_new_privileges MUST be false: Steam's startup re-escalates via sudo inside the container, which the default --security-opt no-new-privileges blocks (black bare compositor otherwise). This knob rides apps.runtime_spec, not the runtime_presets columns — see MANIFEST.md 'runtime mapping'. network MUST be \"bridge\": Steam's first boot downloads steamui.so and clean-exits fatal under the hardened --network none default (first-run-experience spec §S2, #463) — this maps onto the runtime_presets.network column, hardened default stays \"none\" for every other image."
     },
     {
       "id": "kde-desktop",
       "display_name": "KDE Desktop",
       "description": "KDE Plasma 6 Wayland desktop session with the Steam desktop client, user-level Flatpak (Discover), and Quasar branding. Runs nested under the Quasar compositor; the whole mutable state lives in the /home/quasar volume (org.quasar.image.persist). Needs a host --shm-size bump and PUID/PGID matching the managed home, like Steam.",
       "kind": "prebuilt",
-      "version": "2026.09.30",
-      "registry_ref": "ghcr.io/accreleus/quasar-kde@sha256:3796642e93f8dacf08063feec0ffaa38dae8743caa15da64cd51d0c24550e4c5",
+      "version": "2026.10.06",
+      "registry_ref": "ghcr.io/accreleus/quasar-kde@sha256:2903bd701806d91a036d29e59f5acb974bda7df6e57b230bb55fe6750fc6d4be",
       "runtime": {
         "preset_name": "KDE Desktop",
         "gpu": true,
         "no_new_privileges": false,
         "systempaths_unconfined": true,
+        "direct_display": true,
         "managed_home": true,
         "home_container_path": "/home/quasar",
         "network": "bridge",
@@ -45,7 +47,7 @@
         "env": {},
         "mounts": []
       },
-      "notes": "no_new_privileges MUST be false: the bundled Steam desktop client's startup re-escalates via sudo, same as the steam image. network MUST be \"bridge\" (Steam sign-in/downloads). systempaths_unconfined MUST be true: user Flatpak's bwrap mounts a fresh /proc inside its own mount namespace, and Docker's masked paths block that mount even with seccomp=unconfined already in place — flatpak install works but flatpak run fails mounting /proc without it (live-verified 2026-08-13). Desktop-session host requirements beyond the preset (agent-side, not yet preset-mappable): unprivileged user namespaces (seccomp permitting CLONE_NEWUSER — the agent's seccomp=unconfined covers it). One running session per home volume (org.quasar.image.session=desktop)."
+      "notes": "direct_display: the image can run as a console session, on KWin's DRM backend, when the agent sets QUASAR_DIRECT_DISPLAY=1 (quasar#453); no_new_privileges MUST be false: the bundled Steam desktop client's startup re-escalates via sudo, same as the steam image. network MUST be \"bridge\" (Steam sign-in/downloads). systempaths_unconfined MUST be true: user Flatpak's bwrap mounts a fresh /proc inside its own mount namespace, and Docker's masked paths block that mount even with seccomp=unconfined already in place — flatpak install works but flatpak run fails mounting /proc without it (live-verified 2026-08-13). Desktop-session host requirements beyond the preset (agent-side, not yet preset-mappable): unprivileged user namespaces (seccomp permitting CLONE_NEWUSER — the agent's seccomp=unconfined covers it). One running session per home volume (org.quasar.image.session=desktop)."
     },
     {
       "id": "xfce-desktop",

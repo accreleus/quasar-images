@@ -74,7 +74,7 @@
       "needs": ["quasar-base"],
       "tier": "spine",
       "args": { "BASE_IMAGE": "@tag:quasar-base", "VERSION": "@version" },
-      "verify": [],
+      "verify": ["scripts/verify-app.sh"],
       "ci": true,
       "publish": true
     },
@@ -109,7 +109,7 @@
         "STEAM_RUNTIME_IMAGE": "@tag:quasar-steam-runtime",
         "VERSION": "@version"
       },
-      "verify": ["scripts/verify-steam.sh"],
+      "verify": ["scripts/verify-steam.sh", "scripts/verify-steam-launcher.sh"],
       "ci": true,
       "publish": true
     },
@@ -123,7 +123,7 @@
         "VERSION": "@version",
         "KWIN_RPMS_IMAGE": "@env:KWIN_RPMS_IMAGE=kwin-rpms"
       },
-      "verify": ["scripts/verify-kde.sh"],
+      "verify": ["scripts/verify-kde.sh", "scripts/verify-kde-launcher.sh"],
       "ci": true,
       "publish": true,
       "notes": "KWIN_RPMS_IMAGE=kwin-rpms names the LOCAL stage in the same Dockerfile, i.e. build the RPMs here (~27 min). CI points it at the published quasar-kwin-rpms artefact instead."

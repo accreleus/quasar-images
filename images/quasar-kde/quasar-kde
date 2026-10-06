@@ -18,6 +18,18 @@ mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
 
 log() { printf '%s quasar-kde: %s\n' "$(date -Iseconds)" "$*" >&2; }
 
+# --- Which entry: nested (streamed) or direct (console), quasar#453 -----------
+# The node agent sets QUASAR_DIRECT_DISPLAY=1 on a console session's container:
+# Plasma then drives the monitor itself, on KWin's DRM backend, with no parent
+# compositor. Exactly "1" selects it; unset or ANY other value is the nested
+# entry, today's streamed session, unchanged. Everything below marked "nested
+# only" is skipped in direct mode; the direct-only setup lives in
+# /usr/local/libexec/quasar-kde/direct-session.
+direct_display=0
+if [[ "${QUASAR_DIRECT_DISPLAY:-}" == "1" ]]; then
+  direct_display=1
+fi
+
 # --- Graceful shutdown: launcher-owned sequenced relay (quasar-images#1) -----
 # images/quasar-base/Dockerfile's tini does not run with -g, so `docker stop`
 # SIGTERMs only this launcher (tini's direct child) -- this script owns relaying
@@ -94,35 +106,41 @@ wait_for_exit() {
   return "$rc"
 }
 
-# --- Parent compositor readiness --------------------------------------------
+# --- Parent compositor readiness (nested only) -------------------------------
 # Same philosophy as the Steam launcher's gamescope-ready handshake: bounded,
 # never infinite, and generous enough that a healthy-but-slow parent cannot lose
 # the race. kwin_wayland nested has no ready socket to read, so the observable
 # precondition is the parent compositor's socket file existing.
-compositor_timeout="${QUASAR_KDE_COMPOSITOR_TIMEOUT:-30}"
-[[ "$compositor_timeout" =~ ^[0-9]+$ ]] || compositor_timeout=30
+#
+# Direct mode has no parent: KWin opens the GPU's card node itself.
+if [[ "$direct_display" == "1" ]]; then
+  log "direct display: no parent compositor; KWin will drive the monitor on its DRM backend"
+else
+  compositor_timeout="${QUASAR_KDE_COMPOSITOR_TIMEOUT:-30}"
+  [[ "$compositor_timeout" =~ ^[0-9]+$ ]] || compositor_timeout=30
 
-if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
-  log "FATAL: WAYLAND_DISPLAY is not set; quasar-kde runs kwin_wayland NESTED and"
-  log "       requires the node-agent's parent compositor socket (XDG_RUNTIME_DIR + WAYLAND_DISPLAY)."
-  exit 1
-fi
-
-compositor_waited=0
-compositor_max=$(( compositor_timeout * 4 ))  # 0.25s poll ticks
-while [[ ! -e "$WAYLAND_DISPLAY" ]]; do
-  if [[ "$shutting_down" == "1" ]]; then
-    log "shutdown requested during startup; exiting without launching Plasma"
-    exit 143
-  fi
-  if (( compositor_waited >= compositor_max )); then
-    log "FATAL: parent compositor socket '$WAYLAND_DISPLAY' did not appear within ${compositor_timeout}s"
+  if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+    log "FATAL: WAYLAND_DISPLAY is not set; quasar-kde runs kwin_wayland NESTED and"
+    log "       requires the node-agent's parent compositor socket (XDG_RUNTIME_DIR + WAYLAND_DISPLAY)."
     exit 1
   fi
-  sleep 0.25 || true
-  compositor_waited=$((compositor_waited + 1))
-done
-log "parent compositor socket ready: $WAYLAND_DISPLAY"
+
+  compositor_waited=0
+  compositor_max=$(( compositor_timeout * 4 ))  # 0.25s poll ticks
+  while [[ ! -e "$WAYLAND_DISPLAY" ]]; do
+    if [[ "$shutting_down" == "1" ]]; then
+      log "shutdown requested during startup; exiting without launching Plasma"
+      exit 143
+    fi
+    if (( compositor_waited >= compositor_max )); then
+      log "FATAL: parent compositor socket '$WAYLAND_DISPLAY' did not appear within ${compositor_timeout}s"
+      exit 1
+    fi
+    sleep 0.25 || true
+    compositor_waited=$((compositor_waited + 1))
+  done
+  log "parent compositor socket ready: $WAYLAND_DISPLAY"
+fi
 
 # --- First-run $HOME init (idempotent) --------------------------------------
 # Both steps are safe to repeat on every boot, so no marker file is needed (a
@@ -147,6 +165,7 @@ fi
 # ENV in the Dockerfile (a baked 1920x1080 would silently downscale every
 # non-1080p session, which is the exact quasar#384 defect). QUASAR_KDE_* wins as
 # an explicit per-app pin; the literals are the last resort for `docker run`.
+# Unused in direct mode, where KWin takes the monitor's own mode.
 kde_width="${QUASAR_KDE_WIDTH:-${QUASAR_STREAM_WIDTH:-1920}}"
 kde_height="${QUASAR_KDE_HEIGHT:-${QUASAR_STREAM_HEIGHT:-1080}}"
 # Recorded and logged for parity with the Steam launcher's mode contract, but
@@ -190,15 +209,42 @@ if [[ ! -d /tmp/.X11-unix ]]; then
 fi
 
 # --- Session environment -----------------------------------------------------
-# WAYLAND_DISPLAY is deliberately NOT unset: kwin_wayland connects to the parent
-# compositor through it as a nested client. (The Steam launcher unsets it after
-# gamescope is up because gamescope hands its clients a *new* socket; here kwin
-# is the client, and it needs the parent socket for the whole session lifetime.)
+# WAYLAND_DISPLAY is deliberately NOT unset here: nested kwin_wayland connects to
+# the parent compositor through it as a nested client. (The Steam launcher unsets
+# it after gamescope is up because gamescope hands its clients a *new* socket;
+# here kwin is the client, and it needs the parent socket for the whole session
+# lifetime.) The direct entry drops it in its own helper, below.
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=KDE
 export DESKTOP_SESSION=plasma
 
-# --- Overlay (subsurface) offloading OFF: the black-stream fix ---------------
+# --- Session logging into the container log ---------------------------------
+# Fedora's Qt is built with journald support and, when stderr is not a
+# terminal (it never is in a container), sends every qCWarning/qCInfo to the
+# journal -- which does not exist here. Without QT_FORCE_STDERR_LOGGING the
+# whole Plasma session (kwin included) therefore logged NOTHING to the
+# container log; found live on the console host, where not one line of kwin's
+# display-mode forwarding appeared. Forcing stderr makes the session's
+# warnings land in `docker logs` like every other Quasar image.
+#
+# The rules turn on exactly the display-mode story at a useful level: kwin's
+# nested backend (kwin/0004 forwarding decisions), and the two KScreen clients
+# that apply output configurations on their own -- the kscreen kded daemon
+# ("Change detected", "Applying known config", "Config applied") and the
+# Display Settings KCM (its apply and revert). Appended, so an operator's own
+# QT_LOGGING_RULES still applies.
+#
+# Direct mode logs a different story: KWin's DRM backend (which connector, which
+# mode, hotplug) and libinput (devices arriving and leaving), the two things a
+# console session that is dark or deaf is diagnosed from.
+export QT_FORCE_STDERR_LOGGING=1
+if [[ "$direct_display" == "1" ]]; then
+  export QT_LOGGING_RULES="${QT_LOGGING_RULES:+${QT_LOGGING_RULES};}kwin_wayland_drm.info=true;kwin_libinput.info=true"
+else
+  export QT_LOGGING_RULES="${QT_LOGGING_RULES:+${QT_LOGGING_RULES};}kwin_wayland_backend.info=true;kscreen.kded.debug=true;kscreen.kcm.debug=true"
+fi
+
+# --- Overlay (subsurface) offloading OFF: the black-stream fix (nested only) --
 # BLOCKING BUG, live-diagnosed on the dev box 2026-08-13 under the real Quasar
 # stack (RTX 5090): the session came up perfectly -- kwin 1920x1080, Xwayland,
 # ksmserver, plasmashell, GPU probe pass -- but the encoded stream was BLACK
@@ -231,9 +277,14 @@ export DESKTOP_SESSION=plasma
 # it has no overlay path to take. Do NOT remove this without re-running a live
 # luma check -- the failure is invisible to every in-container smoke test,
 # because in-container the session looks completely healthy.
-export KWIN_USE_OVERLAYS=0
+#
+# NOT in direct mode: on the DRM backend an overlay is a hardware plane, and
+# the spike on the console host (quasar#453) ran clean without this.
+if [[ "$direct_display" == "0" ]]; then
+  export KWIN_USE_OVERLAYS=0
+fi
 
-# --- Nested output sizing: HOW kwin gets its size ---------------------------
+# --- Nested output sizing: HOW kwin gets its size (nested only) -------------
 # Decision + evidence, settled empirically on the dev box against the actual
 # image (Plasma 6.7.4 / kwin-6.7.4-1.fc43 / plasma-workspace-6.7.4-1.fc43,
 # Fedora 43). READ THIS BEFORE CHANGING THE LAUNCH LINE BELOW.
@@ -282,11 +333,29 @@ export KWIN_USE_OVERLAYS=0
 # ever appends two flags and execs the real binary, and it exists solely because
 # upstream offers no other way to size a nested Plasma session. If a future
 # Plasma gains a supported size mechanism, delete the shim and the PATH prepend.
-export PATH="/usr/local/libexec/quasar-kde:$PATH"
-export QUASAR_KDE_OUTPUT_WIDTH="$kde_width"
-export QUASAR_KDE_OUTPUT_HEIGHT="$kde_height"
-if [[ ! -x /usr/local/libexec/quasar-kde/kwin_wayland ]]; then
-  log "WARNING: kwin sizing shim missing; the session will come up at kwin's 1024x768 default"
+#
+# NOT in direct mode. The shim's --width/--height are windowed-mode flags, and
+# its log rule follows the console mode forwarding of the patched nested backend
+# (quasar#447). On the DRM backend KWin owns the real display and takes the
+# monitor's own mode: nothing is forwarded and nothing is sized from here.
+if [[ "$direct_display" == "0" ]]; then
+  export PATH="/usr/local/libexec/quasar-kde:$PATH"
+  export QUASAR_KDE_OUTPUT_WIDTH="$kde_width"
+  export QUASAR_KDE_OUTPUT_HEIGHT="$kde_height"
+  if [[ ! -x /usr/local/libexec/quasar-kde/kwin_wayland ]]; then
+    log "WARNING: kwin sizing shim missing; the session will come up at kwin's 1024x768 default"
+  fi
+fi
+
+# --- Audio (direct only) ------------------------------------------------------
+# A streamed session plays into the node agent's PulseAudio sink: the agent
+# injects PULSE_SERVER/PULSE_SINK/PULSE_COOKIE and no audio daemon runs in this
+# container. A console session plays through the host's sound device instead,
+# from PipeWire started inside the session (direct-session), and the desktop's
+# own audio settings pick the output. Any agent Pulse variable is dropped so
+# nothing bypasses that choice.
+if [[ "$direct_display" == "1" ]]; then
+  unset PULSE_SERVER PULSE_SINK PULSE_SOURCE PULSE_COOKIE
 fi
 
 # --- Launch ------------------------------------------------------------------
@@ -294,7 +363,17 @@ fi
 # --user to provide one). It EXECS its program rather than forking it, so
 # session_pid below is startplasma-wayland itself and the shutdown relay TERMs
 # the session leader directly.
-session=(dbus-run-session -- startplasma-wayland)
+#
+# Direct mode runs the same `dbus-run-session -- startplasma-wayland` through
+# its helper, which drops the parent-display variables first and starts
+# PipeWire inside the session bus before exec'ing Plasma. The helper execs
+# dbus-run-session, so session_pid is the same process in both modes and the
+# shutdown relay behaves identically.
+if [[ "$direct_display" == "1" ]]; then
+  session=(/usr/local/libexec/quasar-kde/direct-session)
+else
+  session=(dbus-run-session -- startplasma-wayland)
+fi
 
 # Re-check right before backgrounding: a TERM/INT could have landed anywhere in
 # the first-run init / preflight above (on_term already ran -- shutting_down=1,
@@ -305,7 +384,11 @@ if [[ "$shutting_down" == "1" ]]; then
   exit 143
 fi
 
-log "starting Plasma session (${kde_width}x${kde_height}@${kde_refresh}, nested on $WAYLAND_DISPLAY)"
+if [[ "$direct_display" == "1" ]]; then
+  log "starting Plasma session (direct display: KWin picks the monitor's mode)"
+else
+  log "starting Plasma session (${kde_width}x${kde_height}@${kde_refresh}, nested on $WAYLAND_DISPLAY)"
+fi
 "${session[@]}" &
 session_pid=$!
 # A non-zero/signal exit here (e.g. 143) after an already-clean shutdown relay is

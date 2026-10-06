@@ -340,7 +340,8 @@ log "X display :0 ready (rootful Xwayland pid $xwayland_pid)"
 # A rootful Xwayland lists its own fixed 60 Hz RandR table and never tells the
 # parent compositor about a mode change, so on its own XFCE's display settings
 # can neither show the monitor's real modes nor change the monitor.
-# quasar-xfce-modes (images/quasar-xfce/mode-bridge/) is a client of BOTH
+# quasar-display-bridge (images/quasar-app/display-bridge/, moved out of this
+# image and into the shared spine by quasar-images#447) is a client of BOTH
 # servers: it mirrors the parent compositor's wlr-output-management modes into
 # RandR as user modes, and when the user applies one it asks the compositor for
 # it; the node agent then moves the monitor and the compositor to that mode and
@@ -350,12 +351,12 @@ log "X display :0 ready (rootful Xwayland pid $xwayland_pid)"
 # Optional and soft: a parent without the protocol makes it exit at once, and a
 # missing binary is logged, never fatal. QUASAR_XFCE_MODE_BRIDGE=0 keeps it off.
 if [[ "${QUASAR_XFCE_MODE_BRIDGE:-1}" != "0" ]]; then
-  if command -v quasar-xfce-modes >/dev/null 2>&1; then
-    QUASAR_PARENT_WAYLAND_DISPLAY="$parent_wayland_display" DISPLAY=:0 quasar-xfce-modes &
+  if command -v quasar-display-bridge >/dev/null 2>&1; then
+    QUASAR_PARENT_WAYLAND_DISPLAY="$parent_wayland_display" DISPLAY=:0 quasar-display-bridge &
     bridge_pid=$!
     log "display-mode bridge started (pid $bridge_pid)"
   else
-    log "quasar-xfce-modes is not in this image; display settings list Xwayland's own modes only"
+    log "quasar-display-bridge is not in this image; display settings list Xwayland's own modes only"
   fi
 fi
 

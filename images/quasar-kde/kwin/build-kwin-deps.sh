@@ -44,13 +44,37 @@ dnf --setopt=install_weak_deps=False -y install \
 mkdir -p "$topdir"
 
 log "downloading the pinned kwin source package: kwin-${nvr}"
+# Once Fedora ships a newer kwin, the pinned src.rpm drops out of the dnf repos
+# (Fedora keeps only the latest update), and a COLD build of this stage can no
+# longer fetch it -- while the patches are still written against it. Koji keeps
+# every build, so the pinned NVR is fetched from there instead, but ONLY when its
+# sha256 is recorded below: Koji's copy is unsigned, so the hash is the integrity
+# check. A pin bump that is still in the repos needs no entry here.
+koji_srpm_sha256() {
+  case "$1" in
+    6.7.4-1.fc43) echo 124390c204954f97c61d617d27cfd416f6cb7a8532c3b2ca7bd91abf30513773 ;;
+    *) return 1 ;;
+  esac
+}
+
 if ! dnf download --source "kwin-${nvr}" --destdir="$topdir" >/dev/null 2>&1; then
-  log "FATAL: kwin-${nvr}.src.rpm is not available in the configured repositories."
-  log "       Fedora has almost certainly moved kwin on. The patch is version-specific:"
-  log "       re-diff it against the new source, then bump ARG KWIN_NVR in"
-  log "       images/quasar-kde/Dockerfile. See the README, 'Patched KWin (nested mode ladder)'."
-  log "       available: $(dnf list --showduplicates kwin 2>/dev/null | awk '/^kwin\./ {print $2}' | tr '\n' ' ')"
-  exit 1
+  if sha="$(koji_srpm_sha256 "$nvr")"; then
+    version="${nvr%-*}"; release="${nvr##*-}"
+    url="https://kojipkgs.fedoraproject.org/packages/kwin/${version}/${release}/src/kwin-${nvr}.src.rpm"
+    log "kwin-${nvr} is no longer in the dnf repos; fetching the pinned build from Koji"
+    curl -fsSL --retry 3 -o "$topdir/kwin-${nvr}.src.rpm" "$url"
+    if ! echo "${sha}  $topdir/kwin-${nvr}.src.rpm" | sha256sum -c --quiet -; then
+      log "FATAL: the Koji copy of kwin-${nvr}.src.rpm does not match its recorded sha256"
+      exit 1
+    fi
+  else
+    log "FATAL: kwin-${nvr}.src.rpm is not available in the configured repositories."
+    log "       Fedora has almost certainly moved kwin on. The patch is version-specific:"
+    log "       re-diff it against the new source, then bump ARG KWIN_NVR in"
+    log "       images/quasar-kde/Dockerfile. See the README, 'Patched KWin (nested mode ladder)'."
+    log "       available: $(dnf list --showduplicates kwin 2>/dev/null | awk '/^kwin\./ {print $2}' | tr '\n' ' ')"
+    exit 1
+  fi
 fi
 srpm="$(find "$topdir" -maxdepth 1 -name 'kwin-*.src.rpm' | head -1)"
 test -n "$srpm" || { log "FATAL: no kwin src.rpm downloaded"; exit 1; }

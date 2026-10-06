@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# The direct-display Steam session (quasar#457), installed at
+# /usr/local/libexec/quasar-steam/direct-session and run ONLY by
+# /usr/local/bin/quasar-steam when QUASAR_DIRECT_DISPLAY=1, as
+#
+#     dbus-run-session -- direct-session [steam args]
+#
+# i.e. in exactly the place a nested session runs quasar-steam-client, so the
+# launcher's process tree and shutdown relay are the same in both modes.
+#
+# A console session plays through the host's own sound card and nobody serves
+# Pulse for it: the agent injects no PULSE_SERVER (the launcher drops any that
+# arrive), and /etc/asound.conf routes ALSA to Pulse. So this starts PipeWire,
+# WirePlumber and the PulseAudio shim, as the app user with the launcher's
+# private XDG_RUNTIME_DIR, INSIDE the session bus Steam then runs in, and execs
+# Steam. There is no systemd user manager to start them. Audio is never fatal:
+# Steam without sound beats no Steam, and the log says why. Which sink is the
+# default is WirePlumber's choice; Steam's Settings > Audio lists the others.
+# Same sequence as images/quasar-kde/direct-session.
+set -euo pipefail
+
+log() { printf '%s quasar-steam: %s\n' "$(date -Iseconds)" "$*" >&2; }
+
+start_audio() {
+  local daemon
+  for daemon in pipewire wireplumber pipewire-pulse; do
+    if ! command -v "$daemon" >/dev/null 2>&1; then
+      log "WARNING: $daemon is not installed; Steam will have no sound"
+      return 0
+    fi
+  done
+
+  pipewire &
+  # WirePlumber and the Pulse shim connect to PipeWire's socket and give up if it
+  # is not there yet. Bounded wait; on a timeout they are started anyway and say
+  # for themselves what failed.
+  local waited=0
+  while [[ ! -e "$XDG_RUNTIME_DIR/pipewire-0" ]] && (( waited < 40 )); do
+    sleep 0.25
+    waited=$((waited + 1))
+  done
+  if [[ ! -e "$XDG_RUNTIME_DIR/pipewire-0" ]]; then
+    log "WARNING: PipeWire's socket did not appear within 10s; sound may not work"
+  fi
+  wireplumber &
+  pipewire-pulse &
+  log "audio: PipeWire, WirePlumber and the PulseAudio shim started on the host's sound device"
+}
+
+start_audio
+exec quasar-steam-client "$@"

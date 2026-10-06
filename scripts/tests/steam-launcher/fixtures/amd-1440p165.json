@@ -1,0 +1,120 @@
+{
+ "/dev/dri/card0": {
+  "driver": {
+   "name": "amdgpu",
+   "desc": "amdgpu",
+   "version": {
+    "major": 0,
+    "minor": 0,
+    "patch": 0,
+    "date": "0"
+   },
+   "kernel": {}
+  },
+  "device": {},
+  "fb_size": {
+   "min_width": 0,
+   "max_width": 16384,
+   "min_height": 0,
+   "max_height": 16384
+  },
+  "connectors": [
+   {
+    "id": 80,
+    "type": 10,
+    "status": 1,
+    "phy_width": 0,
+    "phy_height": 0,
+    "subpixel": 0,
+    "encoder_id": 0,
+    "encoders": [],
+    "modes": [
+     {
+      "clock": 0,
+      "hdisplay": 2560,
+      "hsync_start": 0,
+      "hsync_end": 0,
+      "htotal": 0,
+      "hskew": 0,
+      "vdisplay": 1440,
+      "vsync_start": 0,
+      "vsync_end": 0,
+      "vtotal": 0,
+      "vscan": 0,
+      "vrefresh": 60,
+      "flags": 5,
+      "type": 72,
+      "name": "2560x1440"
+     },
+     {
+      "clock": 0,
+      "hdisplay": 2560,
+      "hsync_start": 0,
+      "hsync_end": 0,
+      "htotal": 0,
+      "hskew": 0,
+      "vdisplay": 1440,
+      "vsync_start": 0,
+      "vsync_end": 0,
+      "vtotal": 0,
+      "vscan": 0,
+      "vrefresh": 165,
+      "flags": 5,
+      "type": 64,
+      "name": "2560x1440"
+     },
+     {
+      "clock": 0,
+      "hdisplay": 2560,
+      "hsync_start": 0,
+      "hsync_end": 0,
+      "htotal": 0,
+      "hskew": 0,
+      "vdisplay": 1440,
+      "vsync_start": 0,
+      "vsync_end": 0,
+      "vtotal": 0,
+      "vscan": 0,
+      "vrefresh": 144,
+      "flags": 5,
+      "type": 64,
+      "name": "2560x1440"
+     },
+     {
+      "clock": 0,
+      "hdisplay": 1920,
+      "hsync_start": 0,
+      "hsync_end": 0,
+      "htotal": 0,
+      "hskew": 0,
+      "vdisplay": 1080,
+      "vsync_start": 0,
+      "vsync_end": 0,
+      "vtotal": 0,
+      "vscan": 0,
+      "vrefresh": 60,
+      "flags": 5,
+      "type": 64,
+      "name": "1920x1080"
+     }
+    ],
+    "properties": {}
+   },
+   {
+    "id": 81,
+    "type": 11,
+    "status": 2,
+    "phy_width": 0,
+    "phy_height": 0,
+    "subpixel": 0,
+    "encoder_id": 0,
+    "encoders": [],
+    "modes": [],
+    "properties": {}
+   }
+  ],
+  "encoders": [],
+  "crtcs": [],
+  "planes": []
+ }
+}

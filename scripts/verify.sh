@@ -97,6 +97,37 @@ docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   rm -rf /dev/dri                               # no /dev/dri at all -> no-op
   /etc/quasar/init.d/10-dri-device-groups.sh
 '
+# Direct display (quasar#453): /dev/input is the HOST's directory, bind-mounted,
+# so no base hook may change a node's permissions there. Group membership, if an
+# image needs it, is that image's own direct-mode hook.
+docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
+  set -euo pipefail
+  mkdir -p /dev/input /run/udev/data
+  mknod -m 0660 /dev/input/event21 c 13 85 && chgrp 4242 /dev/input/event21
+  printf "E:ID_INPUT=1\nE:ID_INPUT_JOYSTICK=1\n" > /run/udev/data/c13:85
+  QUASAR_DIRECT_DISPLAY=1 /etc/quasar/init.d/15-input-device-perms.sh
+  [[ "$(stat -c %a /dev/input/event21)" == 660 ]] # host joystick node: untouched
+  QUASAR_DIRECT_DISPLAY=true /etc/quasar/init.d/15-input-device-perms.sh
+  [[ "$(stat -c %a /dev/input/event21)" == 666 ]] # not exactly 1: the gamepad rule as before
+'
+
+# Direct display (quasar#453): the node agent does not hand in the host's udev
+# control socket (container root could steer the host's udevd through it), so the
+# base makes an empty placeholder: libudev only checks that the path exists before
+# it listens for hotplug. Never in a nested session, never over an existing path.
+docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
+  set -euo pipefail
+  rm -f /run/udev/control
+  /etc/quasar/init.d/14-direct-udev-control.sh
+  [[ ! -e /run/udev/control ]]                  # nested: nothing made
+  QUASAR_DIRECT_DISPLAY=1 /etc/quasar/init.d/14-direct-udev-control.sh
+  [[ -f /run/udev/control && ! -s /run/udev/control ]]
+  [[ "$(stat -c %u%a /run/udev/control)" == 0444 ]]
+  echo keep > /run/udev/control
+  QUASAR_DIRECT_DISPLAY=1 /etc/quasar/init.d/14-direct-udev-control.sh
+  [[ "$(cat /run/udev/control)" == keep ]]       # an existing path is left alone
+'
+
 # Engine groups (quasar #428): the node-agent names in QUASAR_APP_ENGINE_GROUPS
 # the gids the app user must hold that no --group-add can deliver past the
 # --init-groups drop (gid 0 on rootless Docker). Checked through the real

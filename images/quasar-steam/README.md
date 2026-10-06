@@ -31,13 +31,98 @@ The launcher (`quasar-steam`) selects one of two **validated** configurations vi
 `QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0`/`1`) overrides the per-mode default.
 Set `QUASAR_STEAM_GAMESCOPE=0` to run Steam without nested Gamescope.
 
-Display mode: gamescope's nested output is sized from `QUASAR_STREAM_WIDTH` /
+## Display mode
+
+**Starting mode.** Gamescope's nested output starts at `QUASAR_STREAM_WIDTH` /
 `QUASAR_STREAM_HEIGHT` / `QUASAR_STREAM_FPS`, which Quasar injects per session
 from the launched stream profile (quasar#384). An explicit `GAMESCOPE_WIDTH` /
-`GAMESCOPE_HEIGHT` / `GAMESCOPE_REFRESH` overrides it (per-app pin); with
-neither set the image falls back to 1920x1080x60. This is what Steam and every
-game it launches see -- it is not derived from the host compositor's output,
-which nested gamescope does not read.
+`GAMESCOPE_HEIGHT` / `GAMESCOPE_REFRESH` overrides it (per-app pin). With
+neither set, the image falls back to 1920x1080x60.
+
+**A game's resolution pick moves the monitor (quasar#447).** This needs a
+Quasar compositor that speaks `wlr-output-management`. The patched gamescope
+(`gamescope-quasar-mode-forward.patch`) then does three things:
+
+- It lists the monitor's modes in a game's display settings, each with its own
+  refresh rate. Modes larger than the session's starting size are not listed.
+- When a game applies one, gamescope asks the host for that mode. When the game
+  exits or loses focus, it asks for the session's mode again.
+- When the host moves, gamescope follows it: its output takes the new size and
+  refresh, so the game runs 1:1 instead of being scaled.
+
+Gamescope's own Xwayland is a patched build at
+`/usr/local/libexec/quasar-steam/Xwayland` (`xwayland-quasar-emu-mode.patch`).
+Without it, a game's pick reaches gamescope as a size only, so the refresh it
+chose would be lost. The system Xwayland is unchanged.
+
+The signal is a RandR or VidMode mode change, which native games (SDL) and Wine
+games that switch modes make. Steam's per-game resolution setting
+(`GAMESCOPE_XWAYLAND_MODE_CONTROL`) is forwarded as a size too. A Proton game
+that scales internally and never switches modes is still scaled by gamescope.
+
+Turn it off with `GAMESCOPE_QUASAR_MODE_FORWARD=0`: gamescope then scales a
+game's resolution inside its own output, as upstream does, and the launcher uses
+the system Xwayland. The same happens automatically when the host has no
+`wlr-output-management`.
+
+How to check it worked:
+
+- The gamescope log has `parent speaks zwlr_output_manager_v1` at startup.
+- Applying a mode in a game logs `asking the parent for WxH @ R Hz`, then
+  `parent is at WxH @ R Hz`.
+
+## Direct display (console sessions, quasar#453)
+
+With `QUASAR_DIRECT_DISPLAY=1` gamescope drives the monitor itself on its DRM
+backend instead of nesting in the agent's compositor. Steam Big Picture runs on
+top exactly as in a nested session. Any other value, or none, is the nested
+behaviour above, unchanged.
+
+What you need (the agent's run shape): `--network host` (udev hotplug),
+`--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all`, `--device /dev/dri`,
+`--device /dev/snd`, `-v /dev/input:/dev/input` with
+`--device-cgroup-rule 'c 13:* rwm'` (replugged devices),
+`-v /run/udev/data:/run/udev/data:ro -v /run/udev/control:/run/udev/control:ro`,
+`--cap-add SYS_NICE`, `--shm-size 1g`, `--security-opt seccomp=unconfined`, the
+container's root as the entrypoint user (PUID/PGID as usual). No parent Wayland
+socket and no `PULSE_SERVER`.
+
+What the image does:
+
+- `25-steam-direct-seatd.sh` starts `seatd` as the container's root, not
+  VT-bound, with `/run/seatd.sock` owned by the app user and group. gamescope
+  reaches it through libseat (`LIBSEAT_BACKEND=seatd`); seatd opens the card and
+  input nodes for it.
+- `24-steam-direct-device-groups.sh` makes the app user a member of the groups
+  owning `/dev/input/event*`, `/dev/hidraw*` and `/dev/snd/*`: Steam Input reads
+  physical controllers itself, and sound plays on the console's card (gamescope's
+  own devices still come through seatd). Never gid 0 or 65534. It never changes a
+  node: `/dev/input` is the host's directory, and quasar-base's
+  `15-input-device-perms.sh` does nothing in this mode either.
+- The launcher starts `gamescope --backend drm -e` at the panel's native size and
+  highest refresh: the preferred mode's size, and the highest refresh the kernel
+  lists at that size (read with `drm_info -j`). It names a mode only when exactly
+  one connector is connected; otherwise gamescope picks its preferred mode.
+  `QUASAR_STEAM_DIRECT_ARGS` (e.g. `-W 2560 -H 1440 -r 165`) replaces the
+  detected mode.
+- On `nvidia-drm` it adds `--force-composition` and `gamescope_drm_gbm_scanout=1`:
+  GBM-allocated scanout buffers (`gamescope-gbm-scanout.patch`), the fix for a
+  corrupt band at the bottom of every 4K mode on the NVIDIA driver (upstream
+  [gamescope#2309](https://github.com/ValveSoftware/gamescope/issues/2309)).
+  `QUASAR_STEAM_GBM_SCANOUT=1|0` forces it on or off.
+- Sound: the launcher drops any `PULSE_*` it was given and runs Steam as
+  `dbus-run-session -- /usr/local/libexec/quasar-steam/direct-session`, which
+  starts PipeWire, WirePlumber and `pipewire-pulse` in that session bus (with the
+  private `XDG_RUNTIME_DIR`) and then execs Steam. WirePlumber picks the default
+  output; Steam's Settings > Audio lists the others. A nested session starts none
+  of this and keeps the agent's `PULSE_SERVER`.
+- The nested-only pieces (`QUASAR_STREAM_*`, `GAMESCOPE_WIDTH/HEIGHT/REFRESH`, the
+  mode-forwarding Xwayland) are not used.
+
+How to know it worked: the log has `seatd ready: /run/seatd.sock`,
+`audio: PipeWire, WirePlumber and the PulseAudio shim started`, then
+`starting Gamescope on the display (direct; ... 3840x2160@240 ... gbm_scanout=1 ...)`,
+and gamescope's own `Overriding from environment variable: gamescope.convars.drm_gbm_scanout.value = 1`.
 
 ## Host / launch requirements
 
@@ -111,5 +196,10 @@ changes that, an in-container NM is the only lever available to us.
 
 ```sh
 ./scripts/build.sh quasar-steam
-./scripts/verify-steam.sh
+./scripts/build.sh verify quasar-steam   # verify-steam.sh + verify-steam-launcher.sh
 ```
+
+`verify-steam-launcher.sh` runs the launcher and the direct-display hooks inside
+the image with stub `gamescope`/`dbus-run-session`/`drm_info` (cases and
+`drm_info` fixtures in `scripts/tests/steam-launcher/`), so the nested command line
+and the direct one are both pinned without a GPU.

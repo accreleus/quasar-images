@@ -1,0 +1,51 @@
+{
+ "/dev/dri/card1": {
+  "driver": {
+   "name": "nvidia-drm",
+   "desc": "nvidia-drm",
+   "version": {
+    "major": 0,
+    "minor": 0,
+    "patch": 0,
+    "date": "0"
+   },
+   "kernel": {}
+  },
+  "device": {},
+  "fb_size": {
+   "min_width": 0,
+   "max_width": 16384,
+   "min_height": 0,
+   "max_height": 16384
+  },
+  "connectors": [
+   {
+    "id": 101,
+    "type": 10,
+    "status": 2,
+    "phy_width": 0,
+    "phy_height": 0,
+    "subpixel": 0,
+    "encoder_id": 0,
+    "encoders": [],
+    "modes": [],
+    "properties": {}
+   },
+   {
+    "id": 102,
+    "type": 10,
+    "status": 2,
+    "phy_width": 0,
+    "phy_height": 0,
+    "subpixel": 0,
+    "encoder_id": 0,
+    "encoders": [],
+    "modes": [],
+    "properties": {}
+   }
+  ],
+  "encoders": [],
+  "crtcs": [],
+  "planes": []
+ }
+}
