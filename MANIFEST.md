@@ -38,7 +38,7 @@ different places:
   CLOSED set (`none` | `bridge` | `host`; absent = inherit the host default) — Quasar rejects the
   install on any other value, because the string ends up as `docker run --network <value>` on a
   host (first-run-experience spec §S2, quasar#463).
-- `no_new_privileges` and `systempaths_unconfined` (and other future security knobs) ride the
+- `no_new_privileges`, `systempaths_unconfined` and `direct_display` (and other future knobs) ride the
   app's **`runtime_spec`** JSONB blob, NOT the preset columns. Quasar resolves the split when it
   installs an image; the manifest states the whole intended runtime and lets Quasar place each
   field correctly.
@@ -57,12 +57,13 @@ masked paths (the `systempaths=masked` default) block that mount even with `secc
 already in place — so `flatpak install` works but `flatpak run` fails without it
 (live-verified 2026-08-13). Set it `true` only on images that actually need it.
 
-`direct_display` (bool, default `false` when absent; additive, quasar#453) says the image can
-run as a **console session**: started with `QUASAR_DIRECT_DISPLAY=1`, its desktop drives the
-host's monitor itself instead of running nested in Quasar's compositor. It rides `runtime_spec`
-too. Quasar offers only these images as a host's console default app and refuses a direct
-launch of any other. Set it only alongside a `registry_ref` whose build has the direct entry;
-older Quasar releases ignore the key. Today: `kde-desktop`.
+`direct_display` (bool, default `false` when absent; additive, quasar#453) is a
+`runtime_spec` knob like the two above. `true` states that the image can run a
+**direct-display console session**: given `QUASAR_DIRECT_DISPLAY=1` and the
+direct run shape, it drives the monitor itself instead of nesting in the
+agent's compositor. It describes a capability of the image; it does not make
+every session direct, and an agent that does not know the key ignores it. Today
+only `steam` sets it (see `images/quasar-steam/README.md`, "Direct display").
 
 ## Pinning discipline
 

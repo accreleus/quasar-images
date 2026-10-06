@@ -248,13 +248,17 @@ COPY images/quasar-kde/kwin_wayland /usr/local/libexec/quasar-kde/kwin_wayland
 # The direct-display entry's session helper (quasar#453): run by quasar-kde
 # only when QUASAR_DIRECT_DISPLAY=1. Same directory as the shim, never on PATH.
 COPY images/quasar-kde/direct-session /usr/local/libexec/quasar-kde/direct-session
+# ...and its init hook: in direct mode only, the app user joins the groups that
+# own the host's input and sound nodes (KWin and PipeWire open them itself).
+COPY images/quasar-kde/overlay/etc/quasar/init.d/16-kde-direct-device-groups.sh /etc/quasar/init.d/16-kde-direct-device-groups.sh
 
 RUN chmod 0644 /etc/xdg/kscreenlockerrc /etc/xdg/baloofilerc /etc/xdg/kwalletrc \
       /usr/share/icons/hicolor/scalable/apps/quasar.svg \
       /usr/share/icons/hicolor/256x256/apps/quasar.png \
       /usr/share/plasma/look-and-feel/org.fedoraproject.fedora.desktop/contents/plasmoidsetupscripts/org.kde.plasma.kickoff.js \
     && chmod 0755 /usr/local/bin/quasar-kde /usr/local/libexec/quasar-kde/kwin_wayland \
-      /usr/local/libexec/quasar-kde/direct-session
+      /usr/local/libexec/quasar-kde/direct-session \
+      /etc/quasar/init.d/16-kde-direct-device-groups.sh
 
 # Strip kwin's cap_sys_nice=ep FILE capability (same fix games-on-whales applies
 # to sway: `setcap -r /usr/sbin/sway` in their base-app image). Linux refuses

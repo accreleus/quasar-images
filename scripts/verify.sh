@@ -97,47 +97,18 @@ docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   rm -rf /dev/dri                               # no /dev/dri at all -> no-op
   /etc/quasar/init.d/10-dri-device-groups.sh
 '
-# Direct-display device groups (quasar#453): with QUASAR_DIRECT_DISPLAY=1 the
-# desktop opens the host's real input and sound nodes, so the app user must
-# join their owning groups. With any other value it must NOT: in a streamed
-# session the input nodes are the compositor's virtual keyboard and mouse, and
-# membership would let the app grab them. And in direct mode the input
-# directory is the host's own, so 15-input-device-perms.sh must not chmod it.
+# Direct display (quasar#453): /dev/input is the HOST's directory, bind-mounted,
+# so no base hook may change a node's permissions there. Group membership, if an
+# image needs it, is that image's own direct-mode hook.
 docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   set -euo pipefail
-  mkdir -p /dev/input /dev/snd /run/udev/data
-  mknod -m 0660 /dev/input/event20 c 13 84  && chgrp 4242  /dev/input/event20
-  mknod -m 0660 /dev/input/event21 c 13 85  && chgrp 4242  /dev/input/event21
+  mkdir -p /dev/input /run/udev/data
+  mknod -m 0660 /dev/input/event21 c 13 85 && chgrp 4242 /dev/input/event21
   printf "E:ID_INPUT=1\nE:ID_INPUT_JOYSTICK=1\n" > /run/udev/data/c13:85
-  mknod -m 0660 /dev/input/event22 c 13 86  && chgrp 65534 /dev/input/event22
-  mknod -m 0660 /dev/snd/controlC0 c 116 0  && chgrp 4343  /dev/snd/controlC0
-  mknod -m 0660 /dev/snd/seq       c 116 1
-  mknod -m 0666 /dev/snd/timer     c 116 33 && chgrp 4444  /dev/snd/timer
-  hook=/etc/quasar/init.d/16-direct-display-device-groups.sh
-  test -x "$hook"
-
-  for value in "" 0 true; do
-    QUASAR_DIRECT_DISPLAY="$value" "$hook"
-    if id -G quasar | tr " " "\n" | grep -qxE "4242|4343"; then
-      echo "FAIL: QUASAR_DIRECT_DISPLAY=\"$value\" granted input/sound groups" >&2; exit 1
-    fi
-  done
-
-  QUASAR_DIRECT_DISPLAY=1 "$hook"
-  held="$(id -G quasar | tr " " "\n")"
-  grep -qx 4242 <<<"$held"                     # input group -> granted
-  grep -qx 4343 <<<"$held"                     # sound group -> granted
-  if grep -qxE "0|65534" <<<"$held"; then      # root / unmapped -> never
-    echo "FAIL: the app user was granted gid 0 or the overflow gid: $held" >&2; exit 1
-  fi
-  if getent group 4444 >/dev/null; then        # world-rw -> nothing to grant
-    echo "FAIL: a group was created for a world-rw node" >&2; exit 1
-  fi
-
   QUASAR_DIRECT_DISPLAY=1 /etc/quasar/init.d/15-input-device-perms.sh
   [[ "$(stat -c %a /dev/input/event21)" == 660 ]] # host joystick node: untouched
-  /etc/quasar/init.d/15-input-device-perms.sh
-  [[ "$(stat -c %a /dev/input/event21)" == 666 ]] # streamed: the gamepad rule as before
+  QUASAR_DIRECT_DISPLAY=true /etc/quasar/init.d/15-input-device-perms.sh
+  [[ "$(stat -c %a /dev/input/event21)" == 666 ]] # not exactly 1: the gamepad rule as before
 '
 
 # Engine groups (quasar #428): the node-agent names in QUASAR_APP_ENGINE_GROUPS

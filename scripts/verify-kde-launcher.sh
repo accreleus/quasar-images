@@ -41,7 +41,7 @@ if [[ "${1:-}" == --source ]]; then
     -v "$root/images/quasar-kde/quasar-kde:/usr/local/bin/quasar-kde:ro"
     -v "$root/images/quasar-kde/direct-session:/usr/local/libexec/quasar-kde/direct-session:ro"
   )
-  for hook in overlay/etc/quasar/init.d/*.sh; do
+  for hook in overlay/etc/quasar/init.d/*.sh images/quasar-kde/overlay/etc/quasar/init.d/*.sh; do
     mounts+=(-v "$root/$hook:/etc/quasar/init.d/$(basename "$hook"):ro")
   done
   echo "testing $KDE_IMAGE with the launcher, helper and hooks from this tree"
@@ -230,5 +230,45 @@ for value in 0 true yes; do
   expect_absent "$o" startplasma-wayland.env "no session may start"
 done
 qv_pass "QUASAR_DIRECT_DISPLAY other than 1 (0, true, yes) takes the nested entry"
+
+# --- the direct-mode device-group hook, edge cases ---------------------------
+# The cases above prove the grant end to end; this pins the refusals: never gid
+# 0, never the unmapped (rootless) gid, no group for a world-rw node, nothing at
+# all unless the value is exactly 1. Node permissions are never changed.
+docker run --rm "${mounts[@]}" --entrypoint /bin/bash "$KDE_IMAGE" -c "$QV_GUARD"'
+  set -euo pipefail
+  mkdir -p /dev/input /dev/snd
+  mknod -m 0660 /dev/input/event20 c 13 84  && chgrp 4242  /dev/input/event20
+  mknod -m 0660 /dev/input/event22 c 13 86  && chgrp 65534 /dev/input/event22
+  mknod -m 0660 /dev/snd/controlC0 c 116 0  && chgrp 4343  /dev/snd/controlC0
+  mknod -m 0660 /dev/snd/seq       c 116 1
+  mknod -m 0666 /dev/snd/timer     c 116 33 && chgrp 4444  /dev/snd/timer
+  useradd -u 1000 -M quasar 2>/dev/null || true
+  hook=/etc/quasar/init.d/16-kde-direct-device-groups.sh
+  test -x "$hook"
+  modes_before="$(stat -c "%n %a %g" /dev/input/* /dev/snd/*)"
+
+  for value in "" 0 true yes; do
+    QUASAR_DIRECT_DISPLAY="$value" "$hook"
+    if id -G quasar | tr " " "\n" | grep -qxE "4242|4343"; then
+      echo "FAIL: QUASAR_DIRECT_DISPLAY=\"$value\" granted input/sound groups" >&2; exit 1
+    fi
+  done
+
+  QUASAR_DIRECT_DISPLAY=1 "$hook" 2>/dev/null
+  held="$(id -G quasar | tr " " "\n")"
+  grep -qx 4242 <<<"$held"
+  grep -qx 4343 <<<"$held"
+  if grep -qxE "0|65534" <<<"$held"; then
+    echo "FAIL: the app user was granted gid 0 or the overflow gid: $held" >&2; exit 1
+  fi
+  if getent group 4444 >/dev/null; then
+    echo "FAIL: a group was created for a world-rw node" >&2; exit 1
+  fi
+  if [[ "$(stat -c "%n %a %g" /dev/input/* /dev/snd/*)" != "$modes_before" ]]; then
+    echo "FAIL: the hook changed a node'"'"'s mode or group" >&2; exit 1
+  fi
+'
+qv_pass "direct-mode device-group hook: grants by membership only, never gid 0 / unmapped / world-rw"
 
 echo "quasar-kde launcher tests passed"

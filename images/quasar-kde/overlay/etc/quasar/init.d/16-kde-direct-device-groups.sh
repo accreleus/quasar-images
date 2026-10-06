@@ -19,6 +19,12 @@
 # exactly what 15-input-device-perms.sh is written to prevent. So this hook does
 # nothing unless the agent asked for direct display.
 #
+# KDE ONLY, not the shared base: KWin opens input itself through libinput, with
+# no seat daemon, so the app user must hold the input nodes. The Steam image does
+# the opposite on purpose (gamescope gets input through seatd, and Steam must not
+# be able to grab keyboards and mice), and grants only the sound group in its own
+# hook.
+#
 # The membership is by group, so it also covers a device plugged in after start
 # (the kernel gives it the same group). It cannot cover a group that no node
 # showed at start: a host with no keyboard plugged in when the session starts
@@ -36,7 +42,7 @@ set -euo pipefail
 
 [[ "${QUASAR_DIRECT_DISPLAY:-}" == "1" ]] || exit 0
 
-log() { printf '%s quasar-base: %s\n' "$(date -Iseconds)" "$*" >&2; }
+log() { printf '%s quasar-kde: %s\n' "$(date -Iseconds)" "$*" >&2; }
 
 : "${PUID:=1000}" "${PGID:=1000}"
 

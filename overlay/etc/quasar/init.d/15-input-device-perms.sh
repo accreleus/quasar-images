@@ -18,8 +18,8 @@
 # NOT in a direct-display session (QUASAR_DIRECT_DISPLAY=1, quasar#453): there
 # /dev/input is the host's own directory, bind-mounted, so a chmod here would
 # open the host's real nodes to every user on the host. The desktop owns all
-# input in that session anyway, and 16-direct-display-device-groups.sh grants
-# it through group membership instead.
+# input in that session anyway; an image that needs the nodes grants them by
+# group membership in its own direct-mode hook, never by changing the node.
 set -euo pipefail
 
 [[ "${QUASAR_DIRECT_DISPLAY:-}" == "1" ]] && exit 0
