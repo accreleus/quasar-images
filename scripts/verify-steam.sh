@@ -20,7 +20,8 @@ STEAM_IMAGE="${QUASAR_STEAM_IMAGE:-quasar-steam:$TAG}"
 
 echo "checking the session executables in $STEAM_IMAGE"
 qv_image_has "$STEAM_IMAGE" \
-  steam gamescope bwrap quasar-steam quasar-steam-client dbus-daemon NetworkManager
+  steam gamescope bwrap quasar-steam quasar-steam-client dbus-daemon NetworkManager \
+  seatd drm_info jq pipewire wireplumber pipewire-pulse
 
 docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   steam=/usr/local/bin/quasar-steam
@@ -82,6 +83,63 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   # message: a failure here aborts the whole script under set -e with no
   # diagnostic, discovered while proving the group-kill fix green end-to-end).
   grep -q "unset WAYLAND_DISPLAY" "$steam"
+
+  # Display-mode forwarding (quasar#447): the patched Xwayland gamescope runs
+  # is installed beside the system one, the launcher points gamescope at it
+  # only while forwarding is on, and the knob is honoured.
+  test -x /usr/local/libexec/quasar-steam/Xwayland
+  test -x /usr/bin/Xwayland
+  grep -q "WLR_XWAYLAND=" "$steam"
+  grep -q "GAMESCOPE_QUASAR_MODE_FORWARD" "$steam"
+  /usr/local/libexec/quasar-steam/Xwayland -version 2>&1 | grep -q "Xwayland Version"
+  if ldd /usr/local/libexec/quasar-steam/Xwayland | grep -q "not found"; then
+    echo "FAIL: the patched Xwayland has unresolved libraries" >&2
+    exit 1
+  fi
+  # The forwarding code is in the gamescope binary (its knob and the
+  # property it reads from the patched Xwayland).
+  grep -q "GAMESCOPE_QUASAR_MODE_FORWARD" /usr/bin/gamescope
+  grep -q "_QUASAR_XWAYLAND_EMU_MODE" /usr/bin/gamescope
+  grep -q "_QUASAR_XWAYLAND_EMU_MODE" /usr/local/libexec/quasar-steam/Xwayland
+  if ldd /usr/bin/gamescope | grep -q "not found"; then
+    echo "FAIL: the patched gamescope has unresolved libraries" >&2
+    exit 1
+  fi
+
+  # Direct display (quasar#457). The GBM scanout code is in the binary AND was
+  # compiled with HAVE_GBM=1: the hint naming the switch is logged only from
+  # inside the #if HAVE_GBM block, so it is absent from a build where meson did
+  # not find libgbm (the ConVar itself would still be there, doing nothing).
+  if ! grep -aqF "gamescope_drm_gbm_scanout=1" /usr/bin/gamescope; then
+    echo "FAIL: gamescope lacks the GBM scanout path (gamescope-gbm-scanout.patch not applied, or built without libgbm)" >&2
+    exit 1
+  fi
+  if ! ldd /usr/bin/gamescope | grep -q "libgbm\.so"; then
+    echo "FAIL: gamescope is not linked against libgbm; the GBM scanout switch would do nothing" >&2
+    exit 1
+  fi
+  # ...and the environment can reach that ConVar (3.16.24 backport): without it
+  # the launcher'"'"'s gamescope_drm_gbm_scanout=1 is silently ignored.
+  if ! grep -aqF "Overriding from environment variable" /usr/bin/gamescope; then
+    echo "FAIL: gamescope lacks gamescope-convar-env-override.patch; gamescope_<convar> variables would be ignored" >&2
+    exit 1
+  fi
+  # seatd from an init hook, and only in direct mode (the behaviour is pinned by
+  # verify-steam-launcher.sh); its socket path is fixed in seatd 0.9.x.
+  for hook in /etc/quasar/init.d/24-steam-direct-device-groups.sh /etc/quasar/init.d/25-steam-direct-seatd.sh; do
+    if [ ! -x "$hook" ]; then
+      echo "FAIL: $hook missing or not executable" >&2
+      exit 1
+    fi
+    grep -q "QUASAR_DIRECT_DISPLAY" "$hook"
+  done
+  seatd -h 2>&1 | grep -q -- "-u <user>"
+  # Direct-mode sound: the helper that starts PipeWire, WirePlumber and the
+  # Pulse shim inside Steam'"'"'s session bus (behaviour: verify-steam-launcher.sh).
+  test -x /usr/local/libexec/quasar-steam/direct-session
+  grep -q "pipewire-pulse" /usr/local/libexec/quasar-steam/direct-session
+  grep -q "unset PULSE_SERVER PULSE_SINK PULSE_SOURCE PULSE_COOKIE" "$steam"
+  grep -q "QUASAR_DIRECT_DISPLAY" "$steam"
 
   # ALSA-only clients route to the injected PulseAudio sink.
   test -f /etc/asound.conf

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# The direct-display Plasma session (quasar#453), installed at
+# /usr/local/libexec/quasar-kde/direct-session and run ONLY by
+# /usr/local/bin/quasar-kde when QUASAR_DIRECT_DISPLAY=1.
+#
+# The launcher has already done everything the two entries share: the private
+# XDG_RUNTIME_DIR (0700), /tmp/.X11-unix, the session variables, the shutdown
+# relay. This helper does the two things that are direct-only:
+#
+#   1. Drops the parent-display variables. With WAYLAND_DISPLAY or DISPLAY set,
+#      KWin starts as a nested client of that display; with neither, it picks
+#      its DRM backend, finds no logind and falls to its no-logind session, and
+#      is the first opener of the card node, so it is DRM master. That is the
+#      whole mechanism, proven by hand on the console host: no KWin flags.
+#   2. Starts PipeWire, WirePlumber and the PulseAudio shim INSIDE the session
+#      bus, before Plasma. There is no systemd user manager to start them, and
+#      nothing in Plasma's classic boot does. Audio is never fatal: a desktop
+#      without sound beats no desktop, and the log says why.
+#
+# It runs in two phases so the daemons share Plasma's session bus:
+#   (no argument)    scrub the environment, exec dbus-run-session -- $0 --in-session
+#   --in-session     start the audio daemons, exec startplasma-wayland
+set -euo pipefail
+
+log() { printf '%s quasar-kde: %s\n' "$(date -Iseconds)" "$*" >&2; }
+
+if [[ "${1:-}" != "--in-session" ]]; then
+  unset WAYLAND_DISPLAY DISPLAY
+  exec dbus-run-session -- "$0" --in-session
+fi
+
+start_audio() {
+  local daemon
+  for daemon in pipewire wireplumber pipewire-pulse; do
+    if ! command -v "$daemon" >/dev/null 2>&1; then
+      log "WARNING: $daemon is not installed; the desktop will have no sound"
+      return 0
+    fi
+  done
+
+  pipewire &
+  # WirePlumber and the Pulse shim connect to PipeWire's socket and give up if it
+  # is not there yet. Bounded wait; on a timeout they are started anyway and say
+  # for themselves what failed.
+  local waited=0
+  while [[ ! -e "$XDG_RUNTIME_DIR/pipewire-0" ]] && (( waited < 40 )); do
+    sleep 0.25
+    waited=$((waited + 1))
+  done
+  if [[ ! -e "$XDG_RUNTIME_DIR/pipewire-0" ]]; then
+    log "WARNING: PipeWire's socket did not appear within 10s; sound may not work"
+  fi
+  wireplumber &
+  pipewire-pulse &
+  log "audio: PipeWire, WirePlumber and the PulseAudio shim started on the host's sound device"
+}
+
+start_audio
+exec startplasma-wayland

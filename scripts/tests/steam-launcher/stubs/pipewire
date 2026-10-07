@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Test stub for pipewire: records that it started, with the runtime dir and bus it
+# was given, and creates the socket the others wait for.
+set -euo pipefail
+log="${STUB_LOG:?STUB_LOG must name the case log directory}"
+printf '%s XDG_RUNTIME_DIR=%s DBUS_SESSION_BUS_ADDRESS=%s\n' pipewire "${XDG_RUNTIME_DIR:-<unset>}" "${DBUS_SESSION_BUS_ADDRESS:-<unset>}" >> "$log/audio.log"
+: > "$XDG_RUNTIME_DIR/pipewire-0"
+exit 0

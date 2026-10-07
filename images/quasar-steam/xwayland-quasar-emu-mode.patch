@@ -1,0 +1,161 @@
+Xwayland: carry the refresh of a client's RandR pick, and honour client-added modes (quasar #447)
+
+Why. In a rootless Xwayland (gamescope's), RandR mode changes are emulated per
+client: xwl_randr_crtc_set (hw/xwayland/xwayland-output.c) resolves the
+requested mode BY SIZE against Xwayland's own table (the current mode plus a
+fixed list of smaller sizes, all at the current refresh) and records only the
+width and height. So a game that picks "2560x1440 @ 120 Hz" from modes
+gamescope added (gamescope-quasar-mode-forward.patch) is reduced to
+"2560x1440", a refresh-only pick at the current size is dropped entirely, and a
+size outside the table fails with RRSetConfigFailed. Nothing outside Xwayland
+can recover the pick: the emulated mode is visible only to the client that set
+it.
+
+What it does.
+ - A mode a client added to the output (a RandR user mode) is emulated as
+   itself instead of being mapped onto the built-in mode of the same size, so
+   any listed size works and its refresh is kept.
+ - Every emulated mode records its vertical refresh (mHz), and Xwayland
+   publishes it next to _XWAYLAND_RANDR_EMU_MONITOR_RECTS on the client's
+   toplevel windows as _QUASAR_XWAYLAND_EMU_MODE = CARDINAL[3 per output]
+   { width, height, refresh_mhz }, deleted with it.
+Nothing else changes: built-in modes, VidMode, rootful mode and the existing
+property behave as before. Built for gamescope only (WLR_XWAYLAND); the
+system Xwayland is untouched.
+
+diff --git a/hw/xwayland/xwayland-output.c b/hw/xwayland/xwayland-output.c
+index e5e6100..c7f736e 100644
+--- a/hw/xwayland/xwayland-output.c
++++ b/hw/xwayland/xwayland-output.c
+@@ -219,6 +219,37 @@ update_screen_size(struct xwl_screen *xwl_screen, int width, int height)
+     RRTellChanged(xwl_screen->screen);
+ }
+ 
++/* Quasar: the vertical refresh of an RandR mode in mHz (0 when it has no timing). */
++static int32_t
++xwl_rr_mode_refresh_mhz(RRModePtr mode)
++{
++    double v = mode->mode.vTotal;
++
++    if (mode->mode.hTotal == 0 || mode->mode.vTotal == 0)
++        return 0;
++    if (mode->mode.modeFlags & RR_DoubleScan)
++        v *= 2;
++    if (mode->mode.modeFlags & RR_Interlace)
++        v /= 2;
++    return (int32_t) lround((double) mode->mode.dotClock * 1000.0 /
++                            ((double) mode->mode.hTotal * v));
++}
++
++/* Quasar: is `mode` one a client added to this output with RRAddOutputMode? */
++static Bool
++xwl_output_is_user_mode(struct xwl_output *xwl_output, RRModePtr mode)
++{
++    RROutputPtr output = xwl_output->randr_output;
++    int i;
++
++    if (!output || !mode)
++        return FALSE;
++    for (i = 0; i < output->numUserModes; i++)
++        if (output->userModes[i] == mode)
++            return TRUE;
++    return FALSE;
++}
++
+ struct xwl_emulated_mode *
+ xwl_output_get_emulated_mode_for_client(struct xwl_output *xwl_output,
+                                         ClientPtr client)
+@@ -278,6 +309,7 @@ xwl_output_add_emulated_mode_for_client(struct xwl_output *xwl_output,
+     emulated_mode->height = mode->mode.height;
+     emulated_mode->id = mode->mode.id;
+     emulated_mode->from_vidmode = from_vidmode;
++    emulated_mode->refresh_mhz = xwl_rr_mode_refresh_mhz(mode);
+ }
+ 
+ static void
+@@ -428,6 +460,9 @@ struct xwl_output_randr_emu_prop {
+     Atom atom;
+     uint32_t rects[XWL_CLIENT_MAX_EMULATED_MODES][4];
+     int rect_count;
++    /* Quasar: _QUASAR_XWAYLAND_EMU_MODE, width/height/refresh-mHz per output. */
++    Atom mode_atom;
++    uint32_t modes[XWL_CLIENT_MAX_EMULATED_MODES][3];
+ };
+ 
+ static void
+@@ -435,11 +470,13 @@ xwl_output_randr_emu_prop(struct xwl_screen *xwl_screen, ClientPtr client,
+                           struct xwl_output_randr_emu_prop *prop)
+ {
+     static const char atom_name[] = "_XWAYLAND_RANDR_EMU_MONITOR_RECTS";
++    static const char mode_atom_name[] = "_QUASAR_XWAYLAND_EMU_MODE";
+     struct xwl_emulated_mode *emulated_mode;
+     struct xwl_output *xwl_output;
+     int index = 0;
+ 
+     prop->atom = MakeAtom(atom_name, strlen(atom_name), TRUE);
++    prop->mode_atom = MakeAtom(mode_atom_name, strlen(mode_atom_name), TRUE);
+ 
+     xorg_list_for_each_entry(xwl_output, &xwl_screen->output_list, link) {
+         emulated_mode = xwl_output_get_emulated_mode_for_client(xwl_output, client);
+@@ -450,6 +487,9 @@ xwl_output_randr_emu_prop(struct xwl_screen *xwl_screen, ClientPtr client,
+         prop->rects[index][1] = xwl_output->y;
+         prop->rects[index][2] = emulated_mode->width;
+         prop->rects[index][3] = emulated_mode->height;
++        prop->modes[index][0] = emulated_mode->width;
++        prop->modes[index][1] = emulated_mode->height;
++        prop->modes[index][2] = emulated_mode->refresh_mhz;
+         index++;
+     }
+ 
+@@ -464,8 +504,12 @@ xwl_output_set_randr_emu_prop(WindowPtr window,
+         dixChangeWindowProperty(serverClient, window, prop->atom,
+                                 XA_CARDINAL, 32, PropModeReplace,
+                                 prop->rect_count * 4, prop->rects, TRUE);
++        dixChangeWindowProperty(serverClient, window, prop->mode_atom,
++                                XA_CARDINAL, 32, PropModeReplace,
++                                prop->rect_count * 3, prop->modes, TRUE);
+     } else {
+         DeleteProperty(serverClient, window, prop->atom);
++        DeleteProperty(serverClient, window, prop->mode_atom);
+     }
+ }
+ 
+@@ -589,7 +633,9 @@ xwl_output_set_emulated_mode(struct xwl_output *xwl_output, ClientPtr client,
+     xwl_output_get_emulated_root_size(xwl_output, client,
+                                       &old_emulated_width, &old_emulated_height);
+ 
+-    /* modes[0] is the actual (not-emulated) output mode */
++    /* modes[0] is the actual (not-emulated) output mode. Quasar: a client-added
++     * (user) mode is always kept as an emulated mode, even at the output's own
++     * size, so the refresh it carries reaches _QUASAR_XWAYLAND_EMU_MODE. */
+     if (mode == xwl_output->randr_output->modes[0])
+         xwl_output_remove_emulated_mode_for_client(xwl_output, client);
+     else
+@@ -1057,7 +1103,13 @@ xwl_randr_crtc_set(ScreenPtr pScreen,
+     struct xwl_output *xwl_output = crtc->devPrivate;
+     RRModePtr mode;
+ 
+-    if (new_mode) {
++    if (new_mode && xwl_output_is_user_mode(xwl_output, new_mode)) {
++        /* Quasar: a mode a client added (the parent compositor's real modes,
++         * mirrored in by gamescope) is emulated as itself rather than mapped
++         * onto the built-in mode of the same size, so its refresh survives and
++         * sizes outside the built-in table work too. */
++        mode = new_mode;
++    } else if (new_mode) {
+         mode = xwl_output_find_mode(xwl_output,
+                                     new_mode->mode.width,
+                                     new_mode->mode.height);
+diff --git a/hw/xwayland/xwayland-output.h b/hw/xwayland/xwayland-output.h
+index 0d36f45..f37f150 100644
+--- a/hw/xwayland/xwayland-output.h
++++ b/hw/xwayland/xwayland-output.h
+@@ -77,6 +77,8 @@ struct xwl_emulated_mode {
+     int32_t height;
+     RRMode id;
+     Bool from_vidmode;
++    /* Quasar: the vertical refresh of the mode the client picked, in mHz. */
++    int32_t refresh_mhz;
+ };
+ 
+ Bool xwl_screen_init_output(struct xwl_screen *xwl_screen);

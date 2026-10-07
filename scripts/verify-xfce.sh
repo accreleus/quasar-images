@@ -20,10 +20,14 @@ echo "checking the session executables in $XFCE_IMAGE"
 qv_image_has "$XFCE_IMAGE" \
   startxfce4 xfce4-session xfwm4 xfce4-panel xfdesktop Xwayland xset \
   dbus-run-session flatpak gnome-software firefox steam bwrap quasar-xfce \
-  quasar-xfce-modes xdg-user-dirs-update
+  quasar-display-bridge quasar-xfce-modes xdg-user-dirs-update
 
-# The display-mode bridge (quasar #445) is built in a throwaway stage; the
-# toolchain and -devel packages it needed must not have leaked into the image.
+# The display-mode bridge (quasar #445) is built in the shared spine image
+# (images/quasar-app/display-bridge/, quasar-images#447), not in this
+# Dockerfile; scripts/verify-app.sh is what asserts its toolchain stays out of
+# the image it is actually built in. Still worth asserting here too, since
+# quasar-xfce inherits the binary and a toolchain leak would be just as real a
+# defect for any image in this lineage.
 qv_image_lacks "$XFCE_IMAGE" gcc wayland-scanner
 
 # Zero gamescope/Big-Picture weight: this is a plain X11 desktop nested on a
@@ -104,12 +108,22 @@ docker run --rm --entrypoint /bin/bash "$XFCE_IMAGE" -lc "$QV_GUARD"'
   need "-geometry" "$xfce" "Xwayland is sized with -geometry WxH"
   # quasar #445: the display-mode bridge runs beside Xwayland and gets the parent
   # socket through its own variable, never through WAYLAND_DISPLAY.
-  need_lit '\''QUASAR_PARENT_WAYLAND_DISPLAY="$parent_wayland_display" DISPLAY=:0 quasar-xfce-modes &'\'' "$xfce" \
+  need_lit '\''QUASAR_PARENT_WAYLAND_DISPLAY="$parent_wayland_display" DISPLAY=:0 quasar-display-bridge &'\'' "$xfce" \
        "the display-mode bridge is started against the parent compositor and :0"
   need "QUASAR_XFCE_MODE_BRIDGE" "$xfce" "the bridge has an off switch"
   # Exit codes are the bridge contract: no parent socket named -> 2 (misuse).
+  # Checked through both names: the real binary and the quasar-xfce-modes
+  # compatibility symlink quasar-app installs (quasar-images#447).
+  if /usr/local/bin/quasar-display-bridge >/dev/null 2>&1; then
+    echo "FAIL: quasar-display-bridge ran without QUASAR_PARENT_WAYLAND_DISPLAY and did not refuse" >&2
+    exit 1
+  fi
   if /usr/local/bin/quasar-xfce-modes >/dev/null 2>&1; then
-    echo "FAIL: quasar-xfce-modes ran without QUASAR_PARENT_WAYLAND_DISPLAY and did not refuse" >&2
+    echo "FAIL: the quasar-xfce-modes symlink ran without QUASAR_PARENT_WAYLAND_DISPLAY and did not refuse" >&2
+    exit 1
+  fi
+  if [[ "$(readlink -f /usr/local/bin/quasar-xfce-modes)" != /usr/local/bin/quasar-display-bridge ]]; then
+    echo "FAIL: quasar-xfce-modes must be a compatibility symlink to quasar-display-bridge" >&2
     exit 1
   fi
   need "dbus-run-session -- startxfce4" "$xfce" "the session needs its own bus"
