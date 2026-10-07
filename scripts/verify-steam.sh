@@ -155,7 +155,7 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   # libnm client fails to construct, the client never registers
   # SteamClient.System.Network.*, and Big Picture'"'"'s SystemNetworkStore throws
   # pre-login -- the UI hangs on "Waiting for network" forever with a perfectly
-  # online client. Proven by A/B on quasar-devbox 2026-08-09 (same image, same
+  # online client. Proven by A/B on the GPU test host 2026-08-09 (same image, same
   # home volume, QUASAR_STEAM_SYSTEM_SERVICES on/off).
   hook=/etc/quasar/init.d/20-steam-system-services.sh
   test -x "$hook"
