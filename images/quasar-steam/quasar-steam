@@ -404,35 +404,19 @@ if [[ "$direct_display" == 1 ]]; then
   gs_pid=$!
 else
   # Nested gamescope sizes its virtual output from -W/-H/-r at launch, so whatever
-  # it is given here is the display Steam and every game it launches START with.
-  # Under a Quasar compositor that speaks wlr-output-management, the patched
-  # gamescope then lists the host's real modes to games, forwards a game's pick to
-  # the host, and follows the host's mode (size and refresh) when it moves
-  # (quasar#447, gamescope-quasar-mode-forward.patch; GAMESCOPE_QUASAR_MODE_FORWARD=0
-  # turns that off and restores plain scaling inside gamescope). Quasar injects the session's
-  # streamed mode as QUASAR_STREAM_WIDTH/HEIGHT/FPS (quasar#384); before that the
-  # baked 1920x1080x60 defaults below applied to every session, so a 1440p120
-  # session rendered 1080p60 and the compositor upscaled it. An explicit
+  # it is given here is the display Steam and every game it launches START with;
+  # a game's own resolution pick is scaled inside gamescope's output, as upstream
+  # does. Quasar injects the session's streamed mode as
+  # QUASAR_STREAM_WIDTH/HEIGHT/FPS (quasar#384); before that the baked
+  # 1920x1080x60 defaults below applied to every session, so a 1440p120 session
+  # rendered 1080p60 and the compositor upscaled it. An explicit
   # GAMESCOPE_* still wins (per-app pin, and what Quasar's compatibility shim
   # sets); the literals are the last resort for a standalone `docker run`.
   gs_width="${GAMESCOPE_WIDTH:-${QUASAR_STREAM_WIDTH:-1920}}"
   gs_height="${GAMESCOPE_HEIGHT:-${QUASAR_STREAM_HEIGHT:-1080}}"
   gs_refresh="${GAMESCOPE_REFRESH:-${QUASAR_STREAM_FPS:-60}}"
 
-  # Gamescope's own Xwayland: the patched build keeps the refresh of a game's
-  # RandR pick (xwayland-quasar-emu-mode.patch). wlroots execs $WLR_XWAYLAND
-  # instead of its compiled-in path. Forwarding off, or the binary missing, means
-  # the system Xwayland exactly as before; an explicit WLR_XWAYLAND still wins.
-  gs_xwayland=/usr/local/libexec/quasar-steam/Xwayland
-  case "${GAMESCOPE_QUASAR_MODE_FORWARD:-1}" in
-    0|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|[Nn][Oo]) gs_mode_forward=0 ;;
-    *) gs_mode_forward=1 ;;
-  esac
-  if [[ -z "${WLR_XWAYLAND:-}" && "$gs_mode_forward" == 1 && -x "$gs_xwayland" ]]; then
-    export WLR_XWAYLAND="$gs_xwayland"
-  fi
-
-  log "starting Gamescope (mode=$ui_mode ${gs_width}x${gs_height}@${gs_refresh} flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0} mode_forward=$gs_mode_forward xwayland=${WLR_XWAYLAND:-system})"
+  log "starting Gamescope (mode=$ui_mode ${gs_width}x${gs_height}@${gs_refresh} flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0})"
   gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
     -W "$gs_width" \
     -H "$gs_height" \
@@ -441,7 +425,7 @@ else
 fi
 
 # Readiness window. 5s was too tight: gamescope's own startup (Xwayland +
-# xkbcomp keysym compile + Vulkan/EGL init) measured 4.5-10.6s on Tower with the
+# xkbcomp keysym compile + Vulkan/EGL init) measured 4.5-10.6s on the NVIDIA console host with the
 # time varying run to run and NOT with the requested mode (1440p120 came up in
 # 6.1s between two 1080p60 runs at 10.6s and 4.6s). Losing that race aborted the
 # whole container with "gamescope did not report ready", i.e. a dead session for

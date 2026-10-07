@@ -11,7 +11,7 @@
 #   * direct (QUASAR_DIRECT_DISPLAY=1): gamescope runs on its DRM backend under
 #     seatd, at the panel's native size and highest refresh, with GBM scanout
 #     and forced composition on NVIDIA (upstream gamescope #2309); nothing of
-#     the nested parent (its socket, the stream mode, the mode-forward Xwayland)
+#     the nested parent (its socket, the stream mode)
 #     leaks in.
 #   * the seatd and device-group hooks act only in direct mode, and no init
 #     hook changes anything under /dev/input then (it is the host's directory).
@@ -102,7 +102,7 @@ run_launcher nested \
   PULSE_SERVER=unix:/run/quasar-pulse/native PULSE_SINK=quasar_output
 expect_argv nested "-e -b -R <ready-fifo> -T <stats-fifo> -W 2560 -H 1440 -r 120"
 expect_env gamescope.env nested "WAYLAND_DISPLAY=/run/quasar-wayland/wayland-3"
-expect_env gamescope.env nested "WLR_XWAYLAND=/usr/local/libexec/quasar-steam/Xwayland"
+expect_env gamescope.env nested "WLR_XWAYLAND<unset>"
 expect_env gamescope.env nested "gamescope_drm_gbm_scanout<unset>"
 expect_env gamescope.env nested "LIBSEAT_BACKEND<unset>"
 expect_env client.env nested "DISPLAY=:7"

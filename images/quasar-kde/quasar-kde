@@ -223,25 +223,17 @@ export DESKTOP_SESSION=plasma
 # terminal (it never is in a container), sends every qCWarning/qCInfo to the
 # journal -- which does not exist here. Without QT_FORCE_STDERR_LOGGING the
 # whole Plasma session (kwin included) therefore logged NOTHING to the
-# container log; found live on the console host, where not one line of kwin's
-# display-mode forwarding appeared. Forcing stderr makes the session's
-# warnings land in `docker logs` like every other Quasar image.
+# container log. Forcing stderr makes the session's warnings land in
+# `docker logs` like every other Quasar image.
 #
-# The rules turn on exactly the display-mode story at a useful level: kwin's
-# nested backend (kwin/0004 forwarding decisions), and the two KScreen clients
-# that apply output configurations on their own -- the kscreen kded daemon
-# ("Change detected", "Applying known config", "Config applied") and the
-# Display Settings KCM (its apply and revert). Appended, so an operator's own
-# QT_LOGGING_RULES still applies.
-#
-# Direct mode logs a different story: KWin's DRM backend (which connector, which
+# Direct mode additionally logs KWin's DRM backend (which connector, which
 # mode, hotplug) and libinput (devices arriving and leaving), the two things a
-# console session that is dark or deaf is diagnosed from.
+# console session that is dark or deaf is diagnosed from. Appended, so an
+# operator's own QT_LOGGING_RULES still applies. A nested session turns on no
+# extra categories.
 export QT_FORCE_STDERR_LOGGING=1
 if [[ "$direct_display" == "1" ]]; then
   export QT_LOGGING_RULES="${QT_LOGGING_RULES:+${QT_LOGGING_RULES};}kwin_wayland_drm.info=true;kwin_libinput.info=true"
-else
-  export QT_LOGGING_RULES="${QT_LOGGING_RULES:+${QT_LOGGING_RULES};}kwin_wayland_backend.info=true;kscreen.kded.debug=true;kscreen.kcm.debug=true"
 fi
 
 # --- Overlay (subsurface) offloading OFF: the black-stream fix (nested only) --
@@ -334,10 +326,9 @@ fi
 # upstream offers no other way to size a nested Plasma session. If a future
 # Plasma gains a supported size mechanism, delete the shim and the PATH prepend.
 #
-# NOT in direct mode. The shim's --width/--height are windowed-mode flags, and
-# its log rule follows the console mode forwarding of the patched nested backend
-# (quasar#447). On the DRM backend KWin owns the real display and takes the
-# monitor's own mode: nothing is forwarded and nothing is sized from here.
+# NOT in direct mode. The shim's --width/--height are windowed-mode flags. On
+# the DRM backend KWin owns the real display and takes the monitor's own mode:
+# nothing is sized from here.
 if [[ "$direct_display" == "0" ]]; then
   export PATH="/usr/local/libexec/quasar-kde:$PATH"
   export QUASAR_KDE_OUTPUT_WIDTH="$kde_width"

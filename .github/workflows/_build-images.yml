@@ -174,4 +174,4 @@ jobs:
           done
 
       # Accelerated images intentionally are not started here. Their entrypoint
-      # requires an assigned Vulkan UUID and is validated on Tower and Hermes.
+      # requires an assigned Vulkan UUID and is validated on the GPU test hosts.

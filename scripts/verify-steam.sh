@@ -84,23 +84,8 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   # diagnostic, discovered while proving the group-kill fix green end-to-end).
   grep -q "unset WAYLAND_DISPLAY" "$steam"
 
-  # Display-mode forwarding (quasar#447): the patched Xwayland gamescope runs
-  # is installed beside the system one, the launcher points gamescope at it
-  # only while forwarding is on, and the knob is honoured.
-  test -x /usr/local/libexec/quasar-steam/Xwayland
-  test -x /usr/bin/Xwayland
-  grep -q "WLR_XWAYLAND=" "$steam"
-  grep -q "GAMESCOPE_QUASAR_MODE_FORWARD" "$steam"
-  /usr/local/libexec/quasar-steam/Xwayland -version 2>&1 | grep -q "Xwayland Version"
-  if ldd /usr/local/libexec/quasar-steam/Xwayland | grep -q "not found"; then
-    echo "FAIL: the patched Xwayland has unresolved libraries" >&2
-    exit 1
-  fi
-  # The forwarding code is in the gamescope binary (its knob and the
-  # property it reads from the patched Xwayland).
-  grep -q "GAMESCOPE_QUASAR_MODE_FORWARD" /usr/bin/gamescope
-  grep -q "_QUASAR_XWAYLAND_EMU_MODE" /usr/bin/gamescope
-  grep -q "_QUASAR_XWAYLAND_EMU_MODE" /usr/local/libexec/quasar-steam/Xwayland
+  # The patched gamescope replaces the packaged binary but must still resolve every
+  # library the RPM dependencies provide.
   if ldd /usr/bin/gamescope | grep -q "not found"; then
     echo "FAIL: the patched gamescope has unresolved libraries" >&2
     exit 1
@@ -170,7 +155,7 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   # libnm client fails to construct, the client never registers
   # SteamClient.System.Network.*, and Big Picture'"'"'s SystemNetworkStore throws
   # pre-login -- the UI hangs on "Waiting for network" forever with a perfectly
-  # online client. Proven by A/B on quasar-devbox 2026-08-09 (same image, same
+  # online client. Proven by A/B on the GPU test host 2026-08-09 (same image, same
   # home volume, QUASAR_STEAM_SYSTEM_SERVICES on/off).
   hook=/etc/quasar/init.d/20-steam-system-services.sh
   test -x "$hook"
