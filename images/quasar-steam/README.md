@@ -39,37 +39,12 @@ from the launched stream profile (quasar#384). An explicit `GAMESCOPE_WIDTH` /
 `GAMESCOPE_HEIGHT` / `GAMESCOPE_REFRESH` overrides it (per-app pin). With
 neither set, the image falls back to 1920x1080x60.
 
-**A game's resolution pick moves the monitor (quasar#447).** This needs a
-Quasar compositor that speaks `wlr-output-management`. The patched gamescope
-(`gamescope-quasar-mode-forward.patch`) then does three things:
-
-- It lists the monitor's modes in a game's display settings, each with its own
-  refresh rate. Modes larger than the session's starting size are not listed.
-- When a game applies one, gamescope asks the host for that mode. When the game
-  exits or loses focus, it asks for the session's mode again.
-- When the host moves, gamescope follows it: its output takes the new size and
-  refresh, so the game runs 1:1 instead of being scaled.
-
-Gamescope's own Xwayland is a patched build at
-`/usr/local/libexec/quasar-steam/Xwayland` (`xwayland-quasar-emu-mode.patch`).
-Without it, a game's pick reaches gamescope as a size only, so the refresh it
-chose would be lost. The system Xwayland is unchanged.
-
-The signal is a RandR or VidMode mode change, which native games (SDL) and Wine
-games that switch modes make. Steam's per-game resolution setting
-(`GAMESCOPE_XWAYLAND_MODE_CONTROL`) is forwarded as a size too. A Proton game
-that scales internally and never switches modes is still scaled by gamescope.
-
-Turn it off with `GAMESCOPE_QUASAR_MODE_FORWARD=0`: gamescope then scales a
-game's resolution inside its own output, as upstream does, and the launcher uses
-the system Xwayland. The same happens automatically when the host has no
-`wlr-output-management`.
-
-How to check it worked:
-
-- The gamescope log has `parent speaks zwlr_output_manager_v1` at startup.
-- Applying a mode in a game logs `asking the parent for WxH @ R Hz`, then
-  `parent is at WxH @ R Hz`.
+**A game's resolution pick stays inside the session.** In a nested session
+gamescope's output is the session's streamed mode, and a game that asks for a
+different resolution is scaled inside that output, as upstream does; the
+monitor's modes are not visible to the game and the host is never asked to move.
+Gamescope's Xwayland is the system one. To change the display a console session
+runs at, use direct display (below), where gamescope drives the monitor itself.
 
 ## Direct display (console sessions, quasar#453)
 
@@ -116,8 +91,8 @@ What the image does:
   private `XDG_RUNTIME_DIR`) and then execs Steam. WirePlumber picks the default
   output; Steam's Settings > Audio lists the others. A nested session starts none
   of this and keeps the agent's `PULSE_SERVER`.
-- The nested-only pieces (`QUASAR_STREAM_*`, `GAMESCOPE_WIDTH/HEIGHT/REFRESH`, the
-  mode-forwarding Xwayland) are not used.
+- The nested-only pieces (`QUASAR_STREAM_*`, `GAMESCOPE_WIDTH/HEIGHT/REFRESH`) are
+  not used.
 
 How to know it worked: the log has `seatd ready: /run/seatd.sock`,
 `audio: PipeWire, WirePlumber and the PulseAudio shim started`, then

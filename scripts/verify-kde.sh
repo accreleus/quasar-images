@@ -66,18 +66,6 @@ hint_patch="images/quasar-kde/kwin/0003-nested-backend-host-scale-hint.patch"
 assert_file "$hint_patch" "the per-session ui_scale knob would do nothing"
 assert_grep "src/backends/wayland/wayland_output.cpp" "$hint_patch" \
   "0003 no longer touches the nested output; re-diff it"
-# 0004 is what makes a resolution/refresh pick in Display Settings MOVE the
-# display in a console session: a pick of one of the host's modes is forwarded
-# to Quasar's compositor through wlr-output-management instead of letterboxed.
-# Without it the KCM lists sizes only and can never change the refresh.
-forward_patch="images/quasar-kde/kwin/0004-nested-backend-forward-host-mode.patch"
-assert_file "$forward_patch" "a Display Settings pick would never reach the console display"
-assert_grep "src/backends/wayland/wayland_display.cpp" "$forward_patch" \
-  "0004 no longer touches the nested display; re-diff it"
-assert_grep "zwlr_output_manager_v1_create_configuration" "$forward_patch" \
-  "0004 no longer sends a wlr-output-management configuration; re-diff it"
-assert_grep "protocols/wlr-output-management-unstable-v1.xml" "$forward_patch" \
-  "0004 no longer vendors the wlr-output-management XML it generates from"
 assert_exec images/quasar-kde/kwin/build-kwin-deps.sh "the kwin builddep stage has no script"
 assert_exec images/quasar-kde/kwin/build-kwin.sh "the kwin rpmbuild stage has no script"
 
@@ -109,24 +97,6 @@ if [[ "$kwin_nvr" != *".quasar"* ]]; then
   exit 1
 fi
 echo "patched kwin present: $kwin_nvr"
-
-# ...and that the installed kwin is the one BUILT with 0004. Stock kwin has no
-# wlr-output-management code at all, so the interface name in libkwin is the
-# fingerprint of the forwarding client. (The smoke below runs under a host
-# WITHOUT the protocol, which is the no-forwarding path; the forwarding path
-# needs Quasar's compositor and is checked live, see README.)
-docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "$QV_GUARD"'
-  lib=$(ls /usr/lib64/libkwin.so.* 2>/dev/null | head -1)
-  if [[ -z "$lib" ]]; then
-    echo "FAIL: libkwin.so not found" >&2
-    exit 1
-  fi
-  if ! grep -qa zwlr_output_manager_v1 "$lib"; then
-    echo "FAIL: $lib has no wlr-output-management client; 0004 is not in the installed kwin" >&2
-    exit 1
-  fi
-'
-echo "kwin carries the host mode forwarding (0004)"
 
 # The org.quasar.kde.kwin label records WHICH kwin was patched, so a deployed
 # image can be identified without running it. It must agree with what is
@@ -352,9 +322,6 @@ docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "$QV_GUARD"'
   shim=/usr/local/libexec/quasar-kde/kwin_wayland
   test -x "$shim"
   grep -q "exec /usr/bin/kwin_wayland" "$shim"
-  # kwin/0004 logs every forwarded mode pick at info level; the shim turns that
-  # category on so a live pick can be attributed from the container log.
-  grep -q "kwin_wayland_backend.info=true" "$shim"
   grep -q "QT_FORCE_STDERR_LOGGING=1" "$shim"
   grep -q "QT_FORCE_STDERR_LOGGING=1" "$kde"
   grep -q "/usr/local/libexec/quasar-kde" "$kde"

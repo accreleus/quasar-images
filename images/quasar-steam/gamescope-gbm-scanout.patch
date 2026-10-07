@@ -22,10 +22,12 @@ Source. NightHammer1000's branch poc/gamescope-gbm-route
 (https://github.com/NightHammer1000/gamescope, head 2bfc18c, on 3.16.25):
 the seven commits 6d46d29 a86849b ebbaf8b b384ac4 6605942 092a2e7 2bfc18c,
 squashed. Rebased onto 3.16.23 after gamescope-nested-pointer-warp.patch and
-gamescope-quasar-mode-forward.patch: the code applied without conflicts; the
+gamescope-convar-env-override.patch: the code applied without conflicts; the
 README build-dependency hunk and the subprojects/.gitignore commit were
-dropped, and the src/meson.build hunk takes the mode-forward patch's lines as
-context. Apply this patch AFTER those two.
+dropped. Apply this patch AFTER those two, on stock 3.16.23 sources: it was
+first rebased on a since-retired display-mode forwarding patch, and re-diffed
+once that was gone (the src/meson.build hunks anchor on stock lines; no code
+changed).
 
 Quasar use: images/quasar-steam/quasar-steam sets the ConVar, with forced
 composition, only for a direct-display session on nvidia-drm (quasar#453,
@@ -366,11 +368,11 @@ index 607c25d..3fadef8 100644
          virtual std::span<const uint64_t> GetSupportedModifiers( uint32_t uDrmFormat ) const = 0;
  		inline bool SupportsFormat( uint32_t uDrmFormat ) const
 diff --git a/src/meson.build b/src/meson.build
-index 908c781..5d1474e 100644
+index 8512bf5..e7c5325 100644
 --- a/src/meson.build
 +++ b/src/meson.build
-@@ -12,6 +12,8 @@ dep_xi = dependency('xi')
- dep_xrandr = dependency('xrandr')
+@@ -11,6 +11,8 @@ dep_xmu = dependency('xmu')
+ dep_xi = dependency('xi')
  
  drm_dep = dependency('libdrm', version: '>= 2.4.113', required: get_option('drm_backend'))
 +# gbm_bo_create_with_modifiers2 needs Mesa >= 21.3
@@ -378,7 +380,7 @@ index 908c781..5d1474e 100644
  eis_dep = dependency('libeis-1.0', required : get_option('input_emulation'))
  
  wayland_server = dependency('wayland-server', version: '>=1.21')
-@@ -147,6 +149,7 @@ if sdl2_dep.found()
+@@ -145,6 +147,7 @@ if sdl2_dep.found()
  endif
  
  gamescope_cpp_args += '-DHAVE_DRM=@0@'.format(drm_dep.found().to_int())
@@ -386,7 +388,7 @@ index 908c781..5d1474e 100644
  gamescope_cpp_args += '-DHAVE_SDL2=@0@'.format(sdl2_dep.found().to_int())
  gamescope_cpp_args += '-DHAVE_AVIF=@0@'.format(avif_dep.found().to_int())
  gamescope_cpp_args += '-DHAVE_LIBCAP=@0@'.format(cap_dep.found().to_int())
-@@ -194,7 +197,7 @@ gamescope_version = configure_file(
+@@ -192,7 +195,7 @@ gamescope_version = configure_file(
      include_directories : [reshade_include, sol2_include],
      dependencies: [
        dep_wayland, dep_x11, dep_xdamage, dep_xcomposite, dep_xrender, dep_xext, dep_xfixes,
@@ -394,7 +396,7 @@ index 908c781..5d1474e 100644
 +      dep_xxf86vm, dep_xres, glm_dep, drm_dep, gbm_dep, wayland_server,
        xkbcommon, thread_dep, sdl2_dep, wlroots_dep,
        vulkan_dep, liftoff_dep, dep_xtst, dep_xmu, cap_dep, epoll_dep, pipewire_dep, librt_dep,
-       stb_dep, displayinfo_dep, openvr_dep, dep_xcursor, avif_dep, dep_xi, dep_xrandr,
+       stb_dep, displayinfo_dep, openvr_dep, dep_xcursor, avif_dep, dep_xi,
 diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
 index 65411dc..e074b18 100644
 --- a/src/rendervulkan.cpp
@@ -905,10 +907,10 @@ index 63cc602..7ebaaf3 100644
  	VK_FUNC(GetSwapchainImagesKHR) \
  	VK_FUNC(MapMemory) \
 diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
-index aaf6b31..c45ce5c 100644
+index c4cee70..1d030c5 100644
 --- a/src/steamcompmgr.cpp
 +++ b/src/steamcompmgr.cpp
-@@ -157,6 +157,7 @@ static lut3d_t g_tmpLut3d;
+@@ -156,6 +156,7 @@ static lut3d_t g_tmpLut3d;
  extern int g_nDynamicRefreshHz;
  
  bool g_bForceHDRSupportDebug = false;
@@ -916,7 +918,7 @@ index aaf6b31..c45ce5c 100644
  extern float g_flInternalDisplayBrightnessNits;
  extern float g_flHDRItmSdrNits;
  extern float g_flHDRItmTargetNits;
-@@ -8701,11 +8702,19 @@ steamcompmgr_main(int argc, char **argv)
+@@ -8546,11 +8547,19 @@ steamcompmgr_main(int argc, char **argv)
  		// Pick our width/height for this potential frame, regardless of how it might change later
  		// At some point we might even add proper locking so we get real updates atomically instead
  		// of whatever jumble of races the below might cause over a couple of frames
