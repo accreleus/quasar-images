@@ -24,13 +24,14 @@ ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
 # then convar-env-override, then gbm-scanout, which needs the env override for its
 # switch. libgbm-devel makes HAVE_GBM=1; the build fails if it did not, rather
 # than shipping a switch that does nothing.
+# Xwayland-devel is wlroots' (a gamescope subproject) own build dependency.
 # Builds from ${APP_IMAGE}, not the Steam runtime: the builder only needs the
 # Fedora toolchain + `dnf builddep gamescope`, so keeping it on quasar-app
 # leaves it independent of the runtime layer (and its build cache).
 FROM ${APP_IMAGE} AS gamescope-builder
 
 RUN dnf --setopt=install_weak_deps=False -y install \
-      git meson ninja-build gcc gcc-c++ mesa-libgbm-devel \
+      git meson ninja-build gcc gcc-c++ xorg-x11-server-Xwayland-devel mesa-libgbm-devel \
     && (dnf -y install dnf5-plugins || dnf -y install dnf-plugins-core) \
     && (dnf builddep -y gamescope || dnf builddep -y --enablerepo="*source*" gamescope) \
     && dnf clean all && rm -rf /var/cache/dnf
