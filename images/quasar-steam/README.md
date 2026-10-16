@@ -19,12 +19,19 @@ Gamescope this is driven entirely by X11 atoms, not process ancestry:
   (appID `769`) and never hands focus to launched games — the Play button just
   turns into Resume while the screen stays on Steam. This was the original defect.
 
-The launcher (`quasar-steam`) selects one of two **validated** configurations via
-`QUASAR_STEAM_UI_MODE`:
+The launcher (`quasar-steam`) bakes in no UI-mode default. The plain Steam app's
+UI mode comes from the catalog's Steam runtime preset, which carries
+`STEAM_STARTUP_FLAGS=-bigpicture`; a derived game tile overrides that env with
+its own flags, so quick launch runs with no Big Picture. With
+`STEAM_STARTUP_FLAGS` and `QUASAR_STEAM_UI_MODE` both unset, Steam starts with
+no UI-mode flag, and the launcher logs a warning (a derived tile's `-applaunch`
+flags do not warn). `QUASAR_STEAM_UI_MODE` still selects one of two
+**validated** configurations as an explicit opt-in:
 
 | `QUASAR_STEAM_UI_MODE` | Steam flags | `STEAM_MULTIPLE_XWAYLANDS` | Notes |
 |---|---|---|---|
-| `bigpicture` (default) | `-bigpicture` | off | Legacy Big Picture. Does not pin the baselayer; games come forward via the default focus. games-on-whales-validated, robust default. |
+| *(unset)* | *(none)* | off | No UI-mode flag. This is what a derived game tile relies on; for the plain Steam app it means an admin-edited preset dropped the flag (the launcher warns). |
+| `bigpicture` | `-bigpicture` | off | Legacy Big Picture. Does not pin the baselayer; games come forward via the default focus. games-on-whales-validated. |
 | `gamepadui` | `-gamepadui -steamos3 -steampal -steamdeck` | on | Modern Deck UI. Full SteamOS session unit (matches Valve's gamescope-session). Never shipped partially. |
 
 `STEAM_STARTUP_FLAGS` overrides the computed flags verbatim (advanced use).

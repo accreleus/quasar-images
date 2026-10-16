@@ -66,8 +66,18 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   grep -q "QUASAR_STEAM_SHUTDOWN_TIMEOUT:-8" "$steam"
   grep -q "QUASAR_STEAM_GAMESCOPE:-1" "$steam"
 
-  # Default UI mode is the games-on-whales-validated bigpicture path.
-  grep -q "QUASAR_STEAM_UI_MODE:-bigpicture" "$steam"
+  # No baked UI-mode default: the UI mode comes from the catalog Steam
+  # runtime preset (STEAM_STARTUP_FLAGS=-bigpicture); QUASAR_STEAM_UI_MODE
+  # only selects a mode as an explicit opt-in.
+  grep -q 'ui_mode="${QUASAR_STEAM_UI_MODE:-}"' "$steam"
+  if grep -q "QUASAR_STEAM_UI_MODE:-bigpicture" "$steam"; then
+    echo "FAIL: launcher bakes in a bigpicture UI-mode default" >&2
+    exit 1
+  fi
+  if grep -q 'STEAM_STARTUP_FLAGS:--bigpicture' "$client"; then
+    echo "FAIL: steam-wrapper bakes in a bigpicture fallback" >&2
+    exit 1
+  fi
 
   # Game-foreground invariant: -gamepadui must never appear without the full
   # SteamOS deck-session unit (a partial gamepadui config pins focus to the UI).
