@@ -466,9 +466,18 @@ fi
 # helper and sets QUASAR_LAUNCH_HELPER. It reads gamescope's DISPLAY, so it starts after
 # the ready handshake, and before Steam so it sees the launch from the start. Never
 # waited on: nothing here depends on it.
-if [[ -n "${QUASAR_LAUNCH_HELPER:-}" && -x "$QUASAR_LAUNCH_HELPER" ]]; then
-  "$QUASAR_LAUNCH_HELPER" &
-  log "launch helper started (pid $!)"
+if [[ -n "${QUASAR_LAUNCH_HELPER:-}" && -f "$QUASAR_LAUNCH_HELPER" ]]; then
+  launch_helper="$QUASAR_LAUNCH_HELPER"
+  # A host whose /run is noexec (Debian and Ubuntu mount it so) passes the mount on
+  # noexec: run a copy from the private runtime dir, on the home Steam itself runs from.
+  if [[ ! -x "$launch_helper" ]]; then
+    launch_helper="$XDG_RUNTIME_DIR/quasar-launch-helper"
+    cp "$QUASAR_LAUNCH_HELPER" "$launch_helper" && chmod 0755 "$launch_helper" || launch_helper=""
+  fi
+  if [[ -n "$launch_helper" ]]; then
+    "$launch_helper" &
+    log "launch helper started (pid $!)"
+  fi
 fi
 
 if command -v ibus-daemon >/dev/null 2>&1; then

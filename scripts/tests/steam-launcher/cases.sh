@@ -143,6 +143,23 @@ expect_env helper.env launch-helper "QUASAR_LAUNCH_SOCKET=/run/quasar-launch/lau
 expect_argv launch-helper "-e -b -R <ready-fifo> -T <stats-fifo> -W 1920 -H 1080 -r 60"
 expect_env client.env launch-helper "DISPLAY=:7"
 
+# 1a''. A mount that is not executable (a host whose /run is noexec): the launcher
+#       runs a private copy, with the same environment.
+cp "$T/stubs/launch-helper" /tmp/launch-helper-noexec && chmod 0644 /tmp/launch-helper-noexec
+run_launcher launch-helper-noexec \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
+  QUASAR_LAUNCH_HELPER=/tmp/launch-helper-noexec \
+  QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock
+for _ in $(seq 1 20); do [[ -e "$log/helper.env" ]] && break; sleep 0.1; done
+expect_env helper.env launch-helper-noexec "DISPLAY=:7"
+expect_env helper.env launch-helper-noexec "QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock"
+if [[ -x "$log/home/.runtime/quasar-launch-helper" ]]; then
+  pass "launch-helper-noexec: ran the copy in the private runtime dir"
+else
+  fail "launch-helper-noexec: no executable copy in $log/home/.runtime"
+fi
+
 # 1a'. A helper path that is not there, or a helper that dies at once, changes
 #      nothing: Steam still starts and the launcher still exits 0.
 run_launcher launch-helper-missing \
