@@ -115,10 +115,12 @@ and gamescope's own `Overriding from environment variable: gamescope.convars.drm
 ## Launch helper (quasar#731)
 
 For a Steam game tile, Quasar's node agent mounts its report-only launch helper and
-sets `QUASAR_LAUNCH_HELPER` and `QUASAR_LAUNCH_SOCKET`. The launcher starts the
-helper once gamescope reports ready (the helper reads gamescope's `DISPLAY`) and
-before Steam, in the background, and never waits on it. With the variable unset,
-or naming a path that is not executable, nothing changes.
+sets `QUASAR_LAUNCH_HELPER` and `QUASAR_LAUNCH_SOCKET`. Once gamescope reports ready
+the launcher starts the helper, and Steam waits for the helper's `ready` line, at most
+2 s: the helper decides on its first look where to start reading Steam's log. A helper
+that dies is started again, at most 3 times a minute. On a host that mounts `/run`
+noexec the mount cannot be executed, so the launcher runs a copy from its private
+runtime directory. With the variable unset, nothing changes.
 
 ## Host / launch requirements
 

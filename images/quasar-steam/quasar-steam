@@ -477,21 +477,56 @@ fi
 # helper and sets QUASAR_LAUNCH_HELPER. It reads gamescope's DISPLAY, so it starts after
 # the ready handshake. Steam waits for its "ready" line, at most 2 s: the helper decides
 # on its first look where to start reading Steam's log, which the home keeps from the
-# last session. A helper that exits or fails answers at once; nothing else waits on it.
+# last session. A helper that exits or fails answers at once.
+#
+# The helper is kept running: one that dies (a crash, or the game killing it) is started
+# again, at most 3 times a minute. A clean exit means it has nothing to watch, and once
+# the launcher is gone the container is ending. Only the first start gets this
+# function's stdout, the ready pipe, so a helper that exits gives the launcher EOF.
+supervise_launch_helper() {
+  local helper="$1" pid rc window=$SECONDS starts=0
+  "$helper" &
+  pid=$!
+  exec >/dev/null
+  while :; do
+    rc=0
+    wait "$pid" || rc=$?
+    (( rc != 0 )) && kill -0 "$$" 2>/dev/null || return 0
+    (( SECONDS - window >= 60 )) && { window=$SECONDS; starts=0; }
+    if (( ++starts > 3 )); then
+      log "WARN: launch helper exited $rc, 3 restarts this minute; next start in $(( 60 - SECONDS + window ))s"
+      sleep "$(( 60 - SECONDS + window ))"
+      kill -0 "$$" 2>/dev/null || return 0
+      window=$SECONDS
+      starts=1
+    fi
+    log "launch helper exited $rc; restarting it"
+    "$helper" &
+    pid=$!
+  done
+}
+
 if [[ -n "${QUASAR_LAUNCH_HELPER:-}" && -f "$QUASAR_LAUNCH_HELPER" ]]; then
   launch_helper="$QUASAR_LAUNCH_HELPER"
-  # A host whose /run is noexec (Debian and Ubuntu mount it so) passes the mount on
-  # noexec: run a copy from the private runtime dir, on the home Steam itself runs from.
+  # A host that mounts /run noexec passes the mount on noexec: run a copy from the private
+  # runtime dir, on the home Steam itself runs from. The copy is a fresh temp file renamed
+  # into place, so whatever an earlier session left at that path (a FIFO, a symlink) is
+  # never opened or followed.
   if [[ ! -x "$launch_helper" ]]; then
     launch_helper="$XDG_RUNTIME_DIR/quasar-launch-helper"
-    cp "$QUASAR_LAUNCH_HELPER" "$launch_helper" && chmod 0755 "$launch_helper" || launch_helper=""
+    helper_tmp="$(mktemp "$launch_helper.XXXXXX")" \
+      && cp "$QUASAR_LAUNCH_HELPER" "$helper_tmp" && chmod 0755 "$helper_tmp" \
+      && mv -fT "$helper_tmp" "$launch_helper" \
+      || { rm -f "${helper_tmp:-}"; launch_helper=""; }
   fi
   if [[ -n "$launch_helper" ]]; then
-    exec {helper_ready}< <(exec "$launch_helper")
-    if read -r -t 2 -u "$helper_ready" _; then
-      log "launch helper ready (pid $!)"
+    exec {helper_ready}< <(supervise_launch_helper "$launch_helper")
+    helper_line=""
+    read -r -t 2 -u "$helper_ready" helper_line || true
+    if [[ "$helper_line" == ready ]]; then
+      log "launch helper ready"
     else
-      log "WARN: launch helper (pid $!) not ready within 2s; starting Steam anyway"
+      log "WARN: launch helper not ready within 2s; starting Steam anyway"
     fi
     exec {helper_ready}<&-
   fi

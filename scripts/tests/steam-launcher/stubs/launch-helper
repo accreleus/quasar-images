@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Test stub for the node agent's launch helper: records the environment the launcher
-# started it with, then answers the launcher's ready handshake on stdout, as the helper
-# does after its first poll. STUB_HELPER_DELAY=<seconds> answers late; STUB_HELPER_HANG=1
-# never answers.
+# Test stub for the node agent's launch helper: counts its starts, records the
+# environment the launcher gave it, then answers the launcher's ready handshake on
+# stdout, as the helper does after its first poll. STUB_HELPER_DELAY=<seconds> answers
+# late; STUB_HELPER_HANG=1 never answers; STUB_HELPER_EXIT=<rc> exits rc after
+# answering (the default is 0, nothing to watch); STUB_HELPER_EXIT_FIRST=<rc> does so on
+# the first start only.
 set -euo pipefail
 log="${STUB_LOG:?STUB_LOG must name the case log directory}"
+echo start >> "$log/helper.starts"
 for v in DISPLAY STEAM_STARTUP_FLAGS QUASAR_LAUNCH_SOCKET; do
   if [[ -v $v ]]; then printf '%s=%s\n' "$v" "${!v}"; else printf '%s<unset>\n' "$v"; fi
 done > "$log/helper.env.tmp"
@@ -13,3 +16,7 @@ mv "$log/helper.env.tmp" "$log/helper.env"
 sleep "${STUB_HELPER_DELAY:-0}"
 : > "$log/helper.ready"
 echo ready
+if [[ -n "${STUB_HELPER_EXIT_FIRST:-}" && "$(wc -l < "$log/helper.starts")" -eq 1 ]]; then
+  exit "$STUB_HELPER_EXIT_FIRST"
+fi
+exit "${STUB_HELPER_EXIT:-0}"
