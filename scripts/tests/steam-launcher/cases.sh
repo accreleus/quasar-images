@@ -263,10 +263,25 @@ run_launcher preset-bigpicture STEAM_STARTUP_FLAGS=-bigpicture
 expect_env client.env preset-bigpicture "STEAM_STARTUP_FLAGS=-bigpicture"
 expect_no_launcher_log preset-bigpicture "$NO_UI_WARNING"
 
-# STEAM_STARTUP_FLAGS overrides a QUASAR_STEAM_UI_MODE opt-in wholesale.
+# STEAM_STARTUP_FLAGS overrides a QUASAR_STEAM_UI_MODE opt-in wholesale, and
+# the STEAM_MULTIPLE_XWAYLANDS default follows the effective flags, so this
+# is not a partial gamepadui unit.
 run_launcher preset-overrides-mode STEAM_STARTUP_FLAGS=-bigpicture QUASAR_STEAM_UI_MODE=gamepadui
 expect_env client.env preset-overrides-mode "STEAM_STARTUP_FLAGS=-bigpicture"
+expect_launcher_log preset-overrides-mode "multi_xwayland=0"
 expect_no_launcher_log preset-overrides-mode "$NO_UI_WARNING"
+
+# The gamepadui flag set carried as STEAM_STARTUP_FLAGS (how an app opts in
+# when its preset already carries flags) gets Xwayland isolation.
+run_launcher flags-gamepadui STEAM_STARTUP_FLAGS="-gamepadui -steamos3 -steampal -steamdeck"
+expect_env client.env flags-gamepadui "STEAM_STARTUP_FLAGS=-gamepadui -steamos3 -steampal -steamdeck"
+expect_launcher_log flags-gamepadui "multi_xwayland=1"
+expect_no_launcher_log flags-gamepadui "$NO_UI_WARNING"
+
+# -tenfoot is a UI-mode flag (legacy Big Picture switch): no warning.
+run_launcher flags-tenfoot STEAM_STARTUP_FLAGS=-tenfoot
+expect_env client.env flags-tenfoot "STEAM_STARTUP_FLAGS=-tenfoot"
+expect_no_launcher_log flags-tenfoot "$NO_UI_WARNING"
 
 # gamepadui opt-in unchanged: the full validated flag set as one unit, with
 # per-game Xwayland isolation on.

@@ -22,20 +22,26 @@ Gamescope this is driven entirely by X11 atoms, not process ancestry:
 The launcher (`quasar-steam`) bakes in no UI-mode default. The plain Steam app's
 UI mode comes from the catalog's Steam runtime preset, which carries
 `STEAM_STARTUP_FLAGS=-bigpicture`; a derived game tile overrides that env with
-its own flags, so quick launch runs with no Big Picture. With
-`STEAM_STARTUP_FLAGS` and `QUASAR_STEAM_UI_MODE` both unset, Steam starts with
-no UI-mode flag, and the launcher logs a warning (a derived tile's `-applaunch`
-flags do not warn). `QUASAR_STEAM_UI_MODE` still selects one of two
-**validated** configurations as an explicit opt-in:
+its own flags, and once #728 drops `-bigpicture` from the tile flags, quick
+launch will run with no Big Picture. With `STEAM_STARTUP_FLAGS` and
+`QUASAR_STEAM_UI_MODE` both unset, Steam starts with no UI-mode flag, and the
+launcher logs a warning (a derived tile's `-applaunch` flags do not warn).
+`QUASAR_STEAM_UI_MODE` still selects one of two **validated** configurations as
+an explicit opt-in. To opt in to gamepadui on an app whose preset already
+carries `STEAM_STARTUP_FLAGS`, set the full gamepadui flag set as
+`STEAM_STARTUP_FLAGS` on the app — the preset's flags win over the mode, so
+`QUASAR_STEAM_UI_MODE=gamepadui` alone would otherwise leave a partial unit.
 
 | `QUASAR_STEAM_UI_MODE` | Steam flags | `STEAM_MULTIPLE_XWAYLANDS` | Notes |
 |---|---|---|---|
-| *(unset)* | *(none)* | off | No UI-mode flag. This is what a derived game tile relies on; for the plain Steam app it means an admin-edited preset dropped the flag (the launcher warns). |
+| *(unset)* | *(none)* | off | No UI-mode flag. For the plain Steam app it means the app uses a runtime preset the admin made themselves, without the flag (the launcher warns). |
 | `bigpicture` | `-bigpicture` | off | Legacy Big Picture. Does not pin the baselayer; games come forward via the default focus. games-on-whales-validated. |
 | `gamepadui` | `-gamepadui -steamos3 -steampal -steamdeck` | on | Modern Deck UI. Full SteamOS session unit (matches Valve's gamescope-session). Never shipped partially. |
 
 `STEAM_STARTUP_FLAGS` overrides the computed flags verbatim (advanced use).
-`QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0`/`1`) overrides the per-mode default.
+The `STEAM_MULTIPLE_XWAYLANDS` default follows the effective flags — on only
+when they contain `-gamepadui`; `QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0`/`1`)
+overrides that default.
 Set `QUASAR_STEAM_GAMESCOPE=0` to run Steam without nested Gamescope.
 
 ## Display mode

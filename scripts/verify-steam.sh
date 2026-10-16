@@ -69,7 +69,10 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   # No baked UI-mode default: the UI mode comes from the catalog Steam
   # runtime preset (STEAM_STARTUP_FLAGS=-bigpicture); QUASAR_STEAM_UI_MODE
   # only selects a mode as an explicit opt-in.
-  grep -q 'ui_mode="${QUASAR_STEAM_UI_MODE:-}"' "$steam"
+  if ! grep -qF '"'"'ui_mode="${QUASAR_STEAM_UI_MODE:-}"'"'"' "$steam"; then
+    echo "FAIL: launcher does not leave QUASAR_STEAM_UI_MODE unset by default (baked UI-mode default)" >&2
+    exit 1
+  fi
   if grep -q "QUASAR_STEAM_UI_MODE:-bigpicture" "$steam"; then
     echo "FAIL: launcher bakes in a bigpicture UI-mode default" >&2
     exit 1

@@ -52,39 +52,23 @@ export GTK_IM_MODULE="${GTK_IM_MODULE:-Steam}"
 export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-dxgi=n}"
 
 # --- Steam UI mode & the game-foreground handoff -----------------------------
-# In nested Gamescope, pressing "Play" only brings the game to the foreground if
-# Gamescope can focus the game's window. Gamescope's Steam-integration focus is
-# X11-atom driven (STEAM_GAME per-window appID + GAMESCOPECTRL_BASELAYER_APPID on
-# the root window), and is independent of whether Steam is a child of Gamescope
-# (games-on-whales and Valve's own gamescope-session both launch Steam as a
-# sibling X client).
-#
-# The UI mode now comes from the catalog's Steam runtime preset, not from this
-# image: the preset carries STEAM_STARTUP_FLAGS=-bigpicture for the plain Steam
-# app, and a derived game tile overrides that env with its own flags (including
-# -applaunch <appid>), so quick launch runs with no Big Picture at all. This
-# launcher therefore bakes in no UI-mode default: with STEAM_STARTUP_FLAGS and
-# QUASAR_STEAM_UI_MODE both unset, Steam starts with no UI-mode flag.
-#
-# QUASAR_STEAM_UI_MODE still selects a validated configuration as an explicit
-# opt-in:
-#
-#   bigpicture  - legacy Big Picture, `-bigpicture`. Steam does NOT pin
-#               GAMESCOPECTRL_BASELAYER_APPID, so Gamescope's default focus raises
-#               the newest STEAM_GAME-tagged window (the launched game). This is
-#               the games-on-whales-validated path.
-#   gamepadui   - modern Deck UI. Requires Steam to run in a full SteamOS session
-#               (`-gamepadui -steamos3 -steampal -steamdeck` + STEAM_MULTIPLE_XWAYLANDS=1)
-#               so Steam tags game windows and manages the baselayer handoff.
-#               A PARTIAL gamepadui config (e.g. `-gamepadui` alone) pins focus to
-#               the Steam UI forever and never releases it to launched games -
-#               this is the defect this image fixes, so the flags ship as a
-#               validated unit, never partially.
-#
-# STEAM_STARTUP_FLAGS overrides the computed flags verbatim (advanced use).
+# Gamescope's Steam-integration focus is X11-atom driven (STEAM_GAME per-window
+# appID + GAMESCOPECTRL_BASELAYER_APPID on the root), independent of whether
+# Steam is a child of Gamescope. This image carries no UI-mode default: the
+# catalog's Steam runtime preset sets STEAM_STARTUP_FLAGS=-bigpicture for the
+# plain app, and a derived tile's flags replace that env (once #728 drops
+# -bigpicture from the tile flags, quick launch runs with no Big Picture). With
+# STEAM_STARTUP_FLAGS and QUASAR_STEAM_UI_MODE both unset, Steam gets no
+# UI-mode flag. QUASAR_STEAM_UI_MODE is an explicit opt-in to a validated unit:
+#   bigpicture  `-bigpicture` — Steam does not pin the baselayer, so Gamescope's
+#               default focus raises the newest STEAM_GAME window.
+#   gamepadui   `-gamepadui -steamos3 -steampal -steamdeck` — Steam tags game
+#               windows and manages the baselayer handoff. A partial gamepadui
+#               config pins focus to the Steam UI forever, so the flags ship as
+#               a unit, never partially.
+# STEAM_STARTUP_FLAGS overrides the mode flags verbatim.
 ui_mode="${QUASAR_STEAM_UI_MODE:-}"
 default_flags=""
-multi_xwayland_default=0
 case "$ui_mode" in
   "")
     ;;
@@ -93,7 +77,6 @@ case "$ui_mode" in
     ;;
   gamepadui)
     default_flags="-gamepadui -steamos3 -steampal -steamdeck"
-    multi_xwayland_default=1
     ;;
   *)
     log "unknown QUASAR_STEAM_UI_MODE='$ui_mode'; starting Steam with no UI-mode flag"
@@ -101,18 +84,20 @@ case "$ui_mode" in
 esac
 export STEAM_STARTUP_FLAGS="${STEAM_STARTUP_FLAGS:-$default_flags}"
 
-# No UI-mode flag and no game to launch: this is the plain Steam app starting
-# without a UI mode, most likely because an admin edited the Steam runtime
-# preset and it no longer carries the flag the catalog preset ships.
 if [[ " $STEAM_STARTUP_FLAGS " != *" -bigpicture "* \
    && " $STEAM_STARTUP_FLAGS " != *" -gamepadui "* \
+   && " $STEAM_STARTUP_FLAGS " != *" -tenfoot "* \
    && " $STEAM_STARTUP_FLAGS " != *" -applaunch "* ]]; then
-  log "WARNING: Steam is starting with no UI mode (no -bigpicture/-gamepadui and no -applaunch); the plain Steam app probably has an admin-edited Steam preset without a UI-mode flag — set STEAM_STARTUP_FLAGS=-bigpicture in that preset to restore Big Picture."
+  log "WARNING: Steam is starting with no UI mode (no -bigpicture/-gamepadui/-tenfoot and no -applaunch); if this is the plain Steam app, its runtime preset needs STEAM_STARTUP_FLAGS=-bigpicture."
 fi
 
-# Per-game Xwayland isolation is part of the validated gamepadui unit and stays
-# off for bigpicture. Gamescope composites every Xwayland into one output, so the
-# node-agent's compositor capture is unaffected either way.
+# Per-game Xwayland isolation follows the effective flags: on only when they
+# contain -gamepadui. Gamescope composites every Xwayland into one output, so
+# the node-agent's compositor capture is unaffected either way.
+multi_xwayland_default=0
+if [[ " $STEAM_STARTUP_FLAGS " == *" -gamepadui "* ]]; then
+  multi_xwayland_default=1
+fi
 if [[ "${QUASAR_STEAM_MULTIPLE_XWAYLANDS:-$multi_xwayland_default}" == "1" ]]; then
   export STEAM_MULTIPLE_XWAYLANDS=1
 fi
