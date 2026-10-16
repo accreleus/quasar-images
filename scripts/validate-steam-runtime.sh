@@ -25,8 +25,8 @@ run_mode() {
   echo
 }
 
-echo "### A. bigpicture (default) — expect -bigpicture, multi-xwayland unset"
-run_mode "default(bigpicture)"
+echo "### A. no UI mode (nothing set) — expect no UI-mode flag, multi-xwayland unset"
+run_mode "default(no-ui-mode)"
 
 echo "### B. gamepadui — expect full deck unit + STEAM_MULTIPLE_XWAYLANDS=1"
 run_mode "gamepadui" -e QUASAR_STEAM_UI_MODE=gamepadui

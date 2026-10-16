@@ -24,7 +24,8 @@ else
 fi
 
 cd "$steam_dir"
-# STEAM_STARTUP_FLAGS is normally computed by quasar-steam; the -bigpicture
-# fallback keeps a direct invocation of this wrapper on the game-foreground path.
-read -r -a steam_args <<< "${STEAM_STARTUP_FLAGS:--bigpicture}"
+# STEAM_STARTUP_FLAGS is normally computed by quasar-steam (from the catalog's
+# Steam runtime preset or an explicit QUASAR_STEAM_UI_MODE opt-in). There is no
+# fallback here: unset or empty means Steam gets no UI-mode flag.
+read -r -a steam_args <<< "${STEAM_STARTUP_FLAGS:-}"
 exec ./steam.sh "${steam_args[@]}" "$@"

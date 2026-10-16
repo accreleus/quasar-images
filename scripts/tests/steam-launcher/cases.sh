@@ -15,6 +15,9 @@
 #     leaks in.
 #   * the seatd and device-group hooks act only in direct mode, and no init
 #     hook changes anything under /dev/input then (it is the host's directory).
+#   * the Steam UI mode comes from the runtime preset (STEAM_STARTUP_FLAGS),
+#     never from a baked-in image default; QUASAR_STEAM_UI_MODE is only an
+#     explicit opt-in, and a plain launch with no UI-mode flag warns.
 set -Eeuo pipefail
 trap 'printf "FAIL: cases.sh line %s exited %s\n      %s\n" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
 
@@ -95,6 +98,26 @@ expect_env() {
 
 drm_info_called() { [[ -s "$log/drm_info.calls" ]]; }
 
+# expect_launcher_log <name> <substring> / expect_no_launcher_log <name> <substring>
+expect_launcher_log() {
+  local name="$1" needle="$2"
+  if grep -qF -- "$needle" "$log/launcher.out"; then
+    pass "$name: launcher logged '$needle'"
+  else
+    fail "$name: launcher should have logged '$needle'; it logged: $(paste -sd' ' "$log/launcher.out")"
+  fi
+}
+expect_no_launcher_log() {
+  local name="$1" needle="$2"
+  if grep -qF -- "$needle" "$log/launcher.out"; then
+    fail "$name: launcher should not have logged '$needle'"
+  else
+    pass "$name: launcher did not log '$needle'"
+  fi
+}
+
+NO_UI_WARNING="Steam is starting with no UI mode"
+
 # 1. Nested: today's command line, byte for byte, and no direct-display state.
 run_launcher nested \
   XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
@@ -107,6 +130,11 @@ expect_env gamescope.env nested "gamescope_drm_gbm_scanout<unset>"
 expect_env gamescope.env nested "LIBSEAT_BACKEND<unset>"
 expect_env client.env nested "DISPLAY=:7"
 expect_env client.env nested "WAYLAND_DISPLAY<unset>"
+# No baked UI-mode default: with STEAM_STARTUP_FLAGS and QUASAR_STEAM_UI_MODE
+# both unset, Steam gets no UI-mode flag, and the plain-app warning fires.
+expect_env client.env nested "STEAM_STARTUP_FLAGS="
+expect_launcher_log nested "$NO_UI_WARNING"
+expect_launcher_log nested "STEAM_STARTUP_FLAGS=-bigpicture"
 if drm_info_called; then fail "nested: drm_info must not be consulted"; else pass "nested: drm_info not consulted"; fi
 # Nested audio is the agent's: its PULSE_* reach Steam and no daemon starts.
 expect_env client.env nested "PULSE_SERVER=unix:/run/quasar-pulse/native"
@@ -207,7 +235,7 @@ expect_env gamescope.env nested-not-one "gamescope_drm_gbm_scanout<unset>"
 #    mode is 60 Hz and whose best mode at that size is 240 Hz. The agent may
 #    still hand over a parent socket and a stream mode; both must be ignored.
 run_launcher direct-nvidia \
-  QUASAR_DIRECT_DISPLAY=1 STUB_DRM_INFO="$T/fixtures/nvidia-4k240.json" \
+  QUASAR_DIRECT_DISPLAY=1 STEAM_STARTUP_FLAGS=-bigpicture STUB_DRM_INFO="$T/fixtures/nvidia-4k240.json" \
   XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 DISPLAY=:99 \
   QUASAR_STREAM_WIDTH=1920 QUASAR_STREAM_HEIGHT=1080 QUASAR_STREAM_FPS=60 \
   PULSE_SERVER=unix:/run/quasar-pulse/native PULSE_SINK=quasar_output \
@@ -221,6 +249,7 @@ expect_env gamescope.env direct-nvidia "WLR_XWAYLAND<unset>"
 expect_env client.env direct-nvidia "DISPLAY=:7"
 expect_env client.env direct-nvidia "WAYLAND_DISPLAY<unset>"
 expect_env client.env direct-nvidia "STEAM_STARTUP_FLAGS=-bigpicture"
+expect_no_launcher_log direct-nvidia "$NO_UI_WARNING"
 # Direct audio: PipeWire first, then WirePlumber and the Pulse shim, all with the
 # launcher's private runtime dir and in the same session bus Steam then gets;
 # the agent's PULSE_* never reach Steam.
@@ -301,6 +330,101 @@ expect_env gamescope.env direct-gbm-off "gamescope_drm_gbm_scanout<unset>"
 run_launcher direct-gamescope-off \
   QUASAR_DIRECT_DISPLAY=1 STUB_DRM_INFO="$T/fixtures/amd-1440p165.json" QUASAR_STEAM_GAMESCOPE=0
 expect_argv direct-gamescope-off "--backend drm -e -R <ready-fifo> -T <stats-fifo> -W 2560 -H 1440 -r 165"
+
+# --- Steam UI-mode cases -------------------------------------------------------
+# The preset's value is honoured verbatim (this is how the plain Steam app
+# keeps Big Picture now that the image bakes in no default).
+run_launcher preset-bigpicture STEAM_STARTUP_FLAGS=-bigpicture
+expect_env client.env preset-bigpicture "STEAM_STARTUP_FLAGS=-bigpicture"
+expect_no_launcher_log preset-bigpicture "$NO_UI_WARNING"
+
+# STEAM_STARTUP_FLAGS overrides a QUASAR_STEAM_UI_MODE opt-in wholesale, and
+# the STEAM_MULTIPLE_XWAYLANDS default follows the effective flags, so this
+# is not a partial gamepadui unit.
+run_launcher preset-overrides-mode STEAM_STARTUP_FLAGS=-bigpicture QUASAR_STEAM_UI_MODE=gamepadui
+expect_env client.env preset-overrides-mode "STEAM_STARTUP_FLAGS=-bigpicture"
+expect_launcher_log preset-overrides-mode "QUASAR_STEAM_UI_MODE=gamepadui ignored: STEAM_STARTUP_FLAGS is set"
+expect_launcher_log preset-overrides-mode "multi_xwayland=0"
+expect_no_launcher_log preset-overrides-mode "$NO_UI_WARNING"
+
+# The gamepadui flag set carried as STEAM_STARTUP_FLAGS (how an app opts in
+# when its preset already carries flags) gets Xwayland isolation.
+run_launcher flags-gamepadui STEAM_STARTUP_FLAGS="-gamepadui -steamos3 -steampal -steamdeck"
+expect_env client.env flags-gamepadui "STEAM_STARTUP_FLAGS=-gamepadui -steamos3 -steampal -steamdeck"
+expect_launcher_log flags-gamepadui "multi_xwayland=1"
+expect_no_launcher_log flags-gamepadui "$NO_UI_WARNING"
+
+# A partial -gamepadui (not the full SteamOS unit) gets no Xwayland isolation.
+run_launcher flags-gamepadui-partial STEAM_STARTUP_FLAGS="-gamepadui"
+expect_env client.env flags-gamepadui-partial "STEAM_STARTUP_FLAGS=-gamepadui"
+expect_launcher_log flags-gamepadui-partial "multi_xwayland=0"
+expect_no_launcher_log flags-gamepadui-partial "$NO_UI_WARNING"
+
+# -tenfoot is a UI-mode flag (legacy Big Picture switch): no warning.
+run_launcher flags-tenfoot STEAM_STARTUP_FLAGS=-tenfoot
+expect_env client.env flags-tenfoot "STEAM_STARTUP_FLAGS=-tenfoot"
+expect_no_launcher_log flags-tenfoot "$NO_UI_WARNING"
+
+# gamepadui opt-in unchanged: the full validated flag set as one unit, with
+# per-game Xwayland isolation on.
+run_launcher mode-gamepadui QUASAR_STEAM_UI_MODE=gamepadui
+expect_env client.env mode-gamepadui "STEAM_STARTUP_FLAGS=-gamepadui -steamos3 -steampal -steamdeck"
+expect_launcher_log mode-gamepadui "multi_xwayland=1"
+expect_no_launcher_log mode-gamepadui "$NO_UI_WARNING"
+
+# bigpicture as an explicit mode still gives -bigpicture.
+run_launcher mode-bigpicture QUASAR_STEAM_UI_MODE=bigpicture
+expect_env client.env mode-bigpicture "STEAM_STARTUP_FLAGS=-bigpicture"
+expect_no_launcher_log mode-bigpicture "$NO_UI_WARNING"
+
+# An unknown mode logs and gets no UI flag (and so also warns: no UI mode and
+# no game to launch).
+run_launcher mode-unknown QUASAR_STEAM_UI_MODE=bogus
+expect_env client.env mode-unknown "STEAM_STARTUP_FLAGS="
+expect_launcher_log mode-unknown "unknown QUASAR_STEAM_UI_MODE='bogus'; starting Steam with no UI-mode flag"
+expect_launcher_log mode-unknown "$NO_UI_WARNING"
+
+# A derived tile (-applaunch <id>) gets no warning: it is not the plain app.
+run_launcher derived-applaunch STEAM_STARTUP_FLAGS="-applaunch 1234"
+expect_env client.env derived-applaunch "STEAM_STARTUP_FLAGS=-applaunch 1234"
+expect_no_launcher_log derived-applaunch "$NO_UI_WARNING"
+
+# steam-wrapper with STEAM_STARTUP_FLAGS unset passes no argument to steam.sh
+# (no -bigpicture fallback, and no empty argument either). The wrapper is
+# installed as quasar-steam-client; a fake steam.sh records what it received.
+run_wrapper() {
+  local name="$1"; shift
+  log="/tmp/cases/$name"
+  rm -rf "$log" && mkdir -p "$log/home/.local/share/Steam"
+  cat > "$log/home/.local/share/Steam/steam.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'argc=%s\n' "$#" > "$STUB_LOG/wrapper.args"
+printf '%s\n' "$@" >> "$STUB_LOG/wrapper.args"
+EOF
+  chmod 0755 "$log/home/.local/share/Steam/steam.sh"
+  local rc=0
+  env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$log/home" STUB_LOG="$log" \
+    "$@" timeout 30 /usr/local/bin/quasar-steam-client >"$log/wrapper.out" 2>&1 || rc=$?
+  if [[ "$rc" != 0 ]]; then
+    fail "$name: steam-wrapper exited $rc"
+    sed 's/^/      /' "$log/wrapper.out" >&2
+  fi
+  return 0
+}
+
+run_wrapper wrapper-unset
+if [[ "$(cat "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]]; then
+  pass "wrapper-unset: steam.sh received no arguments"
+else
+  fail "wrapper-unset: steam.sh received: $(paste -sd' ' "$log/wrapper.args" 2>/dev/null)"
+fi
+
+run_wrapper wrapper-bigpicture STEAM_STARTUP_FLAGS=-bigpicture
+if [[ "$(paste -sd' ' "$log/wrapper.args" 2>/dev/null)" == "argc=1 -bigpicture" ]]; then
+  pass "wrapper-bigpicture: steam.sh received -bigpicture"
+else
+  fail "wrapper-bigpicture: steam.sh received: $(paste -sd' ' "$log/wrapper.args" 2>/dev/null)"
+fi
 
 # --- init hook cases -----------------------------------------------------------
 
