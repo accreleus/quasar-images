@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Test stub for the node agent's launch helper: records the environment the launcher
+# started it with.
+set -euo pipefail
+log="${STUB_LOG:?STUB_LOG must name the case log directory}"
+for v in DISPLAY STEAM_STARTUP_FLAGS QUASAR_LAUNCH_SOCKET; do
+  if [[ -v $v ]]; then printf '%s=%s\n' "$v" "${!v}"; else printf '%s<unset>\n' "$v"; fi
+done > "$log/helper.env.tmp"
+mv "$log/helper.env.tmp" "$log/helper.env"

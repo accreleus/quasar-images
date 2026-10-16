@@ -462,6 +462,15 @@ if [[ "$shutting_down" == "1" ]]; then
   exit 143
 fi
 
+# quasar#731: for a derived Steam game tile the node agent mounts its report-only launch
+# helper and sets QUASAR_LAUNCH_HELPER. It reads gamescope's DISPLAY, so it starts after
+# the ready handshake, and before Steam so it sees the launch from the start. Never
+# waited on: nothing here depends on it.
+if [[ -n "${QUASAR_LAUNCH_HELPER:-}" && -x "$QUASAR_LAUNCH_HELPER" ]]; then
+  "$QUASAR_LAUNCH_HELPER" &
+  log "launch helper started (pid $!)"
+fi
+
 if command -v ibus-daemon >/dev/null 2>&1; then
   ibus-daemon -d -r --panel=disable --emoji-extension=disable || log "WARN: ibus-daemon failed to start"
 fi

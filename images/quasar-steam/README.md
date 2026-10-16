@@ -99,6 +99,14 @@ How to know it worked: the log has `seatd ready: /run/seatd.sock`,
 `starting Gamescope on the display (direct; ... 3840x2160@240 ... gbm_scanout=1 ...)`,
 and gamescope's own `Overriding from environment variable: gamescope.convars.drm_gbm_scanout.value = 1`.
 
+## Launch helper (quasar#731)
+
+For a Steam game tile, Quasar's node agent mounts its report-only launch helper and
+sets `QUASAR_LAUNCH_HELPER` and `QUASAR_LAUNCH_SOCKET`. The launcher starts the
+helper once gamescope reports ready (the helper reads gamescope's `DISPLAY`) and
+before Steam, in the background, and never waits on it. With the variable unset,
+or naming a path that is not executable, nothing changes.
+
 ## Host / launch requirements
 
 The image cannot set these itself; the Quasar agent (or a manual `docker run`)

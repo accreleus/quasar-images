@@ -122,6 +122,38 @@ else
   fail "nested: dbus-run-session ran $(paste -sd' ' "$log/client.args")"
 fi
 
+if [[ -e "$log/helper.env" ]]; then
+  fail "nested: a launch helper started with none mounted"
+else
+  pass "nested: no launch helper started"
+fi
+
+# 1a. A derived Steam tile: the agent mounted its launch helper (quasar#731). It
+#     starts once gamescope is ready, so it has gamescope's DISPLAY, with the
+#     tile's flags and socket; the rest of the launch is case 1's.
+run_launcher launch-helper \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
+  QUASAR_LAUNCH_HELPER="$T/stubs/launch-helper" \
+  QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock
+for _ in $(seq 1 20); do [[ -e "$log/helper.env" ]] && break; sleep 0.1; done
+expect_env helper.env launch-helper "DISPLAY=:7"
+expect_env helper.env launch-helper "STEAM_STARTUP_FLAGS=-bigpicture -applaunch 620"
+expect_env helper.env launch-helper "QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock"
+expect_argv launch-helper "-e -b -R <ready-fifo> -T <stats-fifo> -W 1920 -H 1080 -r 60"
+expect_env client.env launch-helper "DISPLAY=:7"
+
+# 1a'. A helper path that is not there, or a helper that dies at once, changes
+#      nothing: Steam still starts and the launcher still exits 0.
+run_launcher launch-helper-missing \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  QUASAR_LAUNCH_HELPER=/run/quasar-launch-helper
+expect_env client.env launch-helper-missing "DISPLAY=:7"
+run_launcher launch-helper-fails \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  QUASAR_LAUNCH_HELPER=/bin/false
+expect_env client.env launch-helper-fails "DISPLAY=:7"
+
 # 1b. Nested with anything other than exactly "1" stays nested.
 run_launcher nested-not-one \
   XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 QUASAR_DIRECT_DISPLAY=true
