@@ -82,6 +82,9 @@ case "$ui_mode" in
     log "unknown QUASAR_STEAM_UI_MODE='$ui_mode'; starting Steam with no UI-mode flag"
     ;;
 esac
+if [[ -n "$ui_mode" && -n "${STEAM_STARTUP_FLAGS:-}" ]]; then
+  log "QUASAR_STEAM_UI_MODE=$ui_mode ignored: STEAM_STARTUP_FLAGS is set"
+fi
 export STEAM_STARTUP_FLAGS="${STEAM_STARTUP_FLAGS:-$default_flags}"
 
 if [[ " $STEAM_STARTUP_FLAGS " != *" -bigpicture "* \
@@ -92,10 +95,13 @@ if [[ " $STEAM_STARTUP_FLAGS " != *" -bigpicture "* \
 fi
 
 # Per-game Xwayland isolation follows the effective flags: on only when they
-# contain -gamepadui. Gamescope composites every Xwayland into one output, so
-# the node-agent's compositor capture is unaffected either way.
+# contain the full gamepadui unit. Gamescope composites every Xwayland into one
+# output, so the node-agent's compositor capture is unaffected either way.
 multi_xwayland_default=0
-if [[ " $STEAM_STARTUP_FLAGS " == *" -gamepadui "* ]]; then
+if [[ " $STEAM_STARTUP_FLAGS " == *" -gamepadui "* \
+   && " $STEAM_STARTUP_FLAGS " == *" -steamos3 "* \
+   && " $STEAM_STARTUP_FLAGS " == *" -steampal "* \
+   && " $STEAM_STARTUP_FLAGS " == *" -steamdeck "* ]]; then
   multi_xwayland_default=1
 fi
 if [[ "${QUASAR_STEAM_MULTIPLE_XWAYLANDS:-$multi_xwayland_default}" == "1" ]]; then

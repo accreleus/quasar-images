@@ -34,13 +34,13 @@ carries `STEAM_STARTUP_FLAGS`, set the full gamepadui flag set as
 
 | `QUASAR_STEAM_UI_MODE` | Steam flags | `STEAM_MULTIPLE_XWAYLANDS` | Notes |
 |---|---|---|---|
-| *(unset)* | *(none)* | off | No UI-mode flag. For the plain Steam app it means the app uses a runtime preset the admin made themselves, without the flag (the launcher warns). |
+| *(unset)* | *(none)* | off | No UI-mode flag. For the plain Steam app it means a Steam app that does not use the preset the Steam image installed, without the flag (the launcher warns). |
 | `bigpicture` | `-bigpicture` | off | Legacy Big Picture. Does not pin the baselayer; games come forward via the default focus. games-on-whales-validated. |
 | `gamepadui` | `-gamepadui -steamos3 -steampal -steamdeck` | on | Modern Deck UI. Full SteamOS session unit (matches Valve's gamescope-session). Never shipped partially. |
 
 `STEAM_STARTUP_FLAGS` overrides the computed flags verbatim (advanced use).
 The `STEAM_MULTIPLE_XWAYLANDS` default follows the effective flags — on only
-when they contain `-gamepadui`; `QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0`/`1`)
+when they contain the full gamepadui unit; `QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0`/`1`)
 overrides that default.
 Set `QUASAR_STEAM_GAMESCOPE=0` to run Steam without nested Gamescope.
 

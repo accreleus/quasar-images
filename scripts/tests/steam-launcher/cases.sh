@@ -268,6 +268,7 @@ expect_no_launcher_log preset-bigpicture "$NO_UI_WARNING"
 # is not a partial gamepadui unit.
 run_launcher preset-overrides-mode STEAM_STARTUP_FLAGS=-bigpicture QUASAR_STEAM_UI_MODE=gamepadui
 expect_env client.env preset-overrides-mode "STEAM_STARTUP_FLAGS=-bigpicture"
+expect_launcher_log preset-overrides-mode "QUASAR_STEAM_UI_MODE=gamepadui ignored: STEAM_STARTUP_FLAGS is set"
 expect_launcher_log preset-overrides-mode "multi_xwayland=0"
 expect_no_launcher_log preset-overrides-mode "$NO_UI_WARNING"
 
@@ -277,6 +278,12 @@ run_launcher flags-gamepadui STEAM_STARTUP_FLAGS="-gamepadui -steamos3 -steampal
 expect_env client.env flags-gamepadui "STEAM_STARTUP_FLAGS=-gamepadui -steamos3 -steampal -steamdeck"
 expect_launcher_log flags-gamepadui "multi_xwayland=1"
 expect_no_launcher_log flags-gamepadui "$NO_UI_WARNING"
+
+# A partial -gamepadui (not the full SteamOS unit) gets no Xwayland isolation.
+run_launcher flags-gamepadui-partial STEAM_STARTUP_FLAGS="-gamepadui"
+expect_env client.env flags-gamepadui-partial "STEAM_STARTUP_FLAGS=-gamepadui"
+expect_launcher_log flags-gamepadui-partial "multi_xwayland=0"
+expect_no_launcher_log flags-gamepadui-partial "$NO_UI_WARNING"
 
 # -tenfoot is a UI-mode flag (legacy Big Picture switch): no warning.
 run_launcher flags-tenfoot STEAM_STARTUP_FLAGS=-tenfoot
