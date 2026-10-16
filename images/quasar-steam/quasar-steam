@@ -464,8 +464,9 @@ fi
 
 # quasar#731: for a derived Steam game tile the node agent mounts its report-only launch
 # helper and sets QUASAR_LAUNCH_HELPER. It reads gamescope's DISPLAY, so it starts after
-# the ready handshake, and before Steam so it sees the launch from the start. Never
-# waited on: nothing here depends on it.
+# the ready handshake. Steam waits for its "ready" line, at most 2 s: the helper decides
+# on its first look where to start reading Steam's log, which the home keeps from the
+# last session. A helper that exits or fails answers at once; nothing else waits on it.
 if [[ -n "${QUASAR_LAUNCH_HELPER:-}" && -f "$QUASAR_LAUNCH_HELPER" ]]; then
   launch_helper="$QUASAR_LAUNCH_HELPER"
   # A host whose /run is noexec (Debian and Ubuntu mount it so) passes the mount on
@@ -475,8 +476,13 @@ if [[ -n "${QUASAR_LAUNCH_HELPER:-}" && -f "$QUASAR_LAUNCH_HELPER" ]]; then
     cp "$QUASAR_LAUNCH_HELPER" "$launch_helper" && chmod 0755 "$launch_helper" || launch_helper=""
   fi
   if [[ -n "$launch_helper" ]]; then
-    "$launch_helper" &
-    log "launch helper started (pid $!)"
+    exec {helper_ready}< <(exec "$launch_helper")
+    if read -r -t 2 -u "$helper_ready" _; then
+      log "launch helper ready (pid $!)"
+    else
+      log "WARN: launch helper (pid $!) not ready within 2s; starting Steam anyway"
+    fi
+    exec {helper_ready}<&-
   fi
 fi
 

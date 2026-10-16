@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Test stub for the node agent's launch helper: records the environment the launcher
-# started it with.
+# started it with, then answers the launcher's ready handshake on stdout, as the helper
+# does after its first poll. STUB_HELPER_DELAY=<seconds> answers late; STUB_HELPER_HANG=1
+# never answers.
 set -euo pipefail
 log="${STUB_LOG:?STUB_LOG must name the case log directory}"
 for v in DISPLAY STEAM_STARTUP_FLAGS QUASAR_LAUNCH_SOCKET; do
   if [[ -v $v ]]; then printf '%s=%s\n' "$v" "${!v}"; else printf '%s<unset>\n' "$v"; fi
 done > "$log/helper.env.tmp"
 mv "$log/helper.env.tmp" "$log/helper.env"
+[[ "${STUB_HELPER_HANG:-}" == 1 ]] && exec sleep 300
+sleep "${STUB_HELPER_DELAY:-0}"
+: > "$log/helper.ready"
+echo ready

@@ -131,17 +131,37 @@ fi
 # 1a. A derived Steam tile: the agent mounted its launch helper (quasar#731). It
 #     starts once gamescope is ready, so it has gamescope's DISPLAY, with the
 #     tile's flags and socket; the rest of the launch is case 1's.
+#     Steam waits for the helper's "ready" line: the helper picks where to start
+#     reading Steam's log on its first look, so Steam must not have written yet.
 run_launcher launch-helper \
   XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
   STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
   QUASAR_LAUNCH_HELPER="$T/stubs/launch-helper" \
-  QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock
-for _ in $(seq 1 20); do [[ -e "$log/helper.env" ]] && break; sleep 0.1; done
+  QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock STUB_HELPER_DELAY=0.5
 expect_env helper.env launch-helper "DISPLAY=:7"
 expect_env helper.env launch-helper "STEAM_STARTUP_FLAGS=-bigpicture -applaunch 620"
 expect_env helper.env launch-helper "QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock"
 expect_argv launch-helper "-e -b -R <ready-fifo> -T <stats-fifo> -W 1920 -H 1080 -r 60"
 expect_env client.env launch-helper "DISPLAY=:7"
+if [[ -e "$log/helper.ready" && "$log/client.env" -nt "$log/helper.ready" ]]; then
+  pass "launch-helper: Steam started after the helper was ready"
+else
+  fail "launch-helper: Steam started before the helper's ready line"
+fi
+
+# 1a-bound. A helper that never says ready holds Steam back 2 s, not longer.
+t0=$(date +%s%N)
+run_launcher launch-helper-hangs \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
+  QUASAR_LAUNCH_HELPER="$T/stubs/launch-helper" STUB_HELPER_HANG=1
+waited_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+expect_env client.env launch-helper-hangs "DISPLAY=:7"
+if (( waited_ms >= 2000 && waited_ms < 10000 )) && grep -q 'not ready within 2s; starting Steam anyway' "$log/launcher.out"; then
+  pass "launch-helper-hangs: Steam started after the 2 s bound (${waited_ms} ms) and the launcher said so"
+else
+  fail "launch-helper-hangs: ${waited_ms} ms; launcher said: $(grep 'launch helper' "$log/launcher.out" | paste -sd';')"
+fi
 
 # 1a''. A mount that is not executable (a host whose /run is noexec): the launcher
 #       runs a private copy, with the same environment.
@@ -151,7 +171,6 @@ run_launcher launch-helper-noexec \
   STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
   QUASAR_LAUNCH_HELPER=/tmp/launch-helper-noexec \
   QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock
-for _ in $(seq 1 20); do [[ -e "$log/helper.env" ]] && break; sleep 0.1; done
 expect_env helper.env launch-helper-noexec "DISPLAY=:7"
 expect_env helper.env launch-helper-noexec "QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock"
 if [[ -x "$log/home/.runtime/quasar-launch-helper" ]]; then
@@ -166,10 +185,17 @@ run_launcher launch-helper-missing \
   XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
   QUASAR_LAUNCH_HELPER=/run/quasar-launch-helper
 expect_env client.env launch-helper-missing "DISPLAY=:7"
+t0=$(date +%s%N)
 run_launcher launch-helper-fails \
   XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
   QUASAR_LAUNCH_HELPER=/bin/false
+waited_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 expect_env client.env launch-helper-fails "DISPLAY=:7"
+if (( waited_ms < 2000 )); then
+  pass "launch-helper-fails: a helper that exits does not hold Steam back (${waited_ms} ms)"
+else
+  fail "launch-helper-fails: Steam waited ${waited_ms} ms for a helper that had exited"
+fi
 
 # 1b. Nested with anything other than exactly "1" stays nested.
 run_launcher nested-not-one \
