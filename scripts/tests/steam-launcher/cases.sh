@@ -150,6 +150,154 @@ else
   fail "nested: dbus-run-session ran $(paste -sd' ' "$log/client.args")"
 fi
 
+if [[ -e "$log/helper.env" ]]; then
+  fail "nested: a launch helper started with none mounted"
+else
+  pass "nested: no launch helper started"
+fi
+
+# 1a. A derived Steam tile: the agent mounted its launch helper (quasar#731). It
+#     starts once gamescope is ready, so it has gamescope's DISPLAY, with the
+#     tile's flags and socket; the rest of the launch is case 1's.
+#     Steam waits for the helper's "ready" line: the helper picks where to start
+#     reading Steam's log on its first look, so Steam must not have written yet.
+run_launcher launch-helper \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
+  QUASAR_LAUNCH_HELPER="$T/stubs/launch-helper" \
+  QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock STUB_HELPER_DELAY=0.5
+expect_env helper.env launch-helper "DISPLAY=:7"
+expect_env helper.env launch-helper "STEAM_STARTUP_FLAGS=-bigpicture -applaunch 620"
+expect_env helper.env launch-helper "QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock"
+expect_argv launch-helper "-e -b -R <ready-fifo> -T <stats-fifo> -W 1920 -H 1080 -r 60"
+expect_env client.env launch-helper "DISPLAY=:7"
+if [[ -e "$log/helper.ready" && "$log/client.env" -nt "$log/helper.ready" ]]; then
+  pass "launch-helper: Steam started after the helper was ready"
+else
+  fail "launch-helper: Steam started before the helper's ready line"
+fi
+
+# 1a-bound. A helper that never says ready holds Steam back 2 s, not longer.
+t0=$(date +%s%N)
+run_launcher launch-helper-hangs \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
+  QUASAR_LAUNCH_HELPER="$T/stubs/launch-helper" STUB_HELPER_HANG=1
+waited_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+expect_env client.env launch-helper-hangs "DISPLAY=:7"
+if (( waited_ms >= 2000 && waited_ms < 10000 )) && grep -q 'not ready within 2s; starting Steam anyway' "$log/launcher.out"; then
+  pass "launch-helper-hangs: Steam started after the 2 s bound (${waited_ms} ms) and the launcher said so"
+else
+  fail "launch-helper-hangs: ${waited_ms} ms; launcher said: $(grep 'launch helper' "$log/launcher.out" | paste -sd';')"
+fi
+
+# 1a''. A mount that is not executable (a host whose /run is noexec): the launcher
+#       runs a private copy, with the same environment.
+cp "$T/stubs/launch-helper" /tmp/launch-helper-noexec && chmod 0644 /tmp/launch-helper-noexec
+run_launcher launch-helper-noexec \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
+  QUASAR_LAUNCH_HELPER=/tmp/launch-helper-noexec \
+  QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock
+expect_env helper.env launch-helper-noexec "DISPLAY=:7"
+expect_env helper.env launch-helper-noexec "QUASAR_LAUNCH_SOCKET=/run/quasar-launch/launch.sock"
+if [[ -x "$log/home/.runtime/quasar-launch-helper" ]]; then
+  pass "launch-helper-noexec: ran the copy in the private runtime dir"
+else
+  fail "launch-helper-noexec: no executable copy in $log/home/.runtime"
+fi
+
+# 1a-restart. A helper that dies while Steam runs is started again.
+run_launcher launch-helper-restart \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
+  QUASAR_LAUNCH_HELPER="$T/stubs/launch-helper" STUB_HELPER_EXIT_FIRST=137 STUB_STEAM_SECONDS=2
+if [[ "$(wc -l < "$log/helper.starts")" == 2 ]] && grep -q 'launch helper exited 137; restarting it' "$log/launcher.out"; then
+  pass "launch-helper-restart: a killed helper was started again, once"
+else
+  fail "launch-helper-restart: $(wc -l < "$log/helper.starts") start(s); launcher said: $(grep 'launch helper' "$log/launcher.out" | paste -sd';')"
+fi
+
+# 1a-restart-bound. One that keeps dying is restarted 3 times a minute, not more.
+run_launcher launch-helper-restart-bound \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  STEAM_STARTUP_FLAGS="-bigpicture -applaunch 620" \
+  QUASAR_LAUNCH_HELPER="$T/stubs/launch-helper" STUB_HELPER_EXIT=1 STUB_STEAM_SECONDS=2
+if [[ "$(wc -l < "$log/helper.starts")" == 4 ]] && grep -q '3 restarts this minute' "$log/launcher.out"; then
+  pass "launch-helper-restart-bound: 1 start + 3 restarts, then a logged wait"
+else
+  fail "launch-helper-restart-bound: $(wc -l < "$log/helper.starts") start(s); launcher said: $(grep 'launch helper' "$log/launcher.out" | paste -sd';')"
+fi
+
+# 1a-clean-exit. A helper that exits 0 has nothing to watch and is left alone.
+run_launcher launch-helper-clean-exit \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  QUASAR_LAUNCH_HELPER="$T/stubs/launch-helper" STUB_STEAM_SECONDS=1
+if [[ "$(wc -l < "$log/helper.starts")" == 1 ]] && ! grep -q restarting "$log/launcher.out"; then
+  pass "launch-helper-clean-exit: not restarted"
+else
+  fail "launch-helper-clean-exit: $(wc -l < "$log/helper.starts") start(s)"
+fi
+
+# 1a-not-ready. A first line other than "ready" is not the handshake.
+cp "$T/stubs/launch-helper" /tmp/launch-helper-chatty
+sed -i 's/^echo ready$/echo hello/' /tmp/launch-helper-chatty
+run_launcher launch-helper-not-ready \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  QUASAR_LAUNCH_HELPER=/tmp/launch-helper-chatty
+if grep -q 'not ready within 2s; starting Steam anyway' "$log/launcher.out"; then
+  pass "launch-helper-not-ready: only an exact ready line counts"
+else
+  fail "launch-helper-not-ready: launcher said: $(grep 'launch helper' "$log/launcher.out" | paste -sd';')"
+fi
+
+# 1a-noexec-fifo / -symlink. Whatever an earlier session left where the copy goes is
+# replaced, never opened or followed: a FIFO there must not hang Steam's start, and a
+# symlink must not be written through.
+cp "$T/stubs/launch-helper" /tmp/launch-helper-noexec && chmod 0644 /tmp/launch-helper-noexec
+rm -rf /tmp/rt-fifo /tmp/rt-link /tmp/link-victim
+mkdir -p /tmp/rt-fifo /tmp/rt-link
+mkfifo /tmp/rt-fifo/quasar-launch-helper
+echo victim > /tmp/link-victim
+ln -s /tmp/link-victim /tmp/rt-link/quasar-launch-helper
+for planted in fifo link; do
+  t0=$(date +%s%N)
+  run_launcher "launch-helper-noexec-$planted" \
+    XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+    QUASAR_STEAM_RUNTIME_DIR="/tmp/rt-$planted" \
+    QUASAR_LAUNCH_HELPER=/tmp/launch-helper-noexec
+  waited_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+  dest="/tmp/rt-$planted/quasar-launch-helper"
+  if [[ -f "$dest" && ! -L "$dest" && -x "$dest" && -e "$log/helper.ready" ]] && (( waited_ms < 2000 )); then
+    pass "launch-helper-noexec-$planted: the copy replaced it and ran (${waited_ms} ms)"
+  else
+    fail "launch-helper-noexec-$planted: $(ls -l "$dest" 2>&1), ${waited_ms} ms"
+  fi
+done
+if [[ "$(cat /tmp/link-victim)" == victim ]]; then
+  pass "launch-helper-noexec-link: the symlink's target is untouched"
+else
+  fail "launch-helper-noexec-link: the copy was written through the symlink"
+fi
+
+# 1a'. A helper path that is not there, or a helper that dies at once, changes
+#      nothing: Steam still starts and the launcher still exits 0.
+run_launcher launch-helper-missing \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  QUASAR_LAUNCH_HELPER=/run/quasar-launch-helper
+expect_env client.env launch-helper-missing "DISPLAY=:7"
+t0=$(date +%s%N)
+run_launcher launch-helper-fails \
+  XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 \
+  QUASAR_LAUNCH_HELPER=/bin/false
+waited_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+expect_env client.env launch-helper-fails "DISPLAY=:7"
+if (( waited_ms < 2000 )); then
+  pass "launch-helper-fails: a helper that exits does not hold Steam back (${waited_ms} ms)"
+else
+  fail "launch-helper-fails: Steam waited ${waited_ms} ms for a helper that had exited"
+fi
+
 # 1b. Nested with anything other than exactly "1" stays nested.
 run_launcher nested-not-one \
   XDG_RUNTIME_DIR=/run/quasar-wayland WAYLAND_DISPLAY=wayland-3 QUASAR_DIRECT_DISPLAY=true
