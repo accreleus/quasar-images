@@ -43,6 +43,9 @@ run_launcher() {
   local name="$1"; shift
   log="/tmp/cases/$name"
   rm -rf "$log" && mkdir -p "$log/home"
+  if [[ -n "${seed_vdf:-}" ]]; then
+    mkdir -p "$log/home/.local/share/Steam/config" && cp "$seed_vdf" "$log/home/.local/share/Steam/config/config.vdf"
+  fi
   : > "$log/gamescope.args"; : > "$log/gamescope.env"; : > "$log/client.env"; : > "$log/steam.env"
   local rc=0
   env -i PATH="$T/stubs:/usr/local/bin:/usr/bin:/bin" HOME="$log/home" STUB_LOG="$log" \
@@ -461,6 +464,50 @@ expect_launcher_log mode-unknown "$NO_UI_WARNING"
 run_launcher derived-applaunch STEAM_STARTUP_FLAGS="-applaunch 1234"
 expect_env client.env derived-applaunch "STEAM_STARTUP_FLAGS=-applaunch 1234"
 expect_no_launcher_log derived-applaunch "$NO_UI_WARNING"
+
+# quasar#759: background shader processing is switched on in the home's config.vdf, only
+# when the key is absent, and only through a same-directory rename.
+vdf_dir=/tmp/vdf-seeds; rm -rf "$vdf_dir"; mkdir -p "$vdf_dir"
+vdf_head=$'"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"AutoUpdateWindowStart"\t\t"-1"\n'
+vdf_tail=$'\t\t\t}\n\t\t}\n\t}\n}\n'
+vdf_key=$'\t\t\t\t\t"EnableShaderBackgroundProcessing"\t\t"1"\n'
+printf '%s%s' "$vdf_head" "$vdf_tail" > "$vdf_dir/absent"
+printf '%s\t\t\t\t"ShaderCacheManager"\n\t\t\t\t{\n\t\t\t\t\t"EnableShaderBackgroundProcessing"\t\t"0"\n\t\t\t\t}\n%s' "$vdf_head" "$vdf_tail" > "$vdf_dir/off"
+printf '%s\t\t\t\t"ShaderCacheManager"\n\t\t\t\t{\n\t\t\t\t\t"Other"\t\t"x"\n\t\t\t\t}\n%s' "$vdf_head" "$vdf_tail" > "$vdf_dir/block"
+printf '%s\t\t\t\t"ShaderCacheManager"\n\t\t\t\t{\n\t\t\t\t\t"Other"\t\t"x"\n%s\t\t\t\t}\n%s' "$vdf_head" "$vdf_key" "$vdf_tail" > "$vdf_dir/block.want"
+printf '%s\t\t\t\t"ShaderCacheManager"\n\t\t\t\t{\n%s\t\t\t\t}\n%s' "$vdf_head" "$vdf_key" "$vdf_tail" > "$vdf_dir/absent.want"
+printf '"InstallConfigStore"\n{\n\t"Software"\n\t{\n' > "$vdf_dir/truncated"
+printf 'not a vdf at all\n' > "$vdf_dir/junk"
+
+# expect_vdf <name> <seed|-> <want|same> [VAR=value ...]; seed "-" means no config.vdf.
+expect_vdf() {
+  local name="$1" seed="$2" want="$3"; shift 3
+  seed_vdf=""; [[ "$seed" == - ]] || seed_vdf="$vdf_dir/$seed"
+  run_launcher "$name" "$@"
+  seed_vdf=""
+  local cfg="$log/home/.local/share/Steam/config/config.vdf"
+  if [[ "$seed" == - ]]; then
+    if [[ -e "$cfg" ]]; then fail "$name: config.vdf must not be created"; else pass "$name: no config.vdf created"; fi
+    return 0
+  fi
+  [[ "$want" == same ]] && want="$vdf_dir/$seed" || want="$vdf_dir/$want"
+  # The image has no cmp/diff; the sentinel keeps trailing newlines in the comparison.
+  if [[ "$(cat "$cfg"; echo x)" == "$(cat "$want"; echo x)" ]]; then pass "$name: config.vdf is as expected"; else
+    fail "$name: config.vdf differs from $want"; sed 's/^/      /' "$cfg" >&2
+  fi
+  # No temp file may be left in the config directory.
+  if [[ "$(ls -A "$(dirname "$cfg")")" == config.vdf ]]; then pass "$name: no stray files"; else fail "$name: stray files: $(ls -A "$(dirname "$cfg")")"; fi
+}
+expect_vdf shader-absent absent absent.want
+expect_vdf shader-set-off off same
+expect_vdf shader-block-no-key block block.want
+expect_vdf shader-no-config - same
+expect_vdf shader-truncated truncated same
+expect_launcher_log shader-truncated "not in a form to extend"
+expect_vdf shader-junk junk same
+expect_vdf shader-knob-off absent same QUASAR_STEAM_SHADER_BACKGROUND=0
+expect_no_launcher_log shader-knob-off "shader processing"
+expect_vdf shader-idempotent absent.want same
 
 # steam-wrapper with STEAM_STARTUP_FLAGS unset passes no argument to steam.sh
 # (no -bigpicture fallback, and no empty argument either). The wrapper is

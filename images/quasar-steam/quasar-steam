@@ -543,6 +543,60 @@ if [[ "$shutting_down" == "1" ]]; then
   exit 143
 fi
 
+# quasar#759: Steam compiles shaders in the background only when
+# EnableShaderBackgroundProcessing is on. Turn it on once, while the user has not set it
+# either way. Steam rewrites config.vdf on exit, so this runs only while Steam is down; a
+# file that is absent (a fresh home: Steam creates it, the next start sets the key) or is not
+# the KeyValues text form is left alone, and the edit is a same-directory rename.
+# QUASAR_STEAM_SHADER_BACKGROUND=0 skips it. The root is the one steam-wrapper uses.
+enable_shader_background() {
+  local cfg="$HOME/.local/share/Steam/config/config.vdf" tmp rc=0
+  [[ "${QUASAR_STEAM_SHADER_BACKGROUND:-1}" != 0 && -f "$cfg" && -z "$(resolve_steam_pid)" ]] || return 0
+  tmp="$(mktemp "$cfg.XXXXXX")" || return 0
+  # exit 3: the key is set, whatever its value; exit 4: not a config we can extend.
+  awk '
+    function tok(r) { return tolower(r) }
+    /^[ \t\r]*$/ || /^[ \t]*\/\// { print; next }
+    { t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t\r]+$/, "", t); match($0, /^[ \t]*/); ind = substr($0, 1, RLENGTH) }
+    t == "{" {
+      if (pend == "") { rc = 4; exit }
+      path[++depth] = pend; pend = ""
+      if (depth == 4 && !steam_seen && path[1] == "\"installconfigstore\"" && path[2] == "\"software\"" \
+          && path[3] == "\"valve\"" && path[4] == "\"steam\"") steam_seen = steam_open = 1
+      else if (depth == 5 && steam_open && !scm_seen && path[5] == "\"shadercachemanager\"") scm_seen = scm_open = 1
+      print; next
+    }
+    t == "}" {
+      if (pend != "" || depth == 0) { rc = 4; exit }
+      if (depth == 5 && scm_open) { print ind "\t\"EnableShaderBackgroundProcessing\"\t\t\"1\""; scm_open = 0; added = 1 }
+      if (depth == 4 && steam_open) {
+        if (!scm_seen) {
+          print ind "\t\"ShaderCacheManager\"\n" ind "\t{\n" ind "\t\t\"EnableShaderBackgroundProcessing\"\t\t\"1\"\n" ind "\t}"
+          added = 1
+        }
+        steam_open = 0
+      }
+      depth--; print; next
+    }
+    t ~ /^"([^"\\]|\\.)*"$/ { if (pend != "") { rc = 4; exit } pend = tok(t); print; next }
+    t ~ /^"([^"\\]|\\.)*"[ \t]*"([^"\\]|\\.)*"$/ {
+      if (pend != "") { rc = 4; exit }
+      match(t, /^"([^"\\]|\\.)*"/)
+      if (scm_open && depth == 5 && tok(substr(t, 1, RLENGTH)) == "\"enableshaderbackgroundprocessing\"") { rc = 3; exit }
+      print; next
+    }
+    { rc = 4; exit }
+    END { if (rc) exit rc; if (pend != "" || depth != 0 || !added) exit 4 }
+  ' "$cfg" >"$tmp" || rc=$?
+  case "$rc" in
+    0) chmod --reference="$cfg" "$tmp" && mv -f "$tmp" "$cfg" && log "Steam background shader processing enabled" ;;
+    3) ;;
+    *) log "config.vdf not in a form to extend; background shader processing left as is" ;;
+  esac
+  rm -f "$tmp"
+}
+enable_shader_background
+
 "${client[@]}" &
 client_pid=$!
 # A non-zero/signal exit here (e.g. 143) after an already-clean shutdown
