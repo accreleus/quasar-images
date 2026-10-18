@@ -46,6 +46,12 @@ run_launcher() {
   if [[ -n "${seed_vdf:-}" ]]; then
     mkdir -p "$log/home/.local/share/Steam/config" && cp "$seed_vdf" "$log/home/.local/share/Steam/config/config.vdf"
   fi
+  if [[ -n "${fake_steam:-}" ]]; then
+    # A live process whose comm is "steam", pid recorded the way Steam records it.
+    mkdir -p /tmp/fake-steam "$log/home/.steam" && cp "$(command -v sleep)" /tmp/fake-steam/steam
+    /tmp/fake-steam/steam 600 & fake_steam_pid=$!
+    echo "$fake_steam_pid" > "$log/home/.steam/steam.pid"
+  fi
   : > "$log/gamescope.args"; : > "$log/gamescope.env"; : > "$log/client.env"; : > "$log/steam.env"
   local rc=0
   env -i PATH="$T/stubs:/usr/local/bin:/usr/bin:/bin" HOME="$log/home" STUB_LOG="$log" \
@@ -478,6 +484,15 @@ printf '%s\t\t\t\t"ShaderCacheManager"\n\t\t\t\t{\n\t\t\t\t\t"Other"\t\t"x"\n%s\
 printf '%s\t\t\t\t"ShaderCacheManager"\n\t\t\t\t{\n%s\t\t\t\t}\n%s' "$vdf_head" "$vdf_key" "$vdf_tail" > "$vdf_dir/absent.want"
 printf '"InstallConfigStore"\n{\n\t"Software"\n\t{\n' > "$vdf_dir/truncated"
 printf 'not a vdf at all\n' > "$vdf_dir/junk"
+# Steam writes SDL_GamepadBind after the Software block as one quoted value over several lines
+# (synthetic text here, shaped like it).
+vdf_sdl=$'\t"SDL_GamepadBind"\t\t"line1,a:b0,\nline2,{x}// y,\n\nline3"\n}\n'
+vdf_tail_sdl=$'\t\t\t}\n\t\t}\n\t}\n'"$vdf_sdl"
+printf '%s%s' "$vdf_head" "$vdf_tail_sdl" > "$vdf_dir/sdl-absent"
+printf '%s\t\t\t\t"ShaderCacheManager"\n\t\t\t\t{\n%s\t\t\t\t}\n%s' "$vdf_head" "$vdf_key" "$vdf_tail_sdl" > "$vdf_dir/sdl-absent.want"
+printf '%s\t\t\t\t"ShaderCacheManager"\n\t\t\t\t{\n\t\t\t\t\t"EnableShaderBackgroundProcessing"\t\t"0"\n\t\t\t\t}\n%s' "$vdf_head" "$vdf_tail_sdl" > "$vdf_dir/sdl-off"
+# Braces all closed, then a value that never closes: only the end-of-file check can refuse it.
+printf '%s%s"Tail"\t\t"open\nmore\n' "$vdf_head" "$vdf_tail" > "$vdf_dir/sdl-open"
 
 # expect_vdf <name> <seed|-> <want|same> [VAR=value ...]; seed "-" means no config.vdf.
 expect_vdf() {
@@ -508,6 +523,13 @@ expect_vdf shader-junk junk same
 expect_vdf shader-knob-off absent same QUASAR_STEAM_SHADER_BACKGROUND=0
 expect_no_launcher_log shader-knob-off "shader processing"
 expect_vdf shader-idempotent absent.want same
+expect_vdf shader-multiline-absent sdl-absent sdl-absent.want
+expect_vdf shader-multiline-set sdl-off same
+expect_vdf shader-ends-in-value sdl-open same
+expect_launcher_log shader-ends-in-value "not in a form to extend"
+fake_steam=1 expect_vdf shader-steam-running absent same
+kill "$fake_steam_pid" 2>/dev/null || true
+expect_no_launcher_log shader-steam-running "shader processing enabled"
 
 # steam-wrapper with STEAM_STARTUP_FLAGS unset passes no argument to steam.sh
 # (no -bigpicture fallback, and no empty argument either). The wrapper is
