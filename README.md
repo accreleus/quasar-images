@@ -86,7 +86,7 @@ WITH_SUPERPOSITION=0 ./scripts/build.sh quasar-unigine  # Heaven only, disk-cons
 ./scripts/verify-unigine.sh
 ```
 
-The installers are pulled from `assets.unigine.com` at build time with pinned sha256 sums, into a BuildKit cache mount so a rebuild does not re-pull 1.9 GB. **This image is deliberately not published to GHCR** — it redistributes third-party binaries under their own EULAs — which is why its `quasar-manifest.json` entry is `kind: template` rather than `prebuilt`.
+The installers are pulled from `assets.unigine.com` at build time with pinned sha256 sums, inside one `RUN` that deletes them afterwards (no `RUN --mount`: a Quasar host builds this template with the classic builder), so a rebuild that reaches that layer re-pulls 1.9 GB. **This image is deliberately not published to GHCR** — it redistributes third-party binaries under their own EULAs — which is why its `quasar-manifest.json` entry is `kind: template` rather than `prebuilt`.
 
 ### Patched KWin (nested mode ladder)
 

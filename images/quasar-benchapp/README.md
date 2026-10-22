@@ -55,11 +55,13 @@ BENCHAPP_GIT_SHA="$(git -C /path/to/quasar-mark rev-parse --short HEAD)" \
 ```
 
 `BENCHAPP_SRC_IMAGE` overrides the source-stage image; `BENCHAPP_GIT_SHA` is recorded in
-the `org.quasar.benchapp.git-sha` label. This is why the manifest entry is
-`kind: template` with no `registry_ref` — the source is now published but still not
-built as part of this repo's own pipeline, so there is nothing to pin here yet
-(TODO: revisit once/if the CI build fetches `quasar-mark` directly instead of relying
-on a locally built `quasar-benchapp:src`). **Always pass `BENCHAPP_GIT_SHA` explicitly**
+the `org.quasar.benchapp.git-sha` label. This image is **not in
+`quasar-manifest.json`** (removed for quasar#615). It was `kind: template`, which a
+Quasar host builds from this repository with no access to the private `quasar-mark`
+repo or to a locally built `quasar-benchapp:src`, so no host could build it. To put it
+back, publish the `quasar-benchapp-src` payload image where a host can pull it
+anonymously, pin it by digest as `build_args.BENCHAPP_SRC_IMAGE` and `APP_IMAGE` in a
+manifest entry, and prove one host build. **Always pass `BENCHAPP_GIT_SHA` explicitly**
 — a build without it embeds `unknown` in the label, and `docker inspect` becomes the
 only way to tell which benchgame commit is actually running.
 
