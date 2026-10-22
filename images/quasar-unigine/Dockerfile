@@ -66,13 +66,13 @@ RUN set -eux; \
     mkdir -p /opt/unigine /tmp/unigine; \
     if [ "${WITH_HEAVEN}" = "1" ]; then \
       f=/tmp/unigine/Unigine_Heaven-4.0.run; \
-      [ -f "$f" ] || curl -fsSL -o "$f" "${HEAVEN_URL}"; \
+      curl -fsSL -o "$f" "${HEAVEN_URL}"; \
       echo "${HEAVEN_SHA256}  $f" | sha256sum -c -; \
       sh "$f" --noexec --nochown --noprogress --nox11 --quiet --target /opt/unigine/heaven; \
     fi; \
     if [ "${WITH_SUPERPOSITION}" = "1" ]; then \
       f=/tmp/unigine/Unigine_Superposition-1.1.run; \
-      [ -f "$f" ] || curl -fsSL -o "$f" "${SUPERPOSITION_URL}"; \
+      curl -fsSL -o "$f" "${SUPERPOSITION_URL}"; \
       echo "${SUPERPOSITION_SHA256}  $f" | sha256sum -c -; \
       sh "$f" --noexec --nochown --noprogress --nox11 --quiet --target /opt/unigine/superposition; \
     fi; \
