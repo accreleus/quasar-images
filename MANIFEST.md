@@ -67,6 +67,16 @@ only alongside a `registry_ref` whose build has the direct entry (or say in
 `notes` that the next pin must reach one). Today `kde-desktop` and `steam` set it
 (see each image's README, "Direct display").
 
+## Template images build on a Quasar host
+
+A `kind: template` entry is built by a node agent's classic builder, with the repository
+root (at the catalog's pinned commit) as the build context and `build_args` as the build
+args. So a template Dockerfile must: use no BuildKit-only syntax (`RUN --mount`,
+`# syntax=`, heredocs); `COPY` paths relative to the repository root; and `FROM` an image
+a host can pull anonymously, pinned by digest through `build_args` (a Dockerfile's own
+default such as `quasar-app:dev` exists on no host). An image that cannot meet this does
+not belong in the manifest. Prove one host build before adding an entry.
+
 ## Pinning discipline
 
 `registry_ref` and `version` are always concrete. Publishing a new build of an image is a

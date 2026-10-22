@@ -49,8 +49,10 @@ RUN dnf --setopt=install_weak_deps=False -y install \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# BuildKit cache mount for the installers: a rebuild of the layers below must
-# not re-pull 1.9 GB. The .run files never land in an image layer.
+# The installers are fetched into /tmp/unigine and removed in this same RUN, so
+# the .run files never land in an image layer. No `RUN --mount`: a Quasar host
+# builds this image with the classic builder, which rejects it, so a rebuild
+# that reaches this layer re-pulls the installers.
 #
 # The extracted trees arrive 0770/root, so `chmod -R a+rX` is what makes the
 # binaries and data readable/executable by the unprivileged session uid.
@@ -60,21 +62,21 @@ RUN dnf --setopt=install_weak_deps=False -y install \
 # config -- which is exactly the determinism a benchmark wants.
 # The x86 halves, PDFs and desktop-integration leftovers are dropped: ~90 MB of
 # weight this image can never use.
-RUN --mount=type=cache,target=/var/cache/unigine,sharing=locked \
-    set -eux; \
-    mkdir -p /opt/unigine; \
+RUN set -eux; \
+    mkdir -p /opt/unigine /tmp/unigine; \
     if [ "${WITH_HEAVEN}" = "1" ]; then \
-      f=/var/cache/unigine/Unigine_Heaven-4.0.run; \
+      f=/tmp/unigine/Unigine_Heaven-4.0.run; \
       [ -f "$f" ] || curl -fsSL -o "$f" "${HEAVEN_URL}"; \
       echo "${HEAVEN_SHA256}  $f" | sha256sum -c -; \
       sh "$f" --noexec --nochown --noprogress --nox11 --quiet --target /opt/unigine/heaven; \
     fi; \
     if [ "${WITH_SUPERPOSITION}" = "1" ]; then \
-      f=/var/cache/unigine/Unigine_Superposition-1.1.run; \
+      f=/tmp/unigine/Unigine_Superposition-1.1.run; \
       [ -f "$f" ] || curl -fsSL -o "$f" "${SUPERPOSITION_URL}"; \
       echo "${SUPERPOSITION_SHA256}  $f" | sha256sum -c -; \
       sh "$f" --noexec --nochown --noprogress --nox11 --quiet --target /opt/unigine/superposition; \
     fi; \
+    rm -rf /tmp/unigine; \
     rm -rf /opt/unigine/*/documentation /opt/unigine/*/docs /opt/unigine/*/icons \
            /opt/unigine/*/bin/x86 /opt/unigine/*/bin/*_x86 /opt/unigine/*/bin/*_x86.so* \
            /opt/unigine/*/postinstall.sh /opt/unigine/*/uninstall.sh; \
