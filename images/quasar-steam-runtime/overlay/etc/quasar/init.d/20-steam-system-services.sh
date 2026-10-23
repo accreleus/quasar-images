@@ -58,7 +58,7 @@ else
   if dbus-daemon --system --fork --nosyslog; then
     log "started D-Bus system bus"
   else
-    log "WARNING: dbus-daemon --system failed; Steam's network store will not initialise"
+    log "WARNING: dbus-daemon --system failed; the desktop's network applet will show no network"
   fi
 fi
 
