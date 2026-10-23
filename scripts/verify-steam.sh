@@ -164,12 +164,10 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   grep -q "nvidia_quasar_volume()" /usr/local/bin/quasar-gpu-init
   grep -qE "^nvidia_quasar_volume$" /usr/local/bin/quasar-gpu-init
 
-  # D-Bus system bus + NetworkManager (quasar-images#4). Without them Steam'"'"'s
-  # libnm client fails to construct, the client never registers
-  # SteamClient.System.Network.*, and Big Picture'"'"'s SystemNetworkStore throws
-  # pre-login -- the UI hangs on "Waiting for network" forever with a perfectly
-  # online client. Proven by A/B on the GPU test host 2026-08-09 (same image, same
-  # home volume, QUASAR_STEAM_SYSTEM_SERVICES on/off).
+  # D-Bus system bus + NetworkManager hook (quasar-images#4), inherited from
+  # quasar-steam-runtime. This image turns it off by default (quasar#741, see the
+  # ENV check below); the hook stays so QUASAR_STEAM_SYSTEM_SERVICES=1 can bring
+  # NM back, and must stay safe when it does.
   hook=/etc/quasar/init.d/20-steam-system-services.sh
   test -x "$hook"
   grep -q "dbus-daemon --system" "$hook"
@@ -188,6 +186,13 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
 # device and every NM-gated app (Plasma applet, Discover, Steam) plays offline.
 grep -q "^uri=http://nmcheck.gnome.org/check_network_status.txt" /etc/NetworkManager/conf.d/00-quasar.conf
 '
+
+# Steam runs without the system bus and NetworkManager (quasar#741): NM in a
+# container never marks the interface as the default route, and Steam's login
+# then waits out a 10 s / 20 s network timeout on every start.
+docker image inspect "$STEAM_IMAGE" --format '{{json .Config.Env}}' \
+  | jq -e 'index("QUASAR_STEAM_SYSTEM_SERVICES=0") != null' >/dev/null \
+  || { echo "FAIL: $STEAM_IMAGE must default QUASAR_STEAM_SYSTEM_SERVICES=0 (quasar#741)" >&2; exit 1; }
 
 labels="$(docker image inspect "$STEAM_IMAGE" --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "required"' <<<"$labels" >/dev/null
