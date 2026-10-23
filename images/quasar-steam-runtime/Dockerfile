@@ -54,8 +54,9 @@ RUN dnf --setopt=install_weak_deps=False -y install \
 COPY --from=bwrap-builder /build/bubblewrap/build/bwrap /usr/bin/bwrap
 RUN chmod 0755 /usr/bin/bwrap
 
-# Steam Big Picture blocks on "Waiting for network" without a D-Bus system bus +
-# NetworkManager to build its libnm client against (quasar-images#4). The hook
+# A D-Bus system bus + NetworkManager for the KDE/XFCE desktops; the Steam image
+# turns them off (QUASAR_STEAM_SYSTEM_SERVICES=0, quasar#741; history in
+# quasar-images#4). The hook
 # runs as root from quasar-entrypoint's init.d chain; the conf keeps NM a
 # read-only observer of docker's networking. See the files for the full trace.
 COPY images/quasar-steam-runtime/overlay/etc/NetworkManager/conf.d/00-quasar.conf /etc/NetworkManager/conf.d/00-quasar.conf

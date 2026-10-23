@@ -45,7 +45,9 @@ jobs each rebuild `quasar-base` + `quasar-app` from cold.
 `quasar-unigine` is `ci: false` deliberately: it pulls 1.9 GB of EULA'd UNIGINE
 installers and is never published, so CI would spend the download and the disk on
 something it can neither publish nor hand to anyone. It stays in `build.sh all`
-for local builds, where a BuildKit cache mount makes the download a one-off.
+for local builds. Its installer download has no cache mount (a Quasar host builds
+it with the classic builder, which rejects `RUN --mount`), so a rebuild that
+reaches that layer re-pulls the 1.9 GB.
 
 ## Adding a new image
 

@@ -18,4 +18,6 @@ if [[ "${1:-}" == /usr/local/libexec/quasar-steam/direct-session ]]; then
   export DBUS_SESSION_BUS_ADDRESS="unix:path=$STUB_LOG/stub-bus"
   exec "$@"
 fi
+# STUB_STEAM_SECONDS: how long this stand-in Steam runs before it quits.
+sleep "${STUB_STEAM_SECONDS:-0}"
 exit 0
