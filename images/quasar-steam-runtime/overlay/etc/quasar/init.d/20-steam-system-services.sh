@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Steam Big Picture needs a D-Bus SYSTEM bus and a reachable NetworkManager.
+# A D-Bus SYSTEM bus and a reachable NetworkManager, for the KDE and XFCE desktops
+# (their network applet and Discover read NetworkManager). The Steam image turns
+# this off (QUASAR_STEAM_SYSTEM_SERVICES=0, quasar#741): in a container
+# NetworkManager never reports a default route, so current Steam waits out a
+# 10-20 s network timeout with it, and signs in at once without it.
+#
+# History (why the hook exists):
 #
 # quasar-images#4: BPM hung forever on "Waiting for network…" even though Steam
 # itself was online (connection_log.txt "Connectivity test … OK! result=Connected").
@@ -52,7 +58,7 @@ else
   if dbus-daemon --system --fork --nosyslog; then
     log "started D-Bus system bus"
   else
-    log "WARNING: dbus-daemon --system failed; Steam's network store will not initialise"
+    log "WARNING: dbus-daemon --system failed; the desktop's network applet will show no network"
   fi
 fi
 
@@ -66,7 +72,7 @@ fi
 # docker bridge network there is no DHCP server, and an attempted activation
 # could flush the address docker assigned.
 if ! command -v NetworkManager >/dev/null 2>&1; then
-  log "WARNING: NetworkManager is not installed; Steam Big Picture will hang on 'Waiting for network'"
+  log "WARNING: NetworkManager is not installed; the desktop's network applet will show no network"
   exit 0
 fi
 

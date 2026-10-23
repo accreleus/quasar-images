@@ -106,4 +106,14 @@ RUN chmod 0755 /usr/local/bin/quasar-steam /usr/local/bin/quasar-steam-client \
 # set, so a standalone `docker run` is unchanged.
 ENV QUASAR_STEAM_GAMESCOPE=1
 
+# No system bus and no NetworkManager for Steam (quasar#741). The runtime's
+# 20-steam-system-services.sh starts both, and KDE/XFCE keep them (Plasma's applet
+# and Discover read NM). Steam's login waits in WaitingForNetwork until a device
+# has an IPv4 default route, which it takes from NM's ActiveConnection.Default;
+# NM only observes the container's interface (no NET_ADMIN), never makes it the
+# default, so every sign-in sat out Steam's timeout: 10 s, 20 s under -silent.
+# With no NM client Steam skips that wait, and its UI no longer needs NM to start.
+# QUASAR_STEAM_SYSTEM_SERVICES=1 restores both services.
+ENV QUASAR_STEAM_SYSTEM_SERVICES=0
+
 CMD ["/usr/local/bin/quasar-steam"]
