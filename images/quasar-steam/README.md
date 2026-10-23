@@ -44,6 +44,14 @@ when they contain the full gamepadui unit; `QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0
 overrides that default.
 Set `QUASAR_STEAM_GAMESCOPE=0` to run Steam without nested Gamescope.
 
+Before Steam starts, the launcher turns on Steam's background shader processing
+(`ShaderCacheManager` → `EnableShaderBackgroundProcessing` `1` in
+`~/.local/share/Steam/config/config.vdf`), but only when that key is absent: a value the
+user set, either way, is never touched. A home with no `config.vdf` yet is skipped (Steam
+creates it; the next start sets the key), as is a file that is not Steam's KeyValues text
+form, and the file is only ever replaced by a same-directory rename. Set
+`QUASAR_STEAM_SHADER_BACKGROUND=0` to skip the step.
+
 ## Display mode
 
 **Starting mode.** Gamescope's nested output starts at `QUASAR_STREAM_WIDTH` /
