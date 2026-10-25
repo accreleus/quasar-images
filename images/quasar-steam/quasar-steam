@@ -52,47 +52,58 @@ export GTK_IM_MODULE="${GTK_IM_MODULE:-Steam}"
 export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-dxgi=n}"
 
 # --- Steam UI mode & the game-foreground handoff -----------------------------
-# In nested Gamescope, pressing "Play" only brings the game to the foreground if
-# Gamescope can focus the game's window. Gamescope's Steam-integration focus is
-# X11-atom driven (STEAM_GAME per-window appID + GAMESCOPECTRL_BASELAYER_APPID on
-# the root window), and is independent of whether Steam is a child of Gamescope
-# (games-on-whales and Valve's own gamescope-session both launch Steam as a
-# sibling X client). Two validated configurations exist:
-#
-#   bigpicture  (default) - legacy Big Picture, `-bigpicture`. Steam does NOT pin
-#               GAMESCOPECTRL_BASELAYER_APPID, so Gamescope's default focus raises
-#               the newest STEAM_GAME-tagged window (the launched game). This is
-#               the games-on-whales-validated path and the robust default here.
-#   gamepadui   - modern Deck UI. Requires Steam to run in a full SteamOS session
-#               (`-gamepadui -steamos3 -steampal -steamdeck` + STEAM_MULTIPLE_XWAYLANDS=1)
-#               so Steam tags game windows and manages the baselayer handoff.
-#               A PARTIAL gamepadui config (e.g. `-gamepadui` alone) pins focus to
-#               the Steam UI forever and never releases it to launched games -
-#               this is the defect this image fixes, so the flags ship as a
-#               validated unit, never partially.
-#
-# STEAM_STARTUP_FLAGS overrides the computed flags verbatim (advanced use).
-ui_mode="${QUASAR_STEAM_UI_MODE:-bigpicture}"
+# Gamescope's Steam-integration focus is X11-atom driven (STEAM_GAME per-window
+# appID + GAMESCOPECTRL_BASELAYER_APPID on the root), independent of whether
+# Steam is a child of Gamescope. This image carries no UI-mode default: the
+# catalog's Steam runtime preset sets STEAM_STARTUP_FLAGS=-bigpicture for the
+# plain app, and a derived tile's flags replace that env (once #728 drops
+# -bigpicture from the tile flags, quick launch runs with no Big Picture). With
+# STEAM_STARTUP_FLAGS and QUASAR_STEAM_UI_MODE both unset, Steam gets no
+# UI-mode flag. QUASAR_STEAM_UI_MODE is an explicit opt-in to a validated unit:
+#   bigpicture  `-bigpicture` — Steam does not pin the baselayer, so Gamescope's
+#               default focus raises the newest STEAM_GAME window.
+#   gamepadui   `-gamepadui -steamos3 -steampal -steamdeck` — Steam tags game
+#               windows and manages the baselayer handoff. A partial gamepadui
+#               config pins focus to the Steam UI forever, so the flags ship as
+#               a unit, never partially.
+# STEAM_STARTUP_FLAGS overrides the mode flags verbatim.
+ui_mode="${QUASAR_STEAM_UI_MODE:-}"
+default_flags=""
 case "$ui_mode" in
+  "")
+    ;;
   bigpicture)
     default_flags="-bigpicture"
-    multi_xwayland_default=0
     ;;
   gamepadui)
     default_flags="-gamepadui -steamos3 -steampal -steamdeck"
-    multi_xwayland_default=1
     ;;
   *)
-    log "unknown QUASAR_STEAM_UI_MODE='$ui_mode'; falling back to bigpicture"
-    default_flags="-bigpicture"
-    multi_xwayland_default=0
+    log "unknown QUASAR_STEAM_UI_MODE='$ui_mode'; starting Steam with no UI-mode flag"
     ;;
 esac
+if [[ -n "$ui_mode" && -n "${STEAM_STARTUP_FLAGS:-}" ]]; then
+  log "QUASAR_STEAM_UI_MODE=$ui_mode ignored: STEAM_STARTUP_FLAGS is set"
+fi
 export STEAM_STARTUP_FLAGS="${STEAM_STARTUP_FLAGS:-$default_flags}"
 
-# Per-game Xwayland isolation is part of the validated gamepadui unit and stays
-# off for bigpicture. Gamescope composites every Xwayland into one output, so the
-# node-agent's compositor capture is unaffected either way.
+if [[ " $STEAM_STARTUP_FLAGS " != *" -bigpicture "* \
+   && " $STEAM_STARTUP_FLAGS " != *" -gamepadui "* \
+   && " $STEAM_STARTUP_FLAGS " != *" -tenfoot "* \
+   && " $STEAM_STARTUP_FLAGS " != *" -applaunch "* ]]; then
+  log "WARNING: Steam is starting with no UI mode (no -bigpicture/-gamepadui/-tenfoot and no -applaunch); if this is the plain Steam app, its runtime preset needs STEAM_STARTUP_FLAGS=-bigpicture."
+fi
+
+# Per-game Xwayland isolation follows the effective flags: on only when they
+# contain the full gamepadui unit. Gamescope composites every Xwayland into one
+# output, so the node-agent's compositor capture is unaffected either way.
+multi_xwayland_default=0
+if [[ " $STEAM_STARTUP_FLAGS " == *" -gamepadui "* \
+   && " $STEAM_STARTUP_FLAGS " == *" -steamos3 "* \
+   && " $STEAM_STARTUP_FLAGS " == *" -steampal "* \
+   && " $STEAM_STARTUP_FLAGS " == *" -steamdeck "* ]]; then
+  multi_xwayland_default=1
+fi
 if [[ "${QUASAR_STEAM_MULTIPLE_XWAYLANDS:-$multi_xwayland_default}" == "1" ]]; then
   export STEAM_MULTIPLE_XWAYLANDS=1
 fi
@@ -404,35 +415,19 @@ if [[ "$direct_display" == 1 ]]; then
   gs_pid=$!
 else
   # Nested gamescope sizes its virtual output from -W/-H/-r at launch, so whatever
-  # it is given here is the display Steam and every game it launches START with.
-  # Under a Quasar compositor that speaks wlr-output-management, the patched
-  # gamescope then lists the host's real modes to games, forwards a game's pick to
-  # the host, and follows the host's mode (size and refresh) when it moves
-  # (quasar#447, gamescope-quasar-mode-forward.patch; GAMESCOPE_QUASAR_MODE_FORWARD=0
-  # turns that off and restores plain scaling inside gamescope). Quasar injects the session's
-  # streamed mode as QUASAR_STREAM_WIDTH/HEIGHT/FPS (quasar#384); before that the
-  # baked 1920x1080x60 defaults below applied to every session, so a 1440p120
-  # session rendered 1080p60 and the compositor upscaled it. An explicit
+  # it is given here is the display Steam and every game it launches START with;
+  # a game's own resolution pick is scaled inside gamescope's output, as upstream
+  # does. Quasar injects the session's streamed mode as
+  # QUASAR_STREAM_WIDTH/HEIGHT/FPS (quasar#384); before that the baked
+  # 1920x1080x60 defaults below applied to every session, so a 1440p120 session
+  # rendered 1080p60 and the compositor upscaled it. An explicit
   # GAMESCOPE_* still wins (per-app pin, and what Quasar's compatibility shim
   # sets); the literals are the last resort for a standalone `docker run`.
   gs_width="${GAMESCOPE_WIDTH:-${QUASAR_STREAM_WIDTH:-1920}}"
   gs_height="${GAMESCOPE_HEIGHT:-${QUASAR_STREAM_HEIGHT:-1080}}"
   gs_refresh="${GAMESCOPE_REFRESH:-${QUASAR_STREAM_FPS:-60}}"
 
-  # Gamescope's own Xwayland: the patched build keeps the refresh of a game's
-  # RandR pick (xwayland-quasar-emu-mode.patch). wlroots execs $WLR_XWAYLAND
-  # instead of its compiled-in path. Forwarding off, or the binary missing, means
-  # the system Xwayland exactly as before; an explicit WLR_XWAYLAND still wins.
-  gs_xwayland=/usr/local/libexec/quasar-steam/Xwayland
-  case "${GAMESCOPE_QUASAR_MODE_FORWARD:-1}" in
-    0|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|[Nn][Oo]) gs_mode_forward=0 ;;
-    *) gs_mode_forward=1 ;;
-  esac
-  if [[ -z "${WLR_XWAYLAND:-}" && "$gs_mode_forward" == 1 && -x "$gs_xwayland" ]]; then
-    export WLR_XWAYLAND="$gs_xwayland"
-  fi
-
-  log "starting Gamescope (mode=$ui_mode ${gs_width}x${gs_height}@${gs_refresh} flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0} mode_forward=$gs_mode_forward xwayland=${WLR_XWAYLAND:-system})"
+  log "starting Gamescope (mode=$ui_mode ${gs_width}x${gs_height}@${gs_refresh} flags='$STEAM_STARTUP_FLAGS' multi_xwayland=${STEAM_MULTIPLE_XWAYLANDS:-0})"
   gamescope -e ${GAMESCOPE_MODE:--b} -R "$gs_socket" -T "$gs_stats" \
     -W "$gs_width" \
     -H "$gs_height" \
@@ -441,7 +436,7 @@ else
 fi
 
 # Readiness window. 5s was too tight: gamescope's own startup (Xwayland +
-# xkbcomp keysym compile + Vulkan/EGL init) measured 4.5-10.6s on Tower with the
+# xkbcomp keysym compile + Vulkan/EGL init) measured 4.5-10.6s on the NVIDIA console host with the
 # time varying run to run and NOT with the requested mode (1440p120 came up in
 # 6.1s between two 1080p60 runs at 10.6s and 4.6s). Losing that race aborted the
 # whole container with "gamescope did not report ready", i.e. a dead session for
@@ -476,6 +471,65 @@ fi
 if [[ "$shutting_down" == "1" ]]; then
   log "shutdown requested during startup; exiting without launching Steam"
   exit 143
+fi
+
+# quasar#731: for a derived Steam game tile the node agent mounts its report-only launch
+# helper and sets QUASAR_LAUNCH_HELPER. It reads gamescope's DISPLAY, so it starts after
+# the ready handshake. Steam waits for its "ready" line, at most 2 s: the helper decides
+# on its first look where to start reading Steam's log, which the home keeps from the
+# last session. A helper that exits or fails answers at once.
+#
+# The helper is kept running: one that dies (a crash, or the game killing it) is started
+# again, at most 3 times a minute. A clean exit means it has nothing to watch, and once
+# the launcher is gone the container is ending. Only the first start gets this
+# function's stdout, the ready pipe, so a helper that exits gives the launcher EOF.
+supervise_launch_helper() {
+  local helper="$1" pid rc window=$SECONDS starts=0
+  "$helper" &
+  pid=$!
+  exec >/dev/null
+  while :; do
+    rc=0
+    wait "$pid" || rc=$?
+    (( rc != 0 )) && kill -0 "$$" 2>/dev/null || return 0
+    (( SECONDS - window >= 60 )) && { window=$SECONDS; starts=0; }
+    if (( ++starts > 3 )); then
+      log "WARN: launch helper exited $rc, 3 restarts this minute; next start in $(( 60 - SECONDS + window ))s"
+      sleep "$(( 60 - SECONDS + window ))"
+      kill -0 "$$" 2>/dev/null || return 0
+      window=$SECONDS
+      starts=1
+    fi
+    log "launch helper exited $rc; restarting it"
+    "$helper" &
+    pid=$!
+  done
+}
+
+if [[ -n "${QUASAR_LAUNCH_HELPER:-}" && -f "$QUASAR_LAUNCH_HELPER" ]]; then
+  launch_helper="$QUASAR_LAUNCH_HELPER"
+  # A host that mounts /run noexec passes the mount on noexec: run a copy from the private
+  # runtime dir, on the home Steam itself runs from. The copy is a fresh temp file renamed
+  # into place, so whatever an earlier session left at that path (a FIFO, a symlink) is
+  # never opened or followed.
+  if [[ ! -x "$launch_helper" ]]; then
+    launch_helper="$XDG_RUNTIME_DIR/quasar-launch-helper"
+    helper_tmp="$(mktemp "$launch_helper.XXXXXX")" \
+      && cp "$QUASAR_LAUNCH_HELPER" "$helper_tmp" && chmod 0755 "$helper_tmp" \
+      && mv -fT "$helper_tmp" "$launch_helper" \
+      || { rm -f "${helper_tmp:-}"; launch_helper=""; }
+  fi
+  if [[ -n "$launch_helper" ]]; then
+    exec {helper_ready}< <(supervise_launch_helper "$launch_helper")
+    helper_line=""
+    read -r -t 2 -u "$helper_ready" helper_line || true
+    if [[ "$helper_line" == ready ]]; then
+      log "launch helper ready"
+    else
+      log "WARN: launch helper not ready within 2s; starting Steam anyway"
+    fi
+    exec {helper_ready}<&-
+  fi
 fi
 
 if command -v ibus-daemon >/dev/null 2>&1; then

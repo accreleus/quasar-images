@@ -18,10 +18,10 @@ Each image:
 | `id` | yes | Stable identifier. **Never reuse an id for a different image.** |
 | `display_name` | yes | Shown in the admin catalog. |
 | `description` | | Longer text. |
-| `kind` | yes | `prebuilt` (pull `registry_ref`) or `template` (build locally — a later Quasar phase). |
+| `kind` | yes | `prebuilt` (pull `registry_ref`) or `template` (a host builds it locally; see "Template images build on a Quasar host"). |
 | `version` | yes | The image's CalVer `YYYY.MM.DD[.N]` — when this image was released. App images track upstream software with no meaningful semver of its own, so a date is honest where `1.2.0` would be fiction. "Update available" = this value moved, which is always a deliberate edit here. |
 | `registry_ref` | prebuilt | Concrete, immutable image reference (a `sha-<commit>` or digest tag, never `:latest`/`:develop`). |
-| `dockerfile` | template | Path within this repo. (Reserved; template builds are a later phase.) |
+| `dockerfile` | template | Path within this repo, built with the repository root as context. |
 | `build_args` | template | Build args. |
 | `artwork` | | Paths within this repo (e.g. `{ "tile": "images/.../tile.png" }`). |
 | `library_provider` | | Set when this image IS a provider's canonical image (e.g. `steam`). Enabling that provider in Quasar auto-ensures this image. |
@@ -66,6 +66,16 @@ every session direct, and an agent that does not know the key ignores it. Set it
 only alongside a `registry_ref` whose build has the direct entry (or say in
 `notes` that the next pin must reach one). Today `kde-desktop` and `steam` set it
 (see each image's README, "Direct display").
+
+## Template images build on a Quasar host
+
+A `kind: template` entry is built by a node agent's classic builder, with the repository
+root (at the catalog's pinned commit) as the build context and `build_args` as the build
+args. So a template Dockerfile must: use no BuildKit-only syntax (`RUN --mount`,
+`# syntax=`, heredocs); `COPY` paths relative to the repository root; and `FROM` an image
+a host can pull anonymously, pinned by digest through `build_args` (a Dockerfile's own
+default such as `quasar-app:dev` exists on no host). An image that cannot meet this does
+not belong in the manifest. Prove one host build before adding an entry.
 
 ## Pinning discipline
 

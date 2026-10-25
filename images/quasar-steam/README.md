@@ -19,16 +19,29 @@ Gamescope this is driven entirely by X11 atoms, not process ancestry:
   (appID `769`) and never hands focus to launched games — the Play button just
   turns into Resume while the screen stays on Steam. This was the original defect.
 
-The launcher (`quasar-steam`) selects one of two **validated** configurations via
-`QUASAR_STEAM_UI_MODE`:
+The launcher (`quasar-steam`) bakes in no UI-mode default. The plain Steam app's
+UI mode comes from the catalog's Steam runtime preset, which carries
+`STEAM_STARTUP_FLAGS=-bigpicture`; a derived game tile overrides that env with
+its own flags, and once #728 drops `-bigpicture` from the tile flags, quick
+launch will run with no Big Picture. With `STEAM_STARTUP_FLAGS` and
+`QUASAR_STEAM_UI_MODE` both unset, Steam starts with no UI-mode flag, and the
+launcher logs a warning (a derived tile's `-applaunch` flags do not warn).
+`QUASAR_STEAM_UI_MODE` still selects one of two **validated** configurations as
+an explicit opt-in. To opt in to gamepadui on an app whose preset already
+carries `STEAM_STARTUP_FLAGS`, set the full gamepadui flag set as
+`STEAM_STARTUP_FLAGS` on the app — the preset's flags win over the mode, so
+`QUASAR_STEAM_UI_MODE=gamepadui` alone would otherwise leave a partial unit.
 
 | `QUASAR_STEAM_UI_MODE` | Steam flags | `STEAM_MULTIPLE_XWAYLANDS` | Notes |
 |---|---|---|---|
-| `bigpicture` (default) | `-bigpicture` | off | Legacy Big Picture. Does not pin the baselayer; games come forward via the default focus. games-on-whales-validated, robust default. |
+| *(unset)* | *(none)* | off | No UI-mode flag. For the plain Steam app it means a Steam app that does not use the preset the Steam image installed, without the flag (the launcher warns). |
+| `bigpicture` | `-bigpicture` | off | Legacy Big Picture. Does not pin the baselayer; games come forward via the default focus. games-on-whales-validated. |
 | `gamepadui` | `-gamepadui -steamos3 -steampal -steamdeck` | on | Modern Deck UI. Full SteamOS session unit (matches Valve's gamescope-session). Never shipped partially. |
 
 `STEAM_STARTUP_FLAGS` overrides the computed flags verbatim (advanced use).
-`QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0`/`1`) overrides the per-mode default.
+The `STEAM_MULTIPLE_XWAYLANDS` default follows the effective flags — on only
+when they contain the full gamepadui unit; `QUASAR_STEAM_MULTIPLE_XWAYLANDS` (`0`/`1`)
+overrides that default.
 Set `QUASAR_STEAM_GAMESCOPE=0` to run Steam without nested Gamescope.
 
 ## Display mode
@@ -39,37 +52,12 @@ from the launched stream profile (quasar#384). An explicit `GAMESCOPE_WIDTH` /
 `GAMESCOPE_HEIGHT` / `GAMESCOPE_REFRESH` overrides it (per-app pin). With
 neither set, the image falls back to 1920x1080x60.
 
-**A game's resolution pick moves the monitor (quasar#447).** This needs a
-Quasar compositor that speaks `wlr-output-management`. The patched gamescope
-(`gamescope-quasar-mode-forward.patch`) then does three things:
-
-- It lists the monitor's modes in a game's display settings, each with its own
-  refresh rate. Modes larger than the session's starting size are not listed.
-- When a game applies one, gamescope asks the host for that mode. When the game
-  exits or loses focus, it asks for the session's mode again.
-- When the host moves, gamescope follows it: its output takes the new size and
-  refresh, so the game runs 1:1 instead of being scaled.
-
-Gamescope's own Xwayland is a patched build at
-`/usr/local/libexec/quasar-steam/Xwayland` (`xwayland-quasar-emu-mode.patch`).
-Without it, a game's pick reaches gamescope as a size only, so the refresh it
-chose would be lost. The system Xwayland is unchanged.
-
-The signal is a RandR or VidMode mode change, which native games (SDL) and Wine
-games that switch modes make. Steam's per-game resolution setting
-(`GAMESCOPE_XWAYLAND_MODE_CONTROL`) is forwarded as a size too. A Proton game
-that scales internally and never switches modes is still scaled by gamescope.
-
-Turn it off with `GAMESCOPE_QUASAR_MODE_FORWARD=0`: gamescope then scales a
-game's resolution inside its own output, as upstream does, and the launcher uses
-the system Xwayland. The same happens automatically when the host has no
-`wlr-output-management`.
-
-How to check it worked:
-
-- The gamescope log has `parent speaks zwlr_output_manager_v1` at startup.
-- Applying a mode in a game logs `asking the parent for WxH @ R Hz`, then
-  `parent is at WxH @ R Hz`.
+**A game's resolution pick stays inside the session.** In a nested session
+gamescope's output is the session's streamed mode, and a game that asks for a
+different resolution is scaled inside that output, as upstream does; the
+monitor's modes are not visible to the game and the host is never asked to move.
+Gamescope's Xwayland is the system one. To change the display a console session
+runs at, use direct display (below), where gamescope drives the monitor itself.
 
 ## Direct display (console sessions, quasar#453)
 
@@ -116,13 +104,23 @@ What the image does:
   private `XDG_RUNTIME_DIR`) and then execs Steam. WirePlumber picks the default
   output; Steam's Settings > Audio lists the others. A nested session starts none
   of this and keeps the agent's `PULSE_SERVER`.
-- The nested-only pieces (`QUASAR_STREAM_*`, `GAMESCOPE_WIDTH/HEIGHT/REFRESH`, the
-  mode-forwarding Xwayland) are not used.
+- The nested-only pieces (`QUASAR_STREAM_*`, `GAMESCOPE_WIDTH/HEIGHT/REFRESH`) are
+  not used.
 
 How to know it worked: the log has `seatd ready: /run/seatd.sock`,
 `audio: PipeWire, WirePlumber and the PulseAudio shim started`, then
 `starting Gamescope on the display (direct; ... 3840x2160@240 ... gbm_scanout=1 ...)`,
 and gamescope's own `Overriding from environment variable: gamescope.convars.drm_gbm_scanout.value = 1`.
+
+## Launch helper (quasar#731)
+
+For a Steam game tile, Quasar's node agent mounts its report-only launch helper and
+sets `QUASAR_LAUNCH_HELPER` and `QUASAR_LAUNCH_SOCKET`. Once gamescope reports ready
+the launcher starts the helper, and Steam waits for the helper's `ready` line, at most
+2 s: the helper decides on its first look where to start reading Steam's log. A helper
+that dies is started again, at most 3 times a minute. On a host that mounts `/run`
+noexec the mount cannot be executed, so the launcher runs a copy from its private
+runtime directory. With the variable unset, nothing changes.
 
 ## Host / launch requirements
 
@@ -157,40 +155,30 @@ must provide them.
    convention (e.g. unraid's `99:100`): run as root and pass `PUID`/`PGID` and the
    entrypoint drops to that user via `setpriv`. Steam state lives under `$HOME`.
 
-## In-container system services (D-Bus + NetworkManager)
+## In-container system services (D-Bus + NetworkManager): off for Steam
 
-`/etc/quasar/init.d/20-steam-system-services.sh` starts a **D-Bus system bus** and
-**NetworkManager** inside the container, as root, before `quasar-entrypoint` drops
-privileges. Both are required for Steam Big Picture to start at all
-(quasar-images#4): Steam builds its network subsystem on `libnm`, and when
-`nm_client_new()` fails it never registers the `SteamClient.System.Network.*`
-bindings into the UI's JS context. The BPM `SystemNetworkStore` initialises
-*before login*, throws `RegisterForDeviceChanges is not a function`, and the UI
-sits on "Waiting for network…" forever — even though the client itself is online
-and its connectivity test passes. games-on-whales' steam image
-(`apps/steam/build-fedora/scripts/system-services.sh`) does the same two things
-for the same reason.
+`quasar-steam-runtime` ships `/etc/quasar/init.d/20-steam-system-services.sh`,
+which starts a **D-Bus system bus** and **NetworkManager** inside the container
+(the KDE and XFCE images keep them on: Plasma's network applet and Discover read
+NM). This image sets `QUASAR_STEAM_SYSTEM_SERVICES=0`, so Steam runs with
+neither (quasar#741).
 
-Properties of this arrangement:
+Why off: Steam's login sits in `WaitingForNetwork` until some network device has
+an IPv4 default route, and it reads that flag from NetworkManager's
+`ActiveConnection.Default`. NM in a container has no `NET_ADMIN`, so it only
+*observes* the interface docker configured ("connected (externally)"), and NM
+never picks an externally managed device as the default. The flag stays false,
+and every sign-in waited out Steam's timeout: 10 s in Big Picture, 20 s under
+`-silent` (`steamui_login.txt`: `Timed out waiting for network`). With no NM
+client Steam skips the wait and signs in at once.
 
-- The bus is created **inside** the container. The host's system bus is never
-  mounted in — an app container is a tenant workload.
-- NetworkManager runs as a read-only **observer**. The session container has
-  `--cap-drop ALL` with no `NET_ADMIN`, so it cannot reconfigure anything, and
-  `/etc/NetworkManager/conf.d/00-quasar.conf` sets `no-auto-default=*` +
-  `dns=none` so it never tries to. Verified live: `eth0` is adopted as
-  `connected (externally)`, docker's address and `/etc/resolv.conf` are untouched,
-  DNS keeps resolving.
-- NM reports overall connectivity as `limited` (its captive-portal probe has no
-  route to Fedora's hotspot endpoint from here). That is cosmetic — Steam only
-  needs the client to construct, and BPM reaches the sign-in screen regardless.
-- Escape hatch: `QUASAR_STEAM_SYSTEM_SERVICES=0` skips both services and restores
-  the previous behaviour (i.e. reproduces the hang). It exists for A/B debugging,
-  not for production.
+The first reason for these services (quasar-images#4: Big Picture's
+`SystemNetworkStore` threw without `SteamClient.System.Network.*` and the UI hung
+on "Waiting for network" forever) is gone: current Steam checks for those
+bindings before using them.
 
-This is a workaround for a Steam-side coupling, not a fix: a containerised Steam
-ought to degrade to "assume online" when no NetworkManager exists. Until Valve
-changes that, an in-container NM is the only lever available to us.
+`QUASAR_STEAM_SYSTEM_SERVICES=1` (in the runtime preset's env) brings both
+services back, for A/B debugging.
 
 ## Build & verify
 

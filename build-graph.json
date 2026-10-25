@@ -156,7 +156,7 @@
       "verify": ["scripts/verify-benchapp.sh"],
       "ci": true,
       "publish": false,
-      "notes": "kind=template in quasar-manifest.json, so nothing pulls it from a registry -- built and VERIFIED in CI (verify-benchapp.sh, which nothing ran before), not published. BENCHAPP_SRC_IMAGE is left empty here on purpose: scripts/build.sh resolves it (explicit override > a local quasar-benchapp:src > the registry image quasar-mark publishes). See AGENTS.md, 'The benchapp payload'."
+      "notes": "NOT in quasar-manifest.json (removed quasar#615: its payload image is built from a private repo, so a Quasar host cannot build it), so nothing pulls it from a registry -- built and VERIFIED in CI (verify-benchapp.sh, which nothing ran before), not published. BENCHAPP_SRC_IMAGE is left empty here on purpose: scripts/build.sh resolves it (explicit override > a local quasar-benchapp:src > the registry image quasar-mark publishes). See AGENTS.md, 'The benchapp payload'."
     },
     {
       "name": "quasar-test-vulkan",
@@ -193,7 +193,7 @@
       "verify": ["scripts/verify-unigine.sh"],
       "ci": false,
       "publish": false,
-      "notes": "ci=false DELIBERATELY. It pulls 1.9 GB of EULA'd UNIGINE installers from assets.unigine.com and is never published (README: 'deliberately not published to GHCR' -- it redistributes third-party binaries). CI would therefore spend the download and the disk on an image it can neither publish nor hand to anyone. It stays in `build.sh all` for local/devbox builds, where the BuildKit cache mount makes the download a one-off."
+      "notes": "ci=false DELIBERATELY. It pulls 1.9 GB of EULA'd UNIGINE installers from assets.unigine.com and is never published (README: 'deliberately not published to GHCR' -- it redistributes third-party binaries). CI would therefore spend the download and the disk on an image it can neither publish nor hand to anyone. It stays in `build.sh all` for local/devbox builds, with no cache mount (a Quasar host builds the template with the classic builder, which rejects RUN --mount), so a rebuild that reaches the download layer re-pulls it."
     }
   ]
 }

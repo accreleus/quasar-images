@@ -66,8 +66,21 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   grep -q "QUASAR_STEAM_SHUTDOWN_TIMEOUT:-8" "$steam"
   grep -q "QUASAR_STEAM_GAMESCOPE:-1" "$steam"
 
-  # Default UI mode is the games-on-whales-validated bigpicture path.
-  grep -q "QUASAR_STEAM_UI_MODE:-bigpicture" "$steam"
+  # No baked UI-mode default: the UI mode comes from the catalog Steam
+  # runtime preset (STEAM_STARTUP_FLAGS=-bigpicture); QUASAR_STEAM_UI_MODE
+  # only selects a mode as an explicit opt-in.
+  if ! grep -qF '"'"'ui_mode="${QUASAR_STEAM_UI_MODE:-}"'"'"' "$steam"; then
+    echo "FAIL: launcher does not leave QUASAR_STEAM_UI_MODE unset by default (baked UI-mode default)" >&2
+    exit 1
+  fi
+  if grep -q "QUASAR_STEAM_UI_MODE:-bigpicture" "$steam"; then
+    echo "FAIL: launcher bakes in a bigpicture UI-mode default" >&2
+    exit 1
+  fi
+  if grep -q 'STEAM_STARTUP_FLAGS:--bigpicture' "$client"; then
+    echo "FAIL: steam-wrapper bakes in a bigpicture fallback" >&2
+    exit 1
+  fi
 
   # Game-foreground invariant: -gamepadui must never appear without the full
   # SteamOS deck-session unit (a partial gamepadui config pins focus to the UI).
@@ -84,23 +97,8 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   # diagnostic, discovered while proving the group-kill fix green end-to-end).
   grep -q "unset WAYLAND_DISPLAY" "$steam"
 
-  # Display-mode forwarding (quasar#447): the patched Xwayland gamescope runs
-  # is installed beside the system one, the launcher points gamescope at it
-  # only while forwarding is on, and the knob is honoured.
-  test -x /usr/local/libexec/quasar-steam/Xwayland
-  test -x /usr/bin/Xwayland
-  grep -q "WLR_XWAYLAND=" "$steam"
-  grep -q "GAMESCOPE_QUASAR_MODE_FORWARD" "$steam"
-  /usr/local/libexec/quasar-steam/Xwayland -version 2>&1 | grep -q "Xwayland Version"
-  if ldd /usr/local/libexec/quasar-steam/Xwayland | grep -q "not found"; then
-    echo "FAIL: the patched Xwayland has unresolved libraries" >&2
-    exit 1
-  fi
-  # The forwarding code is in the gamescope binary (its knob and the
-  # property it reads from the patched Xwayland).
-  grep -q "GAMESCOPE_QUASAR_MODE_FORWARD" /usr/bin/gamescope
-  grep -q "_QUASAR_XWAYLAND_EMU_MODE" /usr/bin/gamescope
-  grep -q "_QUASAR_XWAYLAND_EMU_MODE" /usr/local/libexec/quasar-steam/Xwayland
+  # The patched gamescope replaces the packaged binary but must still resolve every
+  # library the RPM dependencies provide.
   if ldd /usr/bin/gamescope | grep -q "not found"; then
     echo "FAIL: the patched gamescope has unresolved libraries" >&2
     exit 1
@@ -166,12 +164,10 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   grep -q "nvidia_quasar_volume()" /usr/local/bin/quasar-gpu-init
   grep -qE "^nvidia_quasar_volume$" /usr/local/bin/quasar-gpu-init
 
-  # D-Bus system bus + NetworkManager (quasar-images#4). Without them Steam'"'"'s
-  # libnm client fails to construct, the client never registers
-  # SteamClient.System.Network.*, and Big Picture'"'"'s SystemNetworkStore throws
-  # pre-login -- the UI hangs on "Waiting for network" forever with a perfectly
-  # online client. Proven by A/B on quasar-devbox 2026-08-09 (same image, same
-  # home volume, QUASAR_STEAM_SYSTEM_SERVICES on/off).
+  # D-Bus system bus + NetworkManager hook (quasar-images#4), inherited from
+  # quasar-steam-runtime. This image turns it off by default (quasar#741, see the
+  # ENV check below); the hook stays so QUASAR_STEAM_SYSTEM_SERVICES=1 can bring
+  # NM back, and must stay safe when it does.
   hook=/etc/quasar/init.d/20-steam-system-services.sh
   test -x "$hook"
   grep -q "dbus-daemon --system" "$hook"
@@ -190,6 +186,13 @@ docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
 # device and every NM-gated app (Plasma applet, Discover, Steam) plays offline.
 grep -q "^uri=http://nmcheck.gnome.org/check_network_status.txt" /etc/NetworkManager/conf.d/00-quasar.conf
 '
+
+# Steam runs without the system bus and NetworkManager (quasar#741): NM in a
+# container never marks the interface as the default route, and Steam's login
+# then waits out a 10 s / 20 s network timeout on every start.
+docker image inspect "$STEAM_IMAGE" --format '{{json .Config.Env}}' \
+  | jq -e 'index("QUASAR_STEAM_SYSTEM_SERVICES=0") != null' >/dev/null \
+  || { echo "FAIL: $STEAM_IMAGE must default QUASAR_STEAM_SYSTEM_SERVICES=0 (quasar#741)" >&2; exit 1; }
 
 labels="$(docker image inspect "$STEAM_IMAGE" --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "required"' <<<"$labels" >/dev/null

@@ -108,7 +108,7 @@ contains the `writeConfig("icon", "quasar")` assignment, so a silent
 regression fails CI rather than shipping.
 
 **Logo asset (provided 2026-08-13):** the Quasar mark from the site build —
-`/Users/michael/code/quasar/site/dist/_astro/quasar-mark.DOqKpC47.svg`
+`site/dist/_astro/quasar-mark.DOqKpC47.svg` in the Quasar repo
 (571 B, 32x32 viewBox, gradient mark). Copied into this repo as
 `images/quasar-kde/overlay/usr/share/icons/hicolor/scalable/apps/quasar.svg`
 (committed here so image builds never depend on a sibling repo's dist output);

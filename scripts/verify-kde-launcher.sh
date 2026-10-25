@@ -173,8 +173,6 @@ expect_not "$o" startplasma-wayland.env '^QUASAR_KDE_OUTPUT_(WIDTH|HEIGHT)=' \
   "the nested output size has no meaning on DRM: KWin takes the monitor's mode"
 expect_not "$o" startplasma-wayland.env '^PULSE_(SERVER|SINK|SOURCE|COOKIE)=' \
   "the desktop's own audio stack picks the output, not the agent's Pulse sink"
-expect_not "$o" startplasma-wayland.env '^QT_LOGGING_RULES=.*kscreen\.kded' \
-  "the nested mode-forwarding log rules are for the console mode-forward path"
 for daemon in pipewire wireplumber pipewire-pulse; do
   expect "$o" "$daemon.env" QV_IN_SESSION_BUS=1 "$daemon must run inside the desktop's session bus"
   expect "$o" "$daemon.env" XDG_RUNTIME_DIR=/home/quasar/.runtime \
@@ -203,9 +201,7 @@ expect "$o" startplasma-wayland.env XDG_RUNTIME_DIR=/home/quasar/.runtime "priva
 expect "$o" startplasma-wayland.env KWIN_USE_OVERLAYS=0 "the black-stream fix"
 expect "$o" startplasma-wayland.env QUASAR_KDE_OUTPUT_WIDTH=2560 "the streamed mode sizes nested KWin"
 expect "$o" startplasma-wayland.env QUASAR_KDE_OUTPUT_HEIGHT=1440 "the streamed mode sizes nested KWin"
-expect "$o" startplasma-wayland.env \
-  "QT_LOGGING_RULES=kwin_wayland_backend.info=true;kscreen.kded.debug=true;kscreen.kcm.debug=true" \
-  "the nested logging rules"
+expect "$o" startplasma-wayland.env QT_FORCE_STDERR_LOGGING=1 "the session's warnings must reach the container log"
 expect "$o" startplasma-wayland.env PULSE_SERVER=unix:/run/quasar-pulse/native \
   "a streamed session's audio goes to the agent's Pulse sink"
 if ! section "$o" startplasma-wayland.env | grep -qE '^PATH=/usr/local/libexec/quasar-kde:'; then
