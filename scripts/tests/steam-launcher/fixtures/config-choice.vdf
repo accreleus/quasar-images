@@ -1,0 +1,16 @@
+"InstallConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"system"
+				{
+					"IdleScreensaverACSeconds"		"900"
+				}
+			}
+		}
+	}
+}
