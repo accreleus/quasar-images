@@ -480,9 +480,23 @@ EOF
     mkdir -p "$log/home/.local/share/Steam/config"
     cp "$seed_config" "$log/home/.local/share/Steam/config/config.vdf"
   fi
+  # A config/ the app user cannot use (the cases run as root, which ignores file
+  # modes, so the wrapper then runs as the app user): a file in its place, or a
+  # directory that is not writable.
+  local as=()
+  if [[ -n "${config_as_file:-}" ]]; then
+    : > "$log/home/.local/share/Steam/config"
+  elif [[ -n "${config_readonly:-}" ]]; then
+    mkdir -p "$log/home/.local/share/Steam/config"
+    chmod 0555 "$log/home/.local/share/Steam/config"
+  fi
+  if [[ -n "${config_as_file:-}${config_readonly:-}" ]]; then
+    chmod 0777 "$log" "$log/home"
+    as=(setpriv --reuid=1000 --regid=1000 --clear-groups)
+  fi
   local rc=0
   env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$log/home" STUB_LOG="$log" \
-    "$@" timeout 30 /usr/local/bin/quasar-steam-client >"$log/wrapper.out" 2>&1 || rc=$?
+    "$@" timeout 30 "${as[@]}" /usr/local/bin/quasar-steam-client >"$log/wrapper.out" 2>&1 || rc=$?
   if [[ "$rc" != 0 ]]; then
     fail "$name: steam-wrapper exited $rc"
     sed 's/^/      /' "$log/wrapper.out" >&2
@@ -517,6 +531,9 @@ expect_config() { # <case> <expected file>
     fail "$1: config.vdf differs from $(basename "$2"); it is:"
     sed 's/^/      /' "$got" >&2
   fi
+  if compgen -G "$log/home/.local/share/Steam/config/.config.vdf.*" >/dev/null; then
+    fail "$1: a temp file was left in config/"
+  fi
 }
 seed_config="" run_wrapper screensaver-fresh
 expect_config screensaver-fresh "$T/fixtures/config-fresh.out.vdf"
@@ -530,13 +547,28 @@ expect_config screensaver-choice "$T/fixtures/config-choice.vdf"
 # Not a config Steam wrote: no Steam block to put the key in, so the file is left alone.
 seed_config="$T/fixtures/config-nosteam.vdf" run_wrapper screensaver-nosteam
 expect_config screensaver-nosteam "$T/fixtures/config-nosteam.vdf"
-# Steam starts as before: the wrapper still reaches steam.sh.
+# A CRLF file is edited too, and keeps its line endings.
+seed_config="$T/fixtures/config-crlf.in.vdf" run_wrapper screensaver-crlf
+expect_config screensaver-crlf "$T/fixtures/config-crlf.out.vdf"
+# A failed edit never fails the launch: with a config/ the app user cannot use
+# (a file in its place; a directory it cannot write) Steam still starts.
+config_as_file=1 run_wrapper screensaver-config-is-file
 if [[ "$(head -1 "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]]; then
-  pass "screensaver-nosteam: steam.sh still started"
+  pass "screensaver-config-is-file: steam.sh still started"
 else
-  fail "screensaver-nosteam: steam.sh was not started"
+  fail "screensaver-config-is-file: steam.sh was not started"
 fi
-
+config_readonly=1 run_wrapper screensaver-config-readonly
+if [[ "$(head -1 "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]]; then
+  pass "screensaver-config-readonly: steam.sh still started"
+else
+  fail "screensaver-config-readonly: steam.sh was not started"
+fi
+if grep -q "starting Steam anyway" "$log/wrapper.out"; then
+  pass "screensaver-config-readonly: one warning, then Steam started"
+else
+  fail "screensaver-config-readonly: no warning in the wrapper's output"
+fi
 # --- init hook cases -----------------------------------------------------------
 
 SEATD_HOOK=/etc/quasar/init.d/25-steam-direct-seatd.sh
