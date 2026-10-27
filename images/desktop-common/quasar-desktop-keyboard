@@ -24,7 +24,9 @@
 # grammar ([A-Za-z0-9_-], layout <= 32, variant <= 64): only text from that
 # alphabet is ever written, so nothing reaches a shell, an INI line or XML
 # unquoted. A value outside it is refused with a warning and the desktop
-# starts on its own config -- a bad value must never stop a session.
+# starts on its own config -- a bad value must never stop a session. The same
+# holds when the existing file cannot be read, is a symlink, or has a shape the
+# edit cannot handle: it is left byte-identical and the helper still exits 0.
 set -euo pipefail
 
 log() { printf '%s quasar-desktop-keyboard: %s\n' "$(date -Iseconds)" "$*" >&2; }
@@ -43,45 +45,80 @@ fi
 
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 
-# replace_file <path>: stdin becomes the file, atomically and in the same
-# directory, so a launcher killed mid-write never leaves half a config.
-replace_file() {
-  local path="$1" tmp
-  mkdir -p "$(dirname "$path")"
-  tmp="$(mktemp "$path.XXXXXX")"
-  cat >"$tmp"
-  chmod 0644 "$tmp"
+# kde_merge / xfce_merge: the existing file on stdin (empty when there is none),
+# the new file on stdout; a non-zero exit means "cannot merge safely".
+kde_merge() {
+  awk -v layout="$layout" -v variant="$variant" '
+    function emit() { print "Use=true" eol; print "LayoutList=" layout eol; print "VariantList=" variant eol; done = 1 }
+    /^[ \t]*\[/ {
+      in_layout = ($0 ~ /^\[Layout\][ \t\r]*$/)
+      print
+      if (in_layout && !done) { eol = ($0 ~ /\r$/) ? "\r" : ""; emit() }
+      next
+    }
+    in_layout && /^[ \t]*(Use|LayoutList|VariantList|DisplayNames)[ \t]*=/ { next }
+    { print }
+    END { if (!done) { eol = ""; print "[Layout]"; emit() } }
+  '
+}
+
+xfce_merge() {
+  props="    <property name=\"XkbDisable\" type=\"bool\" value=\"false\"/>
+    <property name=\"XkbLayout\" type=\"string\" value=\"$layout\"/>
+    <property name=\"XkbVariant\" type=\"string\" value=\"$variant\"/>" \
+  awk '
+    BEGIN { q = "[\"\047]"; selfclosed = "/[ \t]*>[ \t\r]*$" }
+    $0 ~ ("<property[^>]*name[ \t]*=[ \t]*" q "(XkbDisable|XkbLayout|XkbVariant)" q) {
+      if ($0 ~ selfclosed) next   # a one-line leaf: ours replaces it
+      bad = 1; exit               # anything else: not a shape we can edit safely
+    }
+    { print }
+    !found && $0 ~ ("^[ \t]*<property[^>]*name[ \t]*=[ \t]*" q "Default" q "[^>]*>[ \t\r]*$") && $0 !~ selfclosed {
+      print ENVIRON["props"]; found = 1
+    }
+    END { if (bad || !found) exit 1 }
+  '
+}
+
+xfce_fresh() {
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n\n<channel name="keyboard-layout" version="1.0">\n  <property name="Default" type="empty">\n    <property name="XkbDisable" type="bool" value="false"/>\n    <property name="XkbLayout" type="string" value="%s"/>\n    <property name="XkbVariant" type="string" value="%s"/>\n  </property>\n</channel>\n' "$layout" "$variant"
+}
+
+# rewrite <path> <merge function>: run the function over the file's whole
+# content into a temp file beside it, and rename that over the file only when
+# the function succeeded -- so a read error or an unmergeable file commits
+# nothing and the user's config stays byte-identical. A symlink or other
+# non-regular file is left alone (replacing it would turn the link into a copy);
+# the file's own mode is kept. Returns non-zero after logging when it did not write.
+rewrite() {
+  local path="$1" merge="$2" tmp src
+  if [[ -L "$path" || ( -e "$path" && ! -f "$path" ) ]]; then
+    log "WARNING: $path is a symlink or not a regular file; leaving it alone"; return 1
+  fi
+  if [[ -e "$path" && ! -r "$path" ]]; then
+    log "WARNING: cannot read $path; leaving it alone"; return 1
+  fi
+  mkdir -p "$(dirname "$path")" && tmp="$(mktemp "$path.XXXXXX")" || { log "WARNING: cannot write next to $path"; return 1; }
+  src=/dev/null; [[ -s "$path" ]] && src="$path"
+  if ! "$merge" <"$src" >"$tmp"; then
+    rm -f "$tmp"; log "WARNING: could not merge the layout into $path safely; leaving it alone"; return 1
+  fi
+  if [[ -e "$path" ]]; then chmod --reference="$path" "$tmp"; else chmod 0644 "$tmp"; fi
   mv -f "$tmp" "$path"
 }
 
 case "$desktop" in
   kde)
-    f="$config_home/kxkbrc"
     # The first [Layout] header gets our keys right after it; the old copies of
     # those keys are dropped wherever they are. No [Layout] group: append one.
-    { [[ ! -f "$f" ]] || cat "$f"; } | awk -v layout="$layout" -v variant="$variant" '
-      function emit() { print "Use=true"; print "LayoutList=" layout; print "VariantList=" variant; done = 1 }
-      /^\[/ { in_layout = ($0 == "[Layout]"); print; if (in_layout && !done) emit(); next }
-      in_layout && /^(Use|LayoutList|VariantList|DisplayNames)=/ { next }
-      { print }
-      END { if (!done) { print "[Layout]"; emit() } }
-    ' | replace_file "$f"
+    rewrite "$config_home/kxkbrc" kde_merge || exit 0
     ;;
   xfce)
     f="$config_home/xfce4/xfconf/xfce-perchannel-xml/keyboard-layout.xml"
-    props="    <property name=\"XkbDisable\" type=\"bool\" value=\"false\"/>
-    <property name=\"XkbLayout\" type=\"string\" value=\"$layout\"/>
-    <property name=\"XkbVariant\" type=\"string\" value=\"$variant\"/>"
-    if [[ -f "$f" ]] && grep -q '<property name="Default" type="empty">' "$f"; then
-      # Keep what else the user set in the channel (XkbModel, XkbOptions, ...).
-      props="$props" awk '
-        /name="(XkbDisable|XkbLayout|XkbVariant)"/ { next }
-        { print }
-        /<property name="Default" type="empty">/ { print ENVIRON["props"] }
-      ' "$f" | replace_file "$f"
-    else
-      printf '<?xml version="1.0" encoding="UTF-8"?>\n\n<channel name="keyboard-layout" version="1.0">\n  <property name="Default" type="empty">\n%s\n  </property>\n</channel>\n' "$props" | replace_file "$f"
-    fi
+    # An absent or empty channel file has nothing to lose: write it whole. An
+    # existing one is only edited in place (XkbModel, XkbOptions, every other
+    # property stay); a shape that edit cannot handle is left untouched.
+    if [[ -s "$f" ]]; then rewrite "$f" xfce_merge || exit 0; else rewrite "$f" xfce_fresh || exit 0; fi
     ;;
   *)
     log "usage: quasar-desktop-keyboard kde|xfce"

@@ -124,6 +124,102 @@ run_helper kde XKB_DEFAULT_LAYOUT=de XKB_DEFAULT_VARIANT='x;y'
 [[ ! -e "$(kx)" ]] || { echo "FAIL: kde: variant 'x;y' was written" >&2; exit 1; }
 qv_pass "bad layout or variant values: refused with a warning, nothing written, exit 0"
 
+# --- an existing file is only ever edited, never replaced or half-written ------
+# fresh_home: a new empty $home; run_in_home <desktop> [VAR=value ...] runs the
+# helper there (exit 0 required) and leaves its stderr in $work/stderr.
+fresh_home() { n=$((n + 1)); home="$work/$n"; mkdir -p "$home/.config"; }
+run_in_home() { local d="$1"; shift; run_helper_here "$d" "$@"; }
+run_helper_here() {
+  local desktop="$1"; shift
+  env -i PATH="$PATH" HOME="$home" "$@" "$helper" "$desktop" 2>"$work/stderr" \
+    || { echo "FAIL: helper exited non-zero for $desktop $*" >&2; cat "$work/stderr" >&2; return 1; }
+}
+same_bytes() {  # same_bytes <file> <expected text> <case>
+  if ! cmp -s <(printf '%s' "$2") "$1"; then echo "FAIL: $3: $1 changed" >&2; diff <(printf '%s' "$2") "$1" >&2 || true; return 1; fi
+  qv_pass "$3"
+}
+warned() { grep -q WARNING "$work/stderr" || { echo "FAIL: $1: nothing was logged" >&2; cat "$work/stderr" >&2; return 1; }; }
+
+# Another legal spelling of the channel XML (single quotes, attribute order,
+# space before '>', one-line leaves, CRLF): Model and Options survive, ours replace the Xkb keys.
+fresh_home; mkdir -p "$(dirname "$(xf)")"
+printf '<?xml version="1.0" encoding="UTF-8"?>\r\n<channel version="1.0" name="keyboard-layout">\r\n  <property type="empty" name='"'Default'"' >\r\n    <property name="XkbModel" type="string" value="pc105"/>\r\n    <property name='"'XkbLayout'"' type="string" value="us" />\r\n    <property name="XkbOptions" type="empty">\r\n      <property name="Group" type="string" value="grp:alt_shift_toggle"/>\r\n    </property>\r\n    <property name="XkbDisable" type="bool" value="true"/>\r\n  </property>\r\n</channel>\r\n' >"$(xf)"
+run_in_home xfce XKB_DEFAULT_LAYOUT=de XKB_DEFAULT_VARIANT=nodeadkeys
+for want in 'name="XkbModel" type="string" value="pc105"' 'grp:alt_shift_toggle' 'name="XkbLayout" type="string" value="de"' 'name="XkbVariant" type="string" value="nodeadkeys"' 'name="XkbDisable" type="bool" value="false"'; do
+  grep -qF -- "$want" "$(xf)" || { echo "FAIL: xfce other spelling: missing $want" >&2; cat "$(xf)" >&2; exit 1; }
+done
+[[ "$(grep -c 'XkbLayout' "$(xf)")" == 1 && "$(grep -c 'XkbDisable' "$(xf)")" == 1 && "$(grep -c value=\"us\" "$(xf)")" == 0 && "$(grep -c value=\"true\" "$(xf)")" == 0 ]] \
+  || { echo "FAIL: xfce other spelling: an old Xkb key survived or doubled" >&2; cat "$(xf)" >&2; exit 1; }
+qv_pass "xfce: another legal spelling keeps XkbModel/XkbOptions and replaces only the layout keys"
+
+# An existing channel file that cannot be edited safely is left byte-identical.
+for odd in '<channel name="keyboard-layout" version="1.0">
+  <property name="Default" type="empty"/>
+</channel>
+' '<channel name="keyboard-layout" version="1.0">
+  <property name="Default" type="empty">
+    <property name="XkbLayout" type="string"
+      value="us"/>
+  </property>
+</channel>
+'; do
+  fresh_home; mkdir -p "$(dirname "$(xf)")"; printf '%s' "$odd" >"$(xf)"
+  run_in_home xfce XKB_DEFAULT_LAYOUT=de
+  same_bytes "$(xf)" "$odd" "xfce: a shape the edit cannot handle is left byte-identical"; warned "xfce unmergeable"
+done
+
+# Unreadable, a directory or a symlink where the file should be: byte-identical, nothing written, still exit 0.
+fresh_home; printf '[Layout]\nLayoutList=us\nOptions=caps:escape\n' >"$home/.config/kxkbrc"; chmod 000 "$home/.config/kxkbrc"
+mkdir -p "$(dirname "$(xf)")"; printf '<channel name="keyboard-layout" version="1.0">\n  <property name="Default" type="empty">\n    <property name="XkbOptions" type="string" value="x"/>\n  </property>\n</channel>\n' >"$(xf)"; chmod 000 "$(xf)"
+if [[ -r "$home/.config/kxkbrc" ]]; then
+  echo "SKIP  unreadable-file cases: running as a user that ignores file modes"
+else
+  run_in_home kde XKB_DEFAULT_LAYOUT=de; warned "kde unreadable"
+  run_in_home xfce XKB_DEFAULT_LAYOUT=de; warned "xfce unreadable"
+  chmod 600 "$home/.config/kxkbrc" "$(xf)"
+  same_bytes "$home/.config/kxkbrc" $'[Layout]\nLayoutList=us\nOptions=caps:escape\n' "kde: an unreadable kxkbrc is left byte-identical"
+  grep -q 'XkbOptions' "$(xf)" && [[ "$(grep -c XkbLayout "$(xf)")" == 0 ]] || { echo "FAIL: xfce: unreadable file was rewritten" >&2; exit 1; }
+  for stray in "$home/.config/kxkbrc".?????? "$(xf)".??????; do
+    [[ ! -e "$stray" ]] || { echo "FAIL: a temp file was left behind: $stray" >&2; exit 1; }
+  done
+  qv_pass "xfce: an unreadable channel file is left byte-identical"
+fi
+fresh_home; mkdir "$home/.config/kxkbrc"
+run_in_home kde XKB_DEFAULT_LAYOUT=de; warned "kde directory"
+[[ -d "$home/.config/kxkbrc" ]] || { echo "FAIL: a directory named kxkbrc was replaced" >&2; exit 1; }
+qv_pass "kde: a non-regular kxkbrc is left alone"
+
+fresh_home; printf '[Layout]\nLayoutList=us\n' >"$work/real-kxkbrc"; ln -s "$work/real-kxkbrc" "$home/.config/kxkbrc"
+run_in_home kde XKB_DEFAULT_LAYOUT=de; warned "kde symlink"
+[[ -L "$home/.config/kxkbrc" ]] || { echo "FAIL: the kxkbrc symlink was replaced" >&2; exit 1; }
+same_bytes "$work/real-kxkbrc" $'[Layout]\nLayoutList=us\n' "kde: a symlinked kxkbrc is left alone (link and target)"
+
+# The file's own mode is kept; a new file is 0644.
+fresh_home; printf '[Layout]\nLayoutList=us\n' >"$home/.config/kxkbrc"; chmod 600 "$home/.config/kxkbrc"
+run_in_home kde XKB_DEFAULT_LAYOUT=de
+[[ "$(stat -c %a "$home/.config/kxkbrc")" == 600 ]] || { echo "FAIL: kde: a 0600 kxkbrc was widened" >&2; exit 1; }
+fresh_home; mkdir -p "$(dirname "$(xf)")"; xml us '' >"$(xf)"; chmod 600 "$(xf)"
+run_in_home xfce XKB_DEFAULT_LAYOUT=de
+[[ "$(stat -c %a "$(xf)")" == 600 ]] || { echo "FAIL: xfce: a 0600 channel file was widened" >&2; exit 1; }
+fresh_home; run_in_home kde XKB_DEFAULT_LAYOUT=de
+[[ "$(stat -c %a "$home/.config/kxkbrc")" == 644 ]] || { echo "FAIL: kde: a new kxkbrc is not 0644" >&2; exit 1; }
+qv_pass "an existing file keeps its mode; a new one is 0644"
+
+# KDE: 'Key = value' spacing, CRLF and indentation; never a second [Layout] group.
+fresh_home; printf '[General]\r\nFoo=bar\r\n\r\n[Layout]\r\nLayoutList = us,fr\r\n  Use = false\r\nVariantList =,\r\nOptions=caps:escape\r\n' >"$home/.config/kxkbrc"
+run_in_home kde XKB_DEFAULT_LAYOUT=de XKB_DEFAULT_VARIANT=nodeadkeys
+same_bytes "$home/.config/kxkbrc" $'[General]\r\nFoo=bar\r\n\r\n[Layout]\r\nUse=true\r\nLayoutList=de\r\nVariantList=nodeadkeys\r\nOptions=caps:escape\r\n' \
+  "kde: spaced keys and CRLF are replaced in the one [Layout] group"
+
+# A refusal leaves an existing file byte-identical (both desktops).
+for bad in 'de;touch pwned' 'de"/>'; do
+  fresh_home; mkdir -p "$(dirname "$(xf)")"
+  printf '[Layout]\nLayoutList=us\n' >"$home/.config/kxkbrc"; printf '<channel name="keyboard-layout" version="1.0"/>\n' >"$(xf)"
+  run_in_home kde XKB_DEFAULT_LAYOUT="$bad"; run_in_home xfce XKB_DEFAULT_LAYOUT="$bad"
+  same_bytes "$home/.config/kxkbrc" $'[Layout]\nLayoutList=us\n' "kde: refusing '$bad' leaves kxkbrc byte-identical"
+  same_bytes "$(xf)" $'<channel name="keyboard-layout" version="1.0"/>\n' "xfce: refusing '$bad' leaves the channel file byte-identical"
+done
+
 # --- wiring --------------------------------------------------------------------
 assert_grep '^quasar-desktop-keyboard kde ' images/quasar-kde/quasar-kde "the KDE launcher must run the helper before the session"
 assert_grep '^quasar-desktop-keyboard xfce ' images/quasar-xfce/quasar-xfce "the XFCE launcher must run the helper before the session"
@@ -133,5 +229,23 @@ for img in kde xfce; do
   assert_grep 'chmod 0755 .*/usr/local/bin/quasar-desktop-keyboard' "images/quasar-$img/Dockerfile" "the helper must be executable in quasar-$img"
 done
 qv_pass "both launchers call the helper and both Dockerfiles install it"
+
+# The call is soft (a failing helper must not fail the launch) and comes before
+# the session starts: run each launcher's real call line under the launchers' own
+# `set -euo pipefail` with a helper that fails, and compare line positions.
+mkdir -p "$work/failing"; printf '#!/bin/sh\nexit 1\n' >"$work/failing/quasar-desktop-keyboard"; chmod 755 "$work/failing/quasar-desktop-keyboard"
+for d in kde xfce; do
+  launcher="images/quasar-$d/quasar-$d"
+  call="$(grep -E "^quasar-desktop-keyboard $d " "$launcher")"
+  [[ -n "$call" ]] || { echo "FAIL: $launcher has no call line" >&2; exit 1; }
+  out="$(PATH="$work/failing:$PATH" bash -c 'set -euo pipefail; log() { printf "logged: %s\n" "$*"; }; '"$call"'; echo survived' 2>&1)" \
+    || { echo "FAIL: $d: a failing helper failed the launch: $out" >&2; exit 1; }
+  grep -q '^survived$' <<<"$out" && grep -q '^logged: WARNING' <<<"$out" \
+    || { echo "FAIL: $d: the soft guard did not log and continue: $out" >&2; exit 1; }
+  call_line="$(grep -nE "^quasar-desktop-keyboard $d " "$launcher" | head -1 | cut -d: -f1)"
+  start_line="$(grep -nE '^"\$\{session\[@\]\}" &' "$launcher" | head -1 | cut -d: -f1)"
+  (( call_line < start_line )) || { echo "FAIL: $d: the helper runs after the session starts ($call_line >= $start_line)" >&2; exit 1; }
+done
+qv_pass "a failing helper does not fail either launcher, and runs before the session starts"
 
 qv_pass "quasar-desktop-keyboard behaviour checks passed"
