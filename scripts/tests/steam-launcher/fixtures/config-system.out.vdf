@@ -1,0 +1,29 @@
+"InstallConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"AutoUpdateWindowEnabled"		"0"
+				"system"
+				{
+					"IdleScreensaverACSeconds"		"0"
+					"SomeOtherSetting"		"1"
+				}
+				"CompatToolMapping"
+				{
+					"1"
+					{
+						"name"		"proton_experimental"
+					}
+				}
+			}
+		}
+	}
+	"system"
+	{
+		"Decoy"		"1"
+	}
+}
