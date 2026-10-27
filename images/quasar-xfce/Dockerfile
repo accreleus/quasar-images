@@ -108,6 +108,7 @@ COPY images/quasar-xfce/overlay/usr/share/icons/hicolor/scalable/apps/quasar.svg
 COPY images/quasar-xfce/overlay/usr/share/icons/hicolor/256x256/apps/quasar.png /usr/share/icons/hicolor/256x256/apps/quasar.png
 
 COPY images/quasar-xfce/quasar-xfce /usr/local/bin/quasar-xfce
+COPY images/desktop-common/quasar-desktop-keyboard /usr/local/bin/quasar-desktop-keyboard
 
 # The display-mode bridge (quasar #445) is now built once in the shared spine
 # (images/quasar-app/display-bridge/, quasar-images#447) and inherited from
@@ -119,7 +120,7 @@ RUN chmod 0644 /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \
       /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
       /usr/share/icons/hicolor/scalable/apps/quasar.svg \
       /usr/share/icons/hicolor/256x256/apps/quasar.png \
-    && chmod 0755 /usr/local/bin/quasar-xfce \
+    && chmod 0755 /usr/local/bin/quasar-xfce /usr/local/bin/quasar-desktop-keyboard \
     && gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
 
 # NO setcap -r step here, unlike quasar-kde. Linux refuses execve with EPERM when

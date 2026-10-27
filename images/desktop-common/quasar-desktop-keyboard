@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# quasar-desktop-keyboard <kde|xfce> -- write the session's keyboard layout into
+# the desktop's OWN keyboard setting, at every launch (accreleus/quasar#850,
+# part of #838).
+#
+# The control plane puts XKB_DEFAULT_LAYOUT and XKB_DEFAULT_VARIANT into every
+# app container's environment (amendment 49). The session compositor applies
+# them to its seat, but KDE and XFCE keep a layout of their own and would
+# override it: the user's per-account Quasar setting must win, including over a
+# change they made inside the desktop last time. So each launch rewrites the
+# layout keys the desktop reads, and only those keys -- Options, the model and
+# everything else in the same files are left as the user has them.
+#
+#   kde   $XDG_CONFIG_HOME/kxkbrc, group [Layout]:
+#         Use=true, LayoutList=<layout>, VariantList=<variant>
+#         (KWin and kded's kxkb read exactly these; DisplayNames is dropped
+#         because it is positional against the old LayoutList)
+#   xfce  xfconf channel keyboard-layout, written as its per-channel XML (the
+#         launcher runs this before the session bus and xfconfd exist):
+#         /Default/XkbDisable=false, /Default/XkbLayout, /Default/XkbVariant
+#
+# XKB_DEFAULT_LAYOUT unset or empty: nothing is touched, the desktop keeps its
+# own config. Values are re-checked here against the control plane's own
+# grammar ([A-Za-z0-9_-], layout <= 32, variant <= 64): only text from that
+# alphabet is ever written, so nothing reaches a shell, an INI line or XML
+# unquoted. A value outside it is refused with a warning and the desktop
+# starts on its own config -- a bad value must never stop a session.
+set -euo pipefail
+
+log() { printf '%s quasar-desktop-keyboard: %s\n' "$(date -Iseconds)" "$*" >&2; }
+
+desktop="${1:-}"
+layout="${XKB_DEFAULT_LAYOUT:-}"
+variant="${XKB_DEFAULT_VARIANT:-}"
+
+[[ -n "$layout" ]] || exit 0
+
+export LC_ALL=C
+if ! [[ "$layout" =~ ^[A-Za-z0-9_-]{1,32}$ && "$variant" =~ ^[A-Za-z0-9_-]{0,64}$ ]]; then
+  log "WARNING: XKB_DEFAULT_LAYOUT/XKB_DEFAULT_VARIANT are not plain XKB names; leaving the $desktop keyboard config alone"
+  exit 0
+fi
+
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+
+# replace_file <path>: stdin becomes the file, atomically and in the same
+# directory, so a launcher killed mid-write never leaves half a config.
+replace_file() {
+  local path="$1" tmp
+  mkdir -p "$(dirname "$path")"
+  tmp="$(mktemp "$path.XXXXXX")"
+  cat >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$path"
+}
+
+case "$desktop" in
+  kde)
+    f="$config_home/kxkbrc"
+    # The first [Layout] header gets our keys right after it; the old copies of
+    # those keys are dropped wherever they are. No [Layout] group: append one.
+    { [[ ! -f "$f" ]] || cat "$f"; } | awk -v layout="$layout" -v variant="$variant" '
+      function emit() { print "Use=true"; print "LayoutList=" layout; print "VariantList=" variant; done = 1 }
+      /^\[/ { in_layout = ($0 == "[Layout]"); print; if (in_layout && !done) emit(); next }
+      in_layout && /^(Use|LayoutList|VariantList|DisplayNames)=/ { next }
+      { print }
+      END { if (!done) { print "[Layout]"; emit() } }
+    ' | replace_file "$f"
+    ;;
+  xfce)
+    f="$config_home/xfce4/xfconf/xfce-perchannel-xml/keyboard-layout.xml"
+    props="    <property name=\"XkbDisable\" type=\"bool\" value=\"false\"/>
+    <property name=\"XkbLayout\" type=\"string\" value=\"$layout\"/>
+    <property name=\"XkbVariant\" type=\"string\" value=\"$variant\"/>"
+    if [[ -f "$f" ]] && grep -q '<property name="Default" type="empty">' "$f"; then
+      # Keep what else the user set in the channel (XkbModel, XkbOptions, ...).
+      props="$props" awk '
+        /name="(XkbDisable|XkbLayout|XkbVariant)"/ { next }
+        { print }
+        /<property name="Default" type="empty">/ { print ENVIRON["props"] }
+      ' "$f" | replace_file "$f"
+    else
+      printf '<?xml version="1.0" encoding="UTF-8"?>\n\n<channel name="keyboard-layout" version="1.0">\n  <property name="Default" type="empty">\n%s\n  </property>\n</channel>\n' "$props" | replace_file "$f"
+    fi
+    ;;
+  *)
+    log "usage: quasar-desktop-keyboard kde|xfce"
+    exit 2
+    ;;
+esac
+
+log "$desktop keyboard layout set from the session: ${layout}${variant:+ ($variant)}"

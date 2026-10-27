@@ -239,6 +239,7 @@ COPY images/quasar-kde/overlay/usr/share/icons/hicolor/256x256/apps/quasar.png /
 COPY images/quasar-kde/overlay/usr/share/plasma/look-and-feel/org.fedoraproject.fedora.desktop/contents/plasmoidsetupscripts/org.kde.plasma.kickoff.js /usr/share/plasma/look-and-feel/org.fedoraproject.fedora.desktop/contents/plasmoidsetupscripts/org.kde.plasma.kickoff.js
 
 COPY images/quasar-kde/quasar-kde /usr/local/bin/quasar-kde
+COPY images/desktop-common/quasar-desktop-keyboard /usr/local/bin/quasar-desktop-keyboard
 
 # PATH-shadowing kwin_wayland wrapper: the ONLY way to get the session's mode
 # onto the nested kwin output on Plasma 6.7 (kwin_wayland_wrapper spawns the
@@ -258,7 +259,7 @@ RUN chmod 0644 /etc/xdg/kscreenlockerrc /etc/xdg/baloofilerc /etc/xdg/kwalletrc 
       /usr/share/icons/hicolor/scalable/apps/quasar.svg \
       /usr/share/icons/hicolor/256x256/apps/quasar.png \
       /usr/share/plasma/look-and-feel/org.fedoraproject.fedora.desktop/contents/plasmoidsetupscripts/org.kde.plasma.kickoff.js \
-    && chmod 0755 /usr/local/bin/quasar-kde /usr/local/libexec/quasar-kde/kwin_wayland \
+    && chmod 0755 /usr/local/bin/quasar-kde /usr/local/bin/quasar-desktop-keyboard /usr/local/libexec/quasar-kde/kwin_wayland \
       /usr/local/libexec/quasar-kde/direct-session \
       /etc/quasar/init.d/16-kde-direct-device-groups.sh
 
