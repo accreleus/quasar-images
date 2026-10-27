@@ -37,6 +37,15 @@ refute_grep_text '(^|[^[:alnum:]_-])(gcc|gcc-c\+\+|make|cmake|clang|rustc|cargo|
 qv_ensure_built quasar-base "$@"
 labels="$(docker image inspect "$BASE_IMAGE" --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "optional"' <<<"$labels" >/dev/null
+# LC_ALL outranks LANG and every LC_*: the language and region format Quasar passes at launch
+# (quasar#848) only take effect while the image leaves it unset. A login shell with an LC_TIME
+# in the environment must report that value, not a hard-set one.
+jq -e '[.[] | select(startswith("LC_ALL="))] == []' \
+  <<<"$(docker image inspect "$BASE_IMAGE" --format '{{json .Config.Env}}')" >/dev/null \
+  || { echo "FAIL: $BASE_IMAGE sets LC_ALL; it overrides the launch's LANG and LC_*" >&2; exit 1; }
+[[ "$(docker run --rm --entrypoint /bin/bash -e LC_TIME=en_GB.UTF-8 "$BASE_IMAGE" -lc 'locale | sed -n "s/^LC_TIME=//p"')" == 'en_GB.UTF-8' ]] \
+  || { echo "FAIL: LC_TIME passed at launch does not reach the container's locale" >&2; exit 1; }
+qv_pass "LC_ALL is unset; a launch's LC_TIME takes effect"
 docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   getent passwd quasar | grep -q "^quasar:x:1000:1000:"
   getent group quasar | grep -q "^quasar:x:1000:"

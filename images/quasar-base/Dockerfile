@@ -55,9 +55,10 @@ RUN chmod 0755 /usr/local/bin/quasar-entrypoint \
     && mkdir -p /var/lib/quasar /var/cache/quasar /etc/quasar/init.d \
     && chmod 0755 /var/lib/quasar /var/cache/quasar
 
+# LANG is only the default. LC_ALL is deliberately NOT set: it outranks LANG and every LC_*,
+# so it would swallow the language and region format Quasar passes at launch (quasar#848).
 ENV HOME=/home/quasar \
     LANG=en_US.UTF-8 \
-    LC_ALL=en_US.UTF-8 \
     PUID=1000 \
     PGID=1000 \
     UMASK=022 \
