@@ -189,6 +189,18 @@ Steam blanks an idle stream after about five minutes with no input
 writes only when the key is missing, so a timeout chosen in Steam's settings
 (Customization, "Start screensaver after") is kept.
 
+## Steam's language: set once, from the launch
+
+Steam does not follow `LANG` (accreleus/quasar#848): a new home starts in English. When the home
+has no Steam language yet (no `~/.steam/registry.vdf`, or none with a `language` key),
+`quasar-steam-client` maps the launch's `LANG` (`xx_YY.UTF-8`) to Steam's language name and starts
+Steam with `-language <name>` for that launch; Steam writes the language into `registry.vdf`
+itself. A home that already has one is never changed, so a language picked in Steam sticks. English
+and a language outside the table get no flag, and a `-language` already in the launch's flags wins.
+The names are Steam's API language codes: de german, fr french, es_ES spanish (other es: latam),
+it italian, nl dutch, pl polish, pt_BR brazilian (other pt: portuguese), sv swedish, ru russian,
+ja japanese, ko koreana, zh_CN schinese (zh_TW, zh_HK: tchinese).
+
 ## Build & verify
 
 ```sh

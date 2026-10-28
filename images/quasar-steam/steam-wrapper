@@ -85,9 +85,44 @@ if ! set_idle_screensaver 2>/dev/null; then
   printf '%s\n' "quasar-steam: could not set Steam's screensaver timeout in $steam_dir/config; starting Steam anyway" >&2
 fi
 
+# Steam does not follow LANG (accreleus/quasar#848): a new home starts in English whatever
+# language the launch asked for. Steam keeps its language in ~/.steam/registry.vdf and writes it
+# back itself, so `-language <name>` once, on a home that has none yet, is enough; after that the
+# language is Steam's (the user may change it there) and is never overridden. Steam's names are
+# its API language codes (partner.steamgames.com/doc/store/localization/languages). English is
+# Steam's default, so it gets no flag; a language outside this table gets none either.
+steam_language_for() { # <LANG, e.g. de_DE.UTF-8> -> Steam's language name, or nothing
+  local tag="${1%%.*}" ll rr
+  [[ "$tag" =~ ^([a-z]{2,3})_([A-Z]{2})$ ]] || return 0
+  ll="${BASH_REMATCH[1]}" rr="${BASH_REMATCH[2]}"
+  case "$ll" in
+    de) echo german ;;
+    fr) echo french ;;
+    it) echo italian ;;
+    nl) echo dutch ;;
+    pl) echo polish ;;
+    sv) echo swedish ;;
+    ru) echo russian ;;
+    ja) echo japanese ;;
+    ko) echo koreana ;;
+    es) if [[ "$rr" == ES ]]; then echo spanish; else echo latam; fi ;;
+    pt) if [[ "$rr" == BR ]]; then echo brazilian; else echo portuguese; fi ;;
+    zh) if [[ "$rr" == TW || "$rr" == HK ]]; then echo tchinese; else echo schinese; fi ;;
+  esac
+  return 0
+}
+
 cd "$steam_dir"
 # STEAM_STARTUP_FLAGS is normally computed by quasar-steam (from the catalog's
 # Steam runtime preset or an explicit QUASAR_STEAM_UI_MODE opt-in). There is no
 # fallback here: unset or empty means Steam gets no UI-mode flag.
 read -r -a steam_args <<< "${STEAM_STARTUP_FLAGS:-}"
+steam_registry="$(dirname "$legacy_dir")/registry.vdf"
+if [[ ! -s "$steam_registry" ]] || ! grep -qi '"language"' "$steam_registry"; then
+  steam_language="$(steam_language_for "${LANG:-}")"
+  # An explicit -language (the preset's flags, or the caller's) wins.
+  if [[ -n "$steam_language" && " ${steam_args[*]:-} $* " != *" -language "* ]]; then
+    steam_args+=(-language "$steam_language")
+  fi
+fi
 exec ./steam.sh "${steam_args[@]}" "$@"
