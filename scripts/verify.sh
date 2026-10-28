@@ -43,6 +43,10 @@ lc_fail() { echo "FAIL: $*" >&2; exit 1; }
 jq -e '[.[] | select(startswith("LC_ALL=") or startswith("LANGUAGE="))] == []' \
   <<<"$(docker image inspect "$BASE_IMAGE" --format '{{json .Config.Env}}')" >/dev/null \
   || lc_fail "$BASE_IMAGE sets LC_ALL or LANGUAGE; it overrides the launch's LANG and LC_*"
+# The image's own default stays: a launch that passes no language runs in en_US.UTF-8.
+jq -e 'index("LANG=en_US.UTF-8") != null' \
+  <<<"$(docker image inspect "$BASE_IMAGE" --format '{{json .Config.Env}}')" >/dev/null \
+  || lc_fail "$BASE_IMAGE does not default LANG to en_US.UTF-8"
 # The next checks start the container the way quasar-entrypoint starts an app: a non-login bash.
 # A login one would run Fedora's /etc/profile.d/lang.sh, which drops LC_ALL when it equals LANG and
 # rewrites LANG after any locale warning, and so hides exactly what is tested here. They assert the
@@ -53,9 +57,13 @@ resolved() {
 got="$(resolved LC_TIME=en_GB.UTF-8)"
 [[ "$got" == 'd_fmt="%d/%m/%y"' ]] || lc_fail "LC_TIME=en_GB.UTF-8 passed at launch resolves to: $got"
 # Two languages sampled (one Latin, one not); the other eleven are checked by `locale -a` below.
-for pair in 'de_DE.UTF-8|d_fmt="%d.%m.%Y"' 'ja_JP.UTF-8|d_fmt="%Y年%m月%d日"'; do
-  got="$(resolved "LANG=${pair%%|*}")"
-  [[ "$got" == "${pair#*|}" ]] || lc_fail "LANG=${pair%%|*} passed at launch resolves to: $got"
+# Each must resolve to its own data, so its d_fmt differs from en_US's; the exact string is glibc's
+# to change between releases and is not pinned (en_GB above is, as a fixed point).
+ref="$(resolved LC_TIME=en_US.UTF-8)"
+for loc in de_DE.UTF-8 ja_JP.UTF-8; do
+  got="$(resolved "LANG=$loc")"
+  [[ "$got" == d_fmt=* && "$got" != *$'\n'* && "$got" != "$ref" ]] \
+    || lc_fail "LANG=$loc passed at launch resolves to: $got (en_US gives: $ref)"
 done
 # Every language the quasar settings offer has a real locale, and nothing else is installed. The
 # list is LANGUAGES and REGION_FORMATS in the quasar repo's web/src/lib/region/options.ts.
