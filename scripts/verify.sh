@@ -46,6 +46,19 @@ jq -e '[.[] | select(startswith("LC_ALL="))] == []' \
 [[ "$(docker run --rm --entrypoint /bin/bash -e LC_TIME=en_GB.UTF-8 "$BASE_IMAGE" -lc 'locale | sed -n "s/^LC_TIME=//p"')" == 'en_GB.UTF-8' ]] \
   || { echo "FAIL: LC_TIME passed at launch does not reach the container's locale" >&2; exit 1; }
 qv_pass "LC_ALL is unset; a launch's LC_TIME takes effect"
+# A launch can name any language the quasar settings offer, so each one needs a real locale, not
+# glibc's silent fallback to C. The list is LANGUAGES and REGION_FORMATS in the quasar repo's
+# web/src/lib/region/options.ts; `locale` prints "Cannot set ..." on stderr when one is missing.
+for loc in de_DE.UTF-8 ja_JP.UTF-8; do
+  out="$(docker run --rm --entrypoint /bin/bash -e "LANG=$loc" "$BASE_IMAGE" -lc 'locale 2>&1')"
+  grep -q "^LANG=$loc\$" <<<"$out" && ! grep -qi 'cannot set\|no such file' <<<"$out" \
+    || { echo "FAIL: LANG=$loc falls back (locale reports: $out)" >&2; exit 1; }
+done
+have="$(docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -c 'locale -a')"
+for loc in en_GB en_US en_AU de_DE fr_FR es_ES it_IT nl_NL pl_PL pt_BR sv_SE ru_RU ja_JP ko_KR zh_CN; do
+  grep -qx "$loc.utf8" <<<"$have" || { echo "FAIL: locale $loc.utf8 is not installed in $BASE_IMAGE" >&2; exit 1; }
+done
+qv_pass "every language the quasar settings offer has a real locale (LANG=de_DE.UTF-8, ja_JP.UTF-8 report no fallback)"
 docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   getent passwd quasar | grep -q "^quasar:x:1000:1000:"
   getent group quasar | grep -q "^quasar:x:1000:"

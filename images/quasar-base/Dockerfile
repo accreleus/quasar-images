@@ -11,11 +11,19 @@ LABEL org.opencontainers.image.title="Quasar common Fedora base" \
       org.quasar.image.acceleration="optional" \
       org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
 
+# glibc-langpack-<ll>: one per language the quasar settings offer (LANGUAGES in the quasar
+# repo's web/src/lib/region/options.ts: en de fr es it nl pl pt sv ru ja ko zh). LANG and LC_*
+# name a locale; without its langpack glibc silently falls back to C (quasar#848). The region
+# formats (en-AU, ...) are variants inside these same packs.
+#
 # fuse3 (fusermount3): xdg-desktop-portal's document portal mounts its
 # fuse filesystem for sandboxed apps' file-chooser access; without it the
 # portal's fuse mount fails on every image in this family.
 RUN dnf --setopt=install_weak_deps=False -y install \
       bash ca-certificates coreutils curl findutils fuse3 glibc-langpack-en jq procps-ng shadow-utils \
+      glibc-langpack-de glibc-langpack-fr glibc-langpack-es glibc-langpack-it glibc-langpack-nl \
+      glibc-langpack-pl glibc-langpack-pt glibc-langpack-sv glibc-langpack-ru glibc-langpack-ja \
+      glibc-langpack-ko glibc-langpack-zh \
       tini tzdata util-linux \
     && groupadd --gid 1000 quasar \
     && useradd --no-log-init --uid 1000 --gid 1000 --home-dir /home/quasar --create-home --shell /bin/bash quasar \
