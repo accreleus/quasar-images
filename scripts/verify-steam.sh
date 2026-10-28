@@ -23,6 +23,14 @@ qv_image_has "$STEAM_IMAGE" \
   steam gamescope bwrap quasar-steam quasar-steam-client dbus-daemon NetworkManager \
   seatd drm_info jq pipewire wireplumber pipewire-pulse
 
+# Steam in Japanese, Korean or Chinese (the quasar#848 language setting) draws a box for every glyph
+# without a CJK font. The font comes from quasar-base; fontconfig is where an image first has fc-list.
+for lang in ja ko zh-cn; do
+  families="$(docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -c "fc-list :lang=$lang family | sort -u | wc -l")"
+  [[ "$families" -ge 1 ]] || { echo "FAIL: $STEAM_IMAGE has no font for :lang=$lang; that UI language would draw boxes" >&2; exit 1; }
+done
+qv_pass "fontconfig finds a font for ja, ko and zh-cn"
+
 docker run --rm --entrypoint /bin/bash "$STEAM_IMAGE" -lc "$QV_GUARD"'
   steam=/usr/local/bin/quasar-steam
   client=/usr/local/bin/quasar-steam-client

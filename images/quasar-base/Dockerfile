@@ -23,6 +23,13 @@ LABEL org.opencontainers.image.title="Quasar common Fedora base" \
 # measurement is in the note below), and that includes the node-agent image, whose own prune
 # covers /usr/share/locale only.
 #
+# google-noto-sans-cjk-vf-fonts: one variable font for Japanese, Korean and Chinese (about 31 MiB
+# installed, 14 MB to download). Without a CJK font every glyph of a UI in those languages is a
+# box: Steam opened in Japanese by the quasar#848 language setting did exactly that. Like the
+# langpacks it lives in this layer, so no descendant can prune it (see the note below). The
+# font is only a file here; fontconfig, which makes apps find it, comes with the images that
+# draw a UI (quasar-steam-runtime, quasar-kde, quasar-xfce).
+#
 # fuse3 (fusermount3): xdg-desktop-portal's document portal mounts its
 # fuse filesystem for sandboxed apps' file-chooser access; without it the
 # portal's fuse mount fails on every image in this family.
@@ -30,7 +37,7 @@ RUN dnf --setopt=install_weak_deps=False -y install \
       bash ca-certificates coreutils curl findutils fuse3 glibc-langpack-en jq procps-ng shadow-utils \
       glibc-langpack-de glibc-langpack-fr glibc-langpack-es glibc-langpack-it glibc-langpack-nl \
       glibc-langpack-pl glibc-langpack-pt glibc-langpack-sv glibc-langpack-ru glibc-langpack-ja \
-      glibc-langpack-ko glibc-langpack-zh \
+      glibc-langpack-ko glibc-langpack-zh google-noto-sans-cjk-vf-fonts \
       tini tzdata util-linux \
     && groupadd --gid 1000 quasar \
     && useradd --no-log-init --uid 1000 --gid 1000 --home-dir /home/quasar --create-home --shell /bin/bash quasar \

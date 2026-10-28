@@ -74,6 +74,10 @@ done
 packs="$(docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -c "rpm -qa --qf '%{NAME}\n' 'glibc-langpack-*' | sort")"
 want="$(printf 'glibc-langpack-%s\n' de en es fr it ja ko nl pl pt ru sv zh)"
 [[ "$packs" == "$want" ]] || lc_fail "langpacks differ from the offered languages: $(diff <(echo "$want") <(echo "$packs") | tr '\n' ' ')"
+# A UI in Japanese, Korean or Chinese needs a CJK font or every glyph is a box (quasar#848). The base
+# has no fontconfig (fc-list), so check the package and its file here; verify-steam.sh asks fc-list.
+docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -c 'rpm -q google-noto-sans-cjk-vf-fonts >/dev/null && [ -s /usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc ]' \
+  || lc_fail "$BASE_IMAGE has no CJK font (google-noto-sans-cjk-vf-fonts); Japanese, Korean and Chinese UIs would draw boxes"
 qv_pass "LC_ALL and LANGUAGE are unset; a launch's LANG and LC_TIME resolve; the offered languages' locales are installed and no others"
 docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   getent passwd quasar | grep -q "^quasar:x:1000:1000:"
