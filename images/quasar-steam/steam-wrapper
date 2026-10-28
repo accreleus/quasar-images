@@ -132,9 +132,13 @@ steam_language_value() { # <registry.vdf>
 # Rewrite Steam's language in registry.vdf to <name>: the "language" value in HKCU/Software/Valve/
 # Steam and, if present, Steamsteamglobal. Steam itself persists its language only on a clean exit,
 # so a launch that dies early would otherwise leave "english" next to the marker for good. Same
-# atomic temp-file-and-rename as set_idle_screensaver; the file keeps its mode and line endings.
+# atomic temp-file-and-rename as set_idle_screensaver; the file keeps its mode and line endings
+# (trailing whitespace on a language line is dropped, as the detector ignores it). A symlinked
+# registry.vdf is written through, the link kept. Fails when it replaced nothing, so the caller
+# never records a language the registry does not carry.
 set_steam_language_registry() { # <registry.vdf> <name>
   local reg="$1" tmp
+  if [[ -L "$reg" ]]; then reg="$(readlink -f "$reg")" || return 1; fi
   tmp="$(mktemp "$(dirname "$reg")/.registry.vdf.XXXXXX")" || return 1
   chmod --reference="$reg" "$tmp" || { rm -f "$tmp"; return 1; }
   awk -v lang="$2" '
@@ -143,8 +147,11 @@ set_steam_language_registry() { # <registry.vdf> <name>
     s == "}" { d-- }
     s ~ /^"[^"]*"$/ { name = substr(s, 2, length(s) - 2) }
     d > 0 && (p[d] == "registry/hkcu/software/valve/steam" || p[d] == "registry/hkcu/software/valve/steamsteamglobal") \
-      && tolower(s) ~ /^"language"[ \t]+"[^"]*"$/ { sub(/"[^"]*"\r?$/, "\"" lang "\"" (line ~ /\r$/ ? "\r" : ""), line) }
-    { print line }' "$reg" > "$tmp" || { rm -f "$tmp"; return 1; }
+      && tolower(s) ~ /^"language"[ \t]+"[^"]*"$/ {
+        if (sub(/"[^"]*"[ \t\r]*$/, "\"" lang "\"" (line ~ /\r[ \t]*$/ ? "\r" : ""), line)) n++
+      }
+    { print line }
+    END { exit (n == 0) }' "$reg" > "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$reg" || { rm -f "$tmp"; return 1; }
 }
 
@@ -174,13 +181,21 @@ if [[ -z "$steam_current" || ( "$steam_current" == english && ! -e "$steam_marke
   steam_language="$(steam_language_for "${LANG:-}")"
   # An explicit -language (the preset's flags, or the caller's) wins.
   if [[ -n "$steam_language" && " ${steam_args[*]:-} $* " != *" -language "* ]]; then
-    steam_ok=1
-    if [[ -n "$steam_current" ]] && ! set_steam_language_registry "$steam_registry" "$steam_language" 2>/dev/null; then
-      printf '%s\n' "quasar-steam: could not set Steam's language in $steam_registry; starting Steam without it" >&2
-      steam_ok=0
+    steam_ok=1 steam_rewritten=0
+    if [[ -n "$steam_current" ]]; then
+      if set_steam_language_registry "$steam_registry" "$steam_language" 2>/dev/null; then
+        steam_rewritten=1
+      else
+        printf '%s\n' "quasar-steam: could not set Steam's language in $steam_registry; starting Steam without it" >&2
+        steam_ok=0
+      fi
     fi
     if [[ "$steam_ok" == 1 ]] && ! printf '%s\n' "$steam_language" 2>/dev/null > "$steam_marker"; then
-      printf '%s\n' "quasar-steam: could not record Steam's language in $steam_marker; starting Steam without it" >&2
+      if [[ "$steam_rewritten" == 1 ]]; then
+        printf '%s\n' "quasar-steam: could not record Steam's language in $steam_marker; the registry already carries it, so Steam starts in it" >&2
+      else
+        printf '%s\n' "quasar-steam: could not record Steam's language in $steam_marker; starting Steam without it" >&2
+      fi
       steam_ok=0
     fi
     if [[ "$steam_ok" == 1 ]]; then
