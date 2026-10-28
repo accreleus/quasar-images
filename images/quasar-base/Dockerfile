@@ -11,11 +11,26 @@ LABEL org.opencontainers.image.title="Quasar common Fedora base" \
       org.quasar.image.acceleration="optional" \
       org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
 
+# glibc-langpack-<ll>: one per language the quasar settings picker offers (LANGUAGES in the quasar
+# repo's web/src/lib/region/options.ts: en de fr es it nl pl pt sv ru ja ko zh). LANG and LC_*
+# name a locale; without its langpack glibc silently falls back to C (quasar#848). The region
+# formats (en-AU, ...) are variants inside these same packs. ONLY those languages: the contract
+# accepts any ll-RR tag (cs-CZ, tr-TR, ...), and a saved tag outside the picker's list still
+# falls back to C here.
+#
+# The packs add about 54 MB of /usr/lib/locale to this layer. A descendant image cannot take it
+# back: deleting it there only writes whiteouts over bytes that still travel in this layer (the
+# measurement is in the note below), and that includes the node-agent image, whose own prune
+# covers /usr/share/locale only.
+#
 # fuse3 (fusermount3): xdg-desktop-portal's document portal mounts its
 # fuse filesystem for sandboxed apps' file-chooser access; without it the
 # portal's fuse mount fails on every image in this family.
 RUN dnf --setopt=install_weak_deps=False -y install \
       bash ca-certificates coreutils curl findutils fuse3 glibc-langpack-en jq procps-ng shadow-utils \
+      glibc-langpack-de glibc-langpack-fr glibc-langpack-es glibc-langpack-it glibc-langpack-nl \
+      glibc-langpack-pl glibc-langpack-pt glibc-langpack-sv glibc-langpack-ru glibc-langpack-ja \
+      glibc-langpack-ko glibc-langpack-zh \
       tini tzdata util-linux \
     && groupadd --gid 1000 quasar \
     && useradd --no-log-init --uid 1000 --gid 1000 --home-dir /home/quasar --create-home --shell /bin/bash quasar \
@@ -55,9 +70,10 @@ RUN chmod 0755 /usr/local/bin/quasar-entrypoint \
     && mkdir -p /var/lib/quasar /var/cache/quasar /etc/quasar/init.d \
     && chmod 0755 /var/lib/quasar /var/cache/quasar
 
+# LANG is only the default. LC_ALL is deliberately NOT set: it outranks LANG and every LC_*,
+# so it would swallow the language and region format Quasar passes at launch (quasar#848).
 ENV HOME=/home/quasar \
     LANG=en_US.UTF-8 \
-    LC_ALL=en_US.UTF-8 \
     PUID=1000 \
     PGID=1000 \
     UMASK=022 \
