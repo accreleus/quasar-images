@@ -468,7 +468,9 @@ expect_no_launcher_log derived-applaunch "$NO_UI_WARNING"
 run_wrapper() {
   local name="$1"; shift
   log="/tmp/cases/$name"
-  rm -rf "$log" && mkdir -p "$log/home/.local/share/Steam"
+  # reuse_home: a second launch of the same home (the case's earlier launch left it).
+  [[ -n "${reuse_home:-}" ]] || rm -rf "$log"
+  mkdir -p "$log/home/.local/share/Steam"
   cat > "$log/home/.local/share/Steam/steam.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'argc=%s\n' "$#" > "$STUB_LOG/wrapper.args"
@@ -484,6 +486,12 @@ EOF
   if [[ -n "${seed_registry:-}" ]]; then
     mkdir -p "$log/home/.steam"
     cp "$seed_registry" "$log/home/.steam/registry.vdf"
+  fi
+  # The marker a launch that applied the language leaves in the home (a template can carry one).
+  if [[ -n "${seed_marker:-}" ]]; then
+    mkdir -p "$log/home/.steam"
+    if [[ "$seed_marker" == dir ]]; then mkdir -p "$log/home/.steam/.quasar-steam-language"
+    else printf '%s\n' "$seed_marker" > "$log/home/.steam/.quasar-steam-language"; fi
   fi
   # A config/ the app user cannot use (the cases run as root, which ignores file
   # modes, so the wrapper then runs as the app user): a file in its place, or a
@@ -596,9 +604,38 @@ run_wrapper lang-modifier LANG=de_DE@euro
 expect_steam_args lang-modifier "argc=2 -language german"
 run_wrapper lang-modifier-utf8 LANG=de_DE.UTF-8@euro
 expect_steam_args lang-modifier-utf8 "argc=2 -language german"
-# A home that has a language (Steam wrote it, or the user chose it) keeps it.
-seed_registry="$T/fixtures/registry-english.vdf" run_wrapper lang-existing-english LANG=de_DE.UTF-8
-expect_steam_args lang-existing-english "argc=0"
+# A home seeded from a golden-home template has the "english" Steam wrote on the template's first
+# start and no marker: the launch's language is applied once (accreleus/quasar#934), and the
+# marker says so.
+seed_registry="$T/fixtures/registry-english.vdf" run_wrapper lang-seeded-english LANG=de_DE.UTF-8
+expect_steam_args lang-seeded-english "argc=2 -language german"
+if [[ "$(cat "$log/home/.steam/.quasar-steam-language" 2>/dev/null)" == german ]]; then
+  pass "lang-seeded-english: the marker records german"
+else
+  fail "lang-seeded-english: marker is '$(cat "$log/home/.steam/.quasar-steam-language" 2>/dev/null)', want german"
+fi
+# Set once: the next launch of that home (the registry still says english, now the user's) adds nothing,
+# even when the language setting has changed meanwhile.
+reuse_home=1 run_wrapper lang-seeded-english LANG=de_DE.UTF-8
+expect_steam_args lang-seeded-english-again "argc=0"
+reuse_home=1 run_wrapper lang-seeded-english LANG=ja_JP.UTF-8
+expect_steam_args lang-seeded-english-other "argc=0"
+# With the marker already there (Steam's english is the user's pick now) nothing is added.
+seed_registry="$T/fixtures/registry-english.vdf" seed_marker=german run_wrapper lang-picked-english LANG=de_DE.UTF-8
+expect_steam_args lang-picked-english "argc=0"
+# A real language in the registry (not english) is the user's, marker or not.
+seed_registry="$T/fixtures/registry-german.vdf" run_wrapper lang-picked-german LANG=ja_JP.UTF-8
+expect_steam_args lang-picked-german "argc=0"
+# Nothing applied, no marker: an English launch of an english home leaves the home as it is, so a
+# later non-English launch still applies once.
+seed_registry="$T/fixtures/registry-english.vdf" run_wrapper lang-english-launch LANG=en_US.UTF-8
+expect_steam_args lang-english-launch "argc=0"
+if [[ ! -e "$log/home/.steam/.quasar-steam-language" ]]; then pass "lang-english-launch: no marker"; else fail "lang-english-launch: a marker was written"; fi
+reuse_home=1 run_wrapper lang-english-launch LANG=de_DE.UTF-8
+expect_steam_args lang-english-launch-later "argc=2 -language german"
+# A marker that cannot be written (a directory is in its place) means no flag: never apply twice.
+seed_registry="$T/fixtures/registry-english.vdf" seed_marker=dir run_wrapper lang-marker-unwritable LANG=de_DE.UTF-8
+expect_steam_args lang-marker-unwritable "argc=0"
 run_wrapper lang-explicit LANG=de_DE.UTF-8 STEAM_STARTUP_FLAGS="-language french"
 expect_steam_args lang-explicit "argc=2 -language french"
 for unmapped in en_US.UTF-8 en_GB.UTF-8 cs_CZ.UTF-8 C.UTF-8 POSIX C ""; do

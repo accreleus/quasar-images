@@ -191,15 +191,20 @@ writes only when the key is missing, so a timeout chosen in Steam's settings
 
 ## Steam's language: set once, from the launch
 
-Steam does not follow `LANG` (accreleus/quasar#848): a new home starts in English. When the home
-has no Steam language yet (no `~/.steam/registry.vdf`, or none with a `language` value in `HKCU/Software/Valve/Steam`),
-`quasar-steam-client` maps the launch's `LANG` (`xx_YY.UTF-8`) to Steam's language name and starts
-Steam with `-language <name>` for that launch; Steam writes the language into `registry.vdf`
-itself. A home that already has one is never changed, so a language picked in Steam sticks. English
-and a language outside the table get no flag, and a `-language` already in the launch's flags wins.
-The names are Steam's API language codes: de german, fr french, es_ES spanish (other es: latam),
-it italian, nl dutch, pl polish, pt_BR brazilian (other pt: portuguese), sv swedish, ru russian,
-ja japanese, ko koreana, zh_CN schinese (zh_TW, zh_HK: tchinese).
+Steam does not follow `LANG` (accreleus/quasar#848): a new home starts in English. When the home is
+new for its language, `quasar-steam-client` maps the launch's `LANG` (`xx_YY.UTF-8`) to Steam's
+language name and starts Steam with `-language <name>` for that launch; Steam writes the language
+into `registry.vdf` itself. "New" means `~/.steam/registry.vdf` has no `language` value in
+`HKCU/Software/Valve/Steam`, **or** only `english` and no marker. The second case is every home
+seeded from a golden-home template: the template's Steam booted once and wrote `english`
+(accreleus/quasar#934). The wrapper then writes `~/.steam/.quasar-steam-language` (the name it
+applied) before it passes the flag, and from then on the registry is the user's: a language picked
+in Steam, English included, is never changed. No marker is written when nothing is applied
+(English, a language outside the table), and a marker that cannot be written means no flag. A
+real language already in the registry is left alone. A `-language` already in the launch's flags
+wins. The names are Steam's API language codes: de german, fr french, es_ES spanish (other es:
+latam), it italian, nl dutch, pl polish, pt_BR brazilian (other pt: portuguese), sv swedish, ru
+russian, ja japanese, ko koreana, zh_CN schinese (zh_TW, zh_HK: tchinese).
 
 ## Build & verify
 
