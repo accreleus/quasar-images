@@ -11,10 +11,17 @@ LABEL org.opencontainers.image.title="Quasar common Fedora base" \
       org.quasar.image.acceleration="optional" \
       org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
 
-# glibc-langpack-<ll>: one per language the quasar settings offer (LANGUAGES in the quasar
+# glibc-langpack-<ll>: one per language the quasar settings picker offers (LANGUAGES in the quasar
 # repo's web/src/lib/region/options.ts: en de fr es it nl pl pt sv ru ja ko zh). LANG and LC_*
 # name a locale; without its langpack glibc silently falls back to C (quasar#848). The region
-# formats (en-AU, ...) are variants inside these same packs.
+# formats (en-AU, ...) are variants inside these same packs. ONLY those languages: the contract
+# accepts any ll-RR tag (cs-CZ, tr-TR, ...), and a saved tag outside the picker's list still
+# falls back to C here.
+#
+# The packs add about 54 MB of /usr/lib/locale to this layer. A descendant image cannot take it
+# back: deleting it there only writes whiteouts over bytes that still travel in this layer (the
+# measurement is in the note below), and that includes the node-agent image, whose own prune
+# covers /usr/share/locale only.
 #
 # fuse3 (fusermount3): xdg-desktop-portal's document portal mounts its
 # fuse filesystem for sandboxed apps' file-chooser access; without it the

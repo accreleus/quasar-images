@@ -37,28 +37,36 @@ refute_grep_text '(^|[^[:alnum:]_-])(gcc|gcc-c\+\+|make|cmake|clang|rustc|cargo|
 qv_ensure_built quasar-base "$@"
 labels="$(docker image inspect "$BASE_IMAGE" --format '{{json .Config.Labels}}')"
 jq -e '.["org.quasar.image.contract"] == "1" and .["org.quasar.image.acceleration"] == "optional"' <<<"$labels" >/dev/null
-# LC_ALL outranks LANG and every LC_*: the language and region format Quasar passes at launch
-# (quasar#848) only take effect while the image leaves it unset. A login shell with an LC_TIME
-# in the environment must report that value, not a hard-set one.
-jq -e '[.[] | select(startswith("LC_ALL="))] == []' \
+# LC_ALL and LANGUAGE outrank LANG and every LC_*: the language and region format Quasar passes
+# at launch (quasar#848) only take effect while the image sets neither.
+lc_fail() { echo "FAIL: $*" >&2; exit 1; }
+jq -e '[.[] | select(startswith("LC_ALL=") or startswith("LANGUAGE="))] == []' \
   <<<"$(docker image inspect "$BASE_IMAGE" --format '{{json .Config.Env}}')" >/dev/null \
-  || { echo "FAIL: $BASE_IMAGE sets LC_ALL; it overrides the launch's LANG and LC_*" >&2; exit 1; }
-[[ "$(docker run --rm --entrypoint /bin/bash -e LC_TIME=en_GB.UTF-8 "$BASE_IMAGE" -lc 'locale | sed -n "s/^LC_TIME=//p"')" == 'en_GB.UTF-8' ]] \
-  || { echo "FAIL: LC_TIME passed at launch does not reach the container's locale" >&2; exit 1; }
-qv_pass "LC_ALL is unset; a launch's LC_TIME takes effect"
-# A launch can name any language the quasar settings offer, so each one needs a real locale, not
-# glibc's silent fallback to C. The list is LANGUAGES and REGION_FORMATS in the quasar repo's
-# web/src/lib/region/options.ts; `locale` prints "Cannot set ..." on stderr when one is missing.
-for loc in de_DE.UTF-8 ja_JP.UTF-8; do
-  out="$(docker run --rm --entrypoint /bin/bash -e "LANG=$loc" "$BASE_IMAGE" -lc 'locale 2>&1')"
-  grep -q "^LANG=$loc\$" <<<"$out" && ! grep -qi 'cannot set\|no such file' <<<"$out" \
-    || { echo "FAIL: LANG=$loc falls back (locale reports: $out)" >&2; exit 1; }
+  || lc_fail "$BASE_IMAGE sets LC_ALL or LANGUAGE; it overrides the launch's LANG and LC_*"
+# The next checks start the container the way quasar-entrypoint starts an app: a non-login bash.
+# A login one would run Fedora's /etc/profile.d/lang.sh, which drops LC_ALL when it equals LANG and
+# rewrites LANG after any locale warning, and so hides exactly what is tested here. They assert the
+# RESOLVED value (`locale -k`, plus glibc's own "Cannot set ..." warning), not an echo of the variable.
+resolved() {
+  docker run --rm --entrypoint /bin/bash -e "$1" "$BASE_IMAGE" -c 'locale -k LC_TIME 2>&1 | grep -E "^d_fmt=|Cannot set"'
+}
+got="$(resolved LC_TIME=en_GB.UTF-8)"
+[[ "$got" == 'd_fmt="%d/%m/%y"' ]] || lc_fail "LC_TIME=en_GB.UTF-8 passed at launch resolves to: $got"
+# Two languages sampled (one Latin, one not); the other eleven are checked by `locale -a` below.
+for pair in 'de_DE.UTF-8|d_fmt="%d.%m.%Y"' 'ja_JP.UTF-8|d_fmt="%Y年%m月%d日"'; do
+  got="$(resolved "LANG=${pair%%|*}")"
+  [[ "$got" == "${pair#*|}" ]] || lc_fail "LANG=${pair%%|*} passed at launch resolves to: $got"
 done
+# Every language the quasar settings offer has a real locale, and nothing else is installed. The
+# list is LANGUAGES and REGION_FORMATS in the quasar repo's web/src/lib/region/options.ts.
 have="$(docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -c 'locale -a')"
 for loc in en_GB en_US en_AU de_DE fr_FR es_ES it_IT nl_NL pl_PL pt_BR sv_SE ru_RU ja_JP ko_KR zh_CN; do
-  grep -qx "$loc.utf8" <<<"$have" || { echo "FAIL: locale $loc.utf8 is not installed in $BASE_IMAGE" >&2; exit 1; }
+  grep -qx "$loc.utf8" <<<"$have" || lc_fail "locale $loc.utf8 is not installed in $BASE_IMAGE"
 done
-qv_pass "every language the quasar settings offer has a real locale (LANG=de_DE.UTF-8, ja_JP.UTF-8 report no fallback)"
+packs="$(docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -c "rpm -qa --qf '%{NAME}\n' 'glibc-langpack-*' | sort")"
+want="$(printf 'glibc-langpack-%s\n' de en es fr it ja ko nl pl pt ru sv zh)"
+[[ "$packs" == "$want" ]] || lc_fail "langpacks differ from the offered languages: $(diff <(echo "$want") <(echo "$packs") | tr '\n' ' ')"
+qv_pass "LC_ALL and LANGUAGE are unset; a launch's LANG and LC_TIME resolve; the offered languages' locales are installed and no others"
 docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -lc "$QV_GUARD"'
   getent passwd quasar | grep -q "^quasar:x:1000:1000:"
   getent group quasar | grep -q "^quasar:x:1000:"
