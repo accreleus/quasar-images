@@ -1,0 +1,35 @@
+"Registry"
+{
+	"HKLM"
+	{
+		"Software"
+		{
+			"Valve"
+			{
+				"Steam"
+				{
+					"SteamPID"		"0"
+					"ClientLauncherType"		"0"
+				}
+			}
+		}
+	}
+	"HKCU"
+	{
+		"Software"
+		{
+			"Valve"
+			{
+				"Steamsteamglobal"
+				{
+					"language"		"english"
+				}
+				"Steam"
+				{
+					"language"		"english"
+					"GamescopeEnableAppTargetRefreshRate2"		"1"
+				}
+			}
+		}
+	}
+}

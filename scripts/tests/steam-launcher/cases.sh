@@ -468,7 +468,8 @@ expect_no_launcher_log derived-applaunch "$NO_UI_WARNING"
 run_wrapper() {
   local name="$1"; shift
   log="/tmp/cases/$name"
-  # reuse_home: a second launch of the same home (the case's earlier launch left it).
+  # reuse_home: a second launch of the same home (the case's earlier launch left it). A case that
+  # reuses a home has the same name as the case that made it, on purpose: keep names unique.
   [[ -n "${reuse_home:-}" ]] || rm -rf "$log"
   mkdir -p "$log/home/.local/share/Steam"
   cat > "$log/home/.local/share/Steam/steam.sh" <<'EOF'
@@ -490,7 +491,7 @@ EOF
   # The marker a launch that applied the language leaves in the home (a template can carry one).
   if [[ -n "${seed_marker:-}" ]]; then
     mkdir -p "$log/home/.steam"
-    if [[ "$seed_marker" == dir ]]; then mkdir -p "$log/home/.steam/.quasar-steam-language"
+    if [[ "$seed_marker" == dangling ]]; then ln -s /nonexistent/dir/marker "$log/home/.steam/.quasar-steam-language"
     else printf '%s\n' "$seed_marker" > "$log/home/.steam/.quasar-steam-language"; fi
   fi
   # A config/ the app user cannot use (the cases run as root, which ignores file
@@ -633,9 +634,39 @@ expect_steam_args lang-english-launch "argc=0"
 if [[ ! -e "$log/home/.steam/.quasar-steam-language" ]]; then pass "lang-english-launch: no marker"; else fail "lang-english-launch: a marker was written"; fi
 reuse_home=1 run_wrapper lang-english-launch LANG=de_DE.UTF-8
 expect_steam_args lang-english-launch-later "argc=2 -language german"
-# A marker that cannot be written (a directory is in its place) means no flag: never apply twice.
-seed_registry="$T/fixtures/registry-english.vdf" seed_marker=dir run_wrapper lang-marker-unwritable LANG=de_DE.UTF-8
+# A marker that cannot be written (a dangling symlink is in its place: -e is false, the write fails)
+# means no flag and one warning:
+# never apply twice. The registry was already rewritten, so Steam starts German from it anyway.
+seed_registry="$T/fixtures/registry-english.vdf" seed_marker=dangling run_wrapper lang-marker-unwritable LANG=de_DE.UTF-8
 expect_steam_args lang-marker-unwritable "argc=0"
+if grep -q "could not record Steam's language" "$log/wrapper.out"; then pass "lang-marker-unwritable: one warning"; else fail "lang-marker-unwritable: no warning"; fi
+# The registry is rewritten with the marker (Steam persists its language only on a clean exit), in
+# both blocks of the golden-home template's own file, and nothing else in it changes.
+expect_registry() { # <case> <expected file>
+  local got="$log/home/.steam/registry.vdf"
+  if [[ "$(cat "$got")" == "$(cat "$2")" ]]; then pass "$1: registry.vdf is as expected"
+  else fail "$1: registry.vdf differs from the expected; the language lines are:"; grep -n '"language"' "$got" | sed 's/^/      /' >&2; fi
+  if compgen -G "$log/home/.steam/.registry.vdf.*" >/dev/null; then fail "$1: a temp file was left in .steam/"; fi
+}
+sed 's/"english"/"german"/' "$T/fixtures/registry-template.vdf" > /tmp/registry-template.german.vdf
+seed_registry="$T/fixtures/registry-template.vdf" run_wrapper lang-registry-rewritten LANG=de_DE.UTF-8
+expect_steam_args lang-registry-rewritten "argc=2 -language german"
+expect_registry lang-registry-rewritten /tmp/registry-template.german.vdf
+# A first launch that dies before Steam writes anything (the stub never does) leaves the home German
+# for the next launch: the registry says so, and no flag is needed (same case name, deliberately).
+reuse_home=1 run_wrapper lang-registry-rewritten LANG=de_DE.UTF-8
+expect_steam_args lang-registry-rewritten-again "argc=0"
+expect_registry lang-registry-rewritten-again /tmp/registry-template.german.vdf
+# A CRLF file is rewritten too, and keeps its line endings.
+sed 's/$/\r/' "$T/fixtures/registry-template.vdf" > /tmp/registry-template.crlf.vdf
+sed 's/$/\r/' /tmp/registry-template.german.vdf > /tmp/registry-template.crlf.german.vdf
+seed_registry=/tmp/registry-template.crlf.vdf run_wrapper lang-registry-crlf LANG=de_DE.UTF-8
+expect_steam_args lang-registry-crlf "argc=2 -language german"
+expect_registry lang-registry-crlf /tmp/registry-template.crlf.german.vdf
+# With the marker, English is the user's pick: the registry is left as it is.
+seed_registry="$T/fixtures/registry-template.vdf" seed_marker=german run_wrapper lang-registry-kept LANG=de_DE.UTF-8
+expect_steam_args lang-registry-kept "argc=0"
+expect_registry lang-registry-kept "$T/fixtures/registry-template.vdf"
 run_wrapper lang-explicit LANG=de_DE.UTF-8 STEAM_STARTUP_FLAGS="-language french"
 expect_steam_args lang-explicit "argc=2 -language french"
 for unmapped in en_US.UTF-8 en_GB.UTF-8 cs_CZ.UTF-8 C.UTF-8 POSIX C ""; do

@@ -129,27 +129,63 @@ steam_language_value() { # <registry.vdf>
     }' "$1" 2>/dev/null || true
 }
 
+# Rewrite Steam's language in registry.vdf to <name>: the "language" value in HKCU/Software/Valve/
+# Steam and, if present, Steamsteamglobal. Steam itself persists its language only on a clean exit,
+# so a launch that dies early would otherwise leave "english" next to the marker for good. Same
+# atomic temp-file-and-rename as set_idle_screensaver; the file keeps its mode and line endings.
+set_steam_language_registry() { # <registry.vdf> <name>
+  local reg="$1" tmp
+  tmp="$(mktemp "$(dirname "$reg")/.registry.vdf.XXXXXX")" || return 1
+  chmod --reference="$reg" "$tmp" || { rm -f "$tmp"; return 1; }
+  awk -v lang="$2" '
+    { line = $0; s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s) }
+    s == "{" { d++; p[d] = (d > 1 ? p[d - 1] "/" : "") tolower(name) }
+    s == "}" { d-- }
+    s ~ /^"[^"]*"$/ { name = substr(s, 2, length(s) - 2) }
+    d > 0 && (p[d] == "registry/hkcu/software/valve/steam" || p[d] == "registry/hkcu/software/valve/steamsteamglobal") \
+      && tolower(s) ~ /^"language"[ \t]+"[^"]*"$/ { sub(/"[^"]*"\r?$/, "\"" lang "\"" (line ~ /\r$/ ? "\r" : ""), line) }
+    { print line }' "$reg" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$reg" || { rm -f "$tmp"; return 1; }
+}
+
 cd "$steam_dir"
 # STEAM_STARTUP_FLAGS is normally computed by quasar-steam (from the catalog's
 # Steam runtime preset or an explicit QUASAR_STEAM_UI_MODE opt-in). There is no
 # fallback here: unset or empty means Steam gets no UI-mode flag.
 read -r -a steam_args <<< "${STEAM_STARTUP_FLAGS:-}"
 # A home is "new" for its language when registry.vdf has none, or has only the "english" Steam
-# writes on its first start. That second case is every home seeded from a golden-home template
-# (the template's Steam booted once, accreleus/quasar#934), and it cannot be told from a user
-# picking English in Steam, so a marker records that the launch's language was applied here: with
-# the marker the registry is the user's, and the language is never set again. No marker is written
-# when nothing is applied (English, an unmapped language), so a later non-English launch still
-# applies once. The marker is written first: if it cannot be, no flag is passed.
+# writes on its first start. That second case is every home whose registry says english and has no
+# marker: a home seeded from a golden-home template (the template's Steam booted once,
+# accreleus/quasar#934), a home made before this existed, and one where the user picked English
+# earlier. They cannot be told apart, so a marker records that the launch's language was applied
+# here: with the marker the registry is the user's, and the language is never set again. No marker
+# is written when nothing is applied (English, an unmapped language), so a later non-English
+# launch still applies once. A template stays marker-free only because its warm-up runs the app
+# under the image's own LANG, which scripts/verify.sh pins to en_US.UTF-8 (nothing is applied
+# then): a warm-up must never run the app under a non-English LANG, or every home seeded from it
+# would carry that language and its marker.
+# The registry is rewritten in the same step as the marker, so a first launch that dies before
+# Steam writes its own language leaves the two agreeing; if either write fails, no flag is passed
+# and the next launch tries again.
 steam_registry="$(dirname "$legacy_dir")/registry.vdf"
 steam_marker="$(dirname "$legacy_dir")/.quasar-steam-language"
 steam_current="$(steam_language_value "$steam_registry")"
 if [[ -z "$steam_current" || ( "$steam_current" == english && ! -e "$steam_marker" ) ]]; then
   steam_language="$(steam_language_for "${LANG:-}")"
   # An explicit -language (the preset's flags, or the caller's) wins.
-  if [[ -n "$steam_language" && " ${steam_args[*]:-} $* " != *" -language "* ]] \
-     && printf '%s\n' "$steam_language" 2>/dev/null > "$steam_marker"; then
-    steam_args+=(-language "$steam_language")
+  if [[ -n "$steam_language" && " ${steam_args[*]:-} $* " != *" -language "* ]]; then
+    steam_ok=1
+    if [[ -n "$steam_current" ]] && ! set_steam_language_registry "$steam_registry" "$steam_language" 2>/dev/null; then
+      printf '%s\n' "quasar-steam: could not set Steam's language in $steam_registry; starting Steam without it" >&2
+      steam_ok=0
+    fi
+    if [[ "$steam_ok" == 1 ]] && ! printf '%s\n' "$steam_language" 2>/dev/null > "$steam_marker"; then
+      printf '%s\n' "quasar-steam: could not record Steam's language in $steam_marker; starting Steam without it" >&2
+      steam_ok=0
+    fi
+    if [[ "$steam_ok" == 1 ]]; then
+      steam_args+=(-language "$steam_language")
+    fi
   fi
 fi
 exec ./steam.sh "${steam_args[@]}" "$@"
