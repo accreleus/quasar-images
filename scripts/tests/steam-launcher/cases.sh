@@ -587,6 +587,15 @@ run_wrapper lang-with-ui-flag LANG=de_DE.UTF-8 STEAM_STARTUP_FLAGS=-bigpicture
 expect_steam_args lang-with-ui-flag "argc=3 -bigpicture -language german"
 seed_registry="$T/fixtures/registry-nolanguage.vdf" run_wrapper lang-registry-no-key LANG=ja_JP.UTF-8
 expect_steam_args lang-registry-no-key "argc=2 -language japanese"
+# Only Steam's own language counts: a "language" key under Steam/Apps/<id>, or the word as some
+# key's value, is not a home that has one.
+seed_registry="$T/fixtures/registry-language-elsewhere.vdf" run_wrapper lang-registry-elsewhere LANG=de_DE.UTF-8
+expect_steam_args lang-registry-elsewhere "argc=2 -language german"
+# A glibc modifier does not change the language.
+run_wrapper lang-modifier LANG=de_DE@euro
+expect_steam_args lang-modifier "argc=2 -language german"
+run_wrapper lang-modifier-utf8 LANG=de_DE.UTF-8@euro
+expect_steam_args lang-modifier-utf8 "argc=2 -language german"
 # A home that has a language (Steam wrote it, or the user chose it) keeps it.
 seed_registry="$T/fixtures/registry-english.vdf" run_wrapper lang-existing-english LANG=de_DE.UTF-8
 expect_steam_args lang-existing-english "argc=0"

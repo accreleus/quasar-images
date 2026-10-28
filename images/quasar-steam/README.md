@@ -192,7 +192,7 @@ writes only when the key is missing, so a timeout chosen in Steam's settings
 ## Steam's language: set once, from the launch
 
 Steam does not follow `LANG` (accreleus/quasar#848): a new home starts in English. When the home
-has no Steam language yet (no `~/.steam/registry.vdf`, or none with a `language` key),
+has no Steam language yet (no `~/.steam/registry.vdf`, or none with a `language` value in `HKCU/Software/Valve/Steam`),
 `quasar-steam-client` maps the launch's `LANG` (`xx_YY.UTF-8`) to Steam's language name and starts
 Steam with `-language <name>` for that launch; Steam writes the language into `registry.vdf`
 itself. A home that already has one is never changed, so a language picked in Steam sticks. English

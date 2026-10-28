@@ -93,6 +93,7 @@ fi
 # Steam's default, so it gets no flag; a language outside this table gets none either.
 steam_language_for() { # <LANG, e.g. de_DE.UTF-8> -> Steam's language name, or nothing
   local tag="${1%%.*}" ll rr
+  tag="${tag%%@*}" # a glibc modifier (de_DE@euro, de_DE.UTF-8@euro) does not change the language
   [[ "$tag" =~ ^([a-z]{2,3})_([A-Z]{2})$ ]] || return 0
   ll="${BASH_REMATCH[1]}" rr="${BASH_REMATCH[2]}"
   case "$ll" in
@@ -112,13 +113,28 @@ steam_language_for() { # <LANG, e.g. de_DE.UTF-8> -> Steam's language name, or n
   return 0
 }
 
+# True when registry.vdf holds Steam's own language: a "language" value directly in
+# Registry/HKCU/Software/Valve/Steam. A "language" key under another branch (Steam/Apps/<id>) or
+# as some key's value is not it. The block walk is the one set_idle_screensaver uses; an absent,
+# empty or unreadable file is "no language", so the launch asks for one.
+steam_has_language() { # <registry.vdf>
+  [[ -s "$1" ]] || return 1
+  awk '
+    { s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s) }
+    s == "{" { d++; p[d] = (d > 1 ? p[d - 1] "/" : "") tolower(name); next }
+    s == "}" { d--; next }
+    s ~ /^"[^"]*"$/ { name = substr(s, 2, length(s) - 2); next }
+    d > 0 && p[d] == "registry/hkcu/software/valve/steam" && tolower(s) ~ /^"language"[ \t]+"[^"]*"$/ { found = 1 }
+    END { exit !found }' "$1" 2>/dev/null
+}
+
 cd "$steam_dir"
 # STEAM_STARTUP_FLAGS is normally computed by quasar-steam (from the catalog's
 # Steam runtime preset or an explicit QUASAR_STEAM_UI_MODE opt-in). There is no
 # fallback here: unset or empty means Steam gets no UI-mode flag.
 read -r -a steam_args <<< "${STEAM_STARTUP_FLAGS:-}"
 steam_registry="$(dirname "$legacy_dir")/registry.vdf"
-if [[ ! -s "$steam_registry" ]] || ! grep -qi '"language"' "$steam_registry"; then
+if ! steam_has_language "$steam_registry"; then
   steam_language="$(steam_language_for "${LANG:-}")"
   # An explicit -language (the preset's flags, or the caller's) wins.
   if [[ -n "$steam_language" && " ${steam_args[*]:-} $* " != *" -language "* ]]; then
