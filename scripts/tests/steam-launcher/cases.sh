@@ -468,7 +468,10 @@ expect_no_launcher_log derived-applaunch "$NO_UI_WARNING"
 run_wrapper() {
   local name="$1"; shift
   log="/tmp/cases/$name"
-  rm -rf "$log" && mkdir -p "$log/home/.local/share/Steam"
+  # reuse_home: a second launch of the same home (the case's earlier launch left it). A case that
+  # reuses a home has the same name as the case that made it, on purpose: keep names unique.
+  [[ -n "${reuse_home:-}" ]] || rm -rf "$log"
+  mkdir -p "$log/home/.local/share/Steam"
   cat > "$log/home/.local/share/Steam/steam.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'argc=%s\n' "$#" > "$STUB_LOG/wrapper.args"
@@ -483,7 +486,18 @@ EOF
   # A Steam registry.vdf the home already had (a fixture path), if the case sets one.
   if [[ -n "${seed_registry:-}" ]]; then
     mkdir -p "$log/home/.steam"
-    cp "$seed_registry" "$log/home/.steam/registry.vdf"
+    if [[ -n "${registry_symlink:-}" ]]; then
+      cp "$seed_registry" "$log/home/.steam/registry.target.vdf"
+      ln -s registry.target.vdf "$log/home/.steam/registry.vdf"
+    else
+      cp "$seed_registry" "$log/home/.steam/registry.vdf"
+    fi
+  fi
+  # The marker a launch that applied the language leaves in the home (a template can carry one).
+  if [[ -n "${seed_marker:-}" ]]; then
+    mkdir -p "$log/home/.steam"
+    if [[ "$seed_marker" == dangling ]]; then ln -s /nonexistent/dir/marker "$log/home/.steam/.quasar-steam-language"
+    else printf '%s\n' "$seed_marker" > "$log/home/.steam/.quasar-steam-language"; fi
   fi
   # A config/ the app user cannot use (the cases run as root, which ignores file
   # modes, so the wrapper then runs as the app user): a file in its place, or a
@@ -596,9 +610,100 @@ run_wrapper lang-modifier LANG=de_DE@euro
 expect_steam_args lang-modifier "argc=2 -language german"
 run_wrapper lang-modifier-utf8 LANG=de_DE.UTF-8@euro
 expect_steam_args lang-modifier-utf8 "argc=2 -language german"
-# A home that has a language (Steam wrote it, or the user chose it) keeps it.
-seed_registry="$T/fixtures/registry-english.vdf" run_wrapper lang-existing-english LANG=de_DE.UTF-8
-expect_steam_args lang-existing-english "argc=0"
+# A home seeded from a golden-home template has the "english" Steam wrote on the template's first
+# start and no marker: the launch's language is applied once (accreleus/quasar#934), and the
+# marker says so.
+seed_registry="$T/fixtures/registry-english.vdf" run_wrapper lang-seeded-english LANG=de_DE.UTF-8
+expect_steam_args lang-seeded-english "argc=2 -language german"
+if [[ "$(cat "$log/home/.steam/.quasar-steam-language" 2>/dev/null)" == german ]]; then
+  pass "lang-seeded-english: the marker records german"
+else
+  fail "lang-seeded-english: marker is '$(cat "$log/home/.steam/.quasar-steam-language" 2>/dev/null)', want german"
+fi
+# Set once: the next launch of that home (the registry still says english, now the user's) adds nothing,
+# even when the language setting has changed meanwhile.
+reuse_home=1 run_wrapper lang-seeded-english LANG=de_DE.UTF-8
+expect_steam_args lang-seeded-english-again "argc=0"
+reuse_home=1 run_wrapper lang-seeded-english LANG=ja_JP.UTF-8
+expect_steam_args lang-seeded-english-other "argc=0"
+# With the marker already there (Steam's english is the user's pick now) nothing is added.
+seed_registry="$T/fixtures/registry-english.vdf" seed_marker=german run_wrapper lang-picked-english LANG=de_DE.UTF-8
+expect_steam_args lang-picked-english "argc=0"
+# A real language in the registry (not english) is the user's, marker or not.
+seed_registry="$T/fixtures/registry-german.vdf" run_wrapper lang-picked-german LANG=ja_JP.UTF-8
+expect_steam_args lang-picked-german "argc=0"
+# Nothing applied, no marker: an English launch of an english home leaves the home as it is, so a
+# later non-English launch still applies once.
+seed_registry="$T/fixtures/registry-english.vdf" run_wrapper lang-english-launch LANG=en_US.UTF-8
+expect_steam_args lang-english-launch "argc=0"
+if [[ ! -e "$log/home/.steam/.quasar-steam-language" ]]; then pass "lang-english-launch: no marker"; else fail "lang-english-launch: a marker was written"; fi
+reuse_home=1 run_wrapper lang-english-launch LANG=de_DE.UTF-8
+expect_steam_args lang-english-launch-later "argc=2 -language german"
+# A marker that cannot be written (a dangling symlink is in its place: -e is false, the write fails)
+# means no flag and one warning:
+# never apply twice. The registry was already rewritten, so Steam starts German from it anyway.
+seed_registry="$T/fixtures/registry-english.vdf" seed_marker=dangling run_wrapper lang-marker-unwritable LANG=de_DE.UTF-8
+expect_steam_args lang-marker-unwritable "argc=0"
+if grep -q "could not record Steam's language.*registry already carries it" "$log/wrapper.out"; then pass "lang-marker-unwritable: one warning, and it says the registry carries the language"; else fail "lang-marker-unwritable: wrong or no warning: $(cat "$log/wrapper.out")"; fi
+# The registry is rewritten with the marker (Steam persists its language only on a clean exit), in
+# both blocks of the golden-home template's own file, and nothing else in it changes.
+expect_registry() { # <case> <expected file>
+  local got="$log/home/.steam/registry.vdf"
+  if [[ "$(cat "$got")" == "$(cat "$2")" ]]; then pass "$1: registry.vdf is as expected"
+  else fail "$1: registry.vdf differs from the expected; the language lines are:"; grep -n '"language"' "$got" | sed 's/^/      /' >&2; fi
+  if compgen -G "$log/home/.steam/.registry.vdf.*" >/dev/null; then fail "$1: a temp file was left in .steam/"; fi
+}
+# The fixture is the template's registry plus two decoys: an HKLM "language" (line 13) and a value
+# "english" (line 32). Only the two HKCU language lines (26 and 30) change.
+sed '26s/"english"/"german"/;30s/"english"/"german"/' "$T/fixtures/registry-template.vdf" > /tmp/registry-template.german.vdf
+seed_registry="$T/fixtures/registry-template.vdf" run_wrapper lang-registry-rewritten LANG=de_DE.UTF-8
+expect_steam_args lang-registry-rewritten "argc=2 -language german"
+expect_registry lang-registry-rewritten /tmp/registry-template.german.vdf
+# A first launch that dies before Steam writes anything (the stub never does) leaves the home German
+# for the next launch: the registry says so, and no flag is needed (same case name, deliberately).
+reuse_home=1 run_wrapper lang-registry-rewritten LANG=de_DE.UTF-8
+expect_steam_args lang-registry-rewritten-again "argc=0"
+expect_registry lang-registry-rewritten-again /tmp/registry-template.german.vdf
+# A CRLF file is rewritten too, and keeps its line endings.
+sed 's/$/\r/' "$T/fixtures/registry-template.vdf" > /tmp/registry-template.crlf.vdf
+sed 's/$/\r/' /tmp/registry-template.german.vdf > /tmp/registry-template.crlf.german.vdf
+seed_registry=/tmp/registry-template.crlf.vdf run_wrapper lang-registry-crlf LANG=de_DE.UTF-8
+expect_steam_args lang-registry-crlf "argc=2 -language german"
+expect_registry lang-registry-crlf /tmp/registry-template.crlf.german.vdf
+# Trailing whitespace on a language line: the detector ignores it, so the rewriter must too.
+sed -E 's/^(\t+"language"\t+"english")$/\1   /' "$T/fixtures/registry-template.vdf" > /tmp/registry-template.ws.vdf
+seed_registry=/tmp/registry-template.ws.vdf run_wrapper lang-registry-trailing-ws LANG=de_DE.UTF-8
+expect_steam_args lang-registry-trailing-ws "argc=2 -language german"
+got="$(grep -c '^	*"language"		"german"$' "$log/home/.steam/registry.vdf" || true)"
+if [[ "$got" == 2 ]] && grep -q '^	*"language"		"english"   $' "$log/home/.steam/registry.vdf"; then
+  pass "lang-registry-trailing-ws: both HKCU lines rewritten, the HKLM decoy kept"
+else
+  fail "lang-registry-trailing-ws: registry language lines are:"; grep -n '"language"' "$log/home/.steam/registry.vdf" | sed 's/^/      /' >&2
+fi
+if [[ "$(cat "$log/home/.steam/.quasar-steam-language" 2>/dev/null)" == german ]]; then pass "lang-registry-trailing-ws: marker written"; else fail "lang-registry-trailing-ws: no marker"; fi
+# A symlinked registry.vdf is written through: the link stays a link and its target changes.
+registry_symlink=1 seed_registry="$T/fixtures/registry-template.vdf" run_wrapper lang-registry-symlink LANG=de_DE.UTF-8
+expect_steam_args lang-registry-symlink "argc=2 -language german"
+if [[ -L "$log/home/.steam/registry.vdf" ]] && [[ "$(cat "$log/home/.steam/registry.target.vdf")" == "$(cat /tmp/registry-template.german.vdf)" ]]; then
+  pass "lang-registry-symlink: the link is kept and its target rewritten"
+else
+  fail "lang-registry-symlink: link kept? $([[ -L "$log/home/.steam/registry.vdf" ]] && echo yes || echo no)"
+fi
+# The invariant behind the marker: the rewrite fails when it replaced nothing (a shape it cannot
+# read), leaves the file and the directory as they were, and the wrapper then writes no marker.
+rewrite_fn="$(sed -n '/^set_steam_language_registry()/,/^}/p' /usr/local/bin/quasar-steam-client)"
+mkdir -p /tmp/cases/rewrite-none && cp "$T/fixtures/registry-nolanguage.vdf" /tmp/cases/rewrite-none/registry.vdf
+rc=0; bash -c "$rewrite_fn"'; set_steam_language_registry /tmp/cases/rewrite-none/registry.vdf german' || rc=$?
+if [[ "$rc" != 0 && "$(cat "$T/fixtures/registry-nolanguage.vdf")" == "$(cat /tmp/cases/rewrite-none/registry.vdf)" ]] \
+   && [[ "$(ls -A /tmp/cases/rewrite-none)" == registry.vdf ]]; then
+  pass "rewrite-none: a registry with nothing to replace fails and is left alone"
+else
+  fail "rewrite-none: rc=$rc, directory: $(ls -A /tmp/cases/rewrite-none | paste -sd' ')"
+fi
+# With the marker, English is the user's pick: the registry is left as it is.
+seed_registry="$T/fixtures/registry-template.vdf" seed_marker=german run_wrapper lang-registry-kept LANG=de_DE.UTF-8
+expect_steam_args lang-registry-kept "argc=0"
+expect_registry lang-registry-kept "$T/fixtures/registry-template.vdf"
 run_wrapper lang-explicit LANG=de_DE.UTF-8 STEAM_STARTUP_FLAGS="-language french"
 expect_steam_args lang-explicit "argc=2 -language french"
 for unmapped in en_US.UTF-8 en_GB.UTF-8 cs_CZ.UTF-8 C.UTF-8 POSIX C ""; do
