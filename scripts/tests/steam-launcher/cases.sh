@@ -475,9 +475,33 @@ printf 'argc=%s\n' "$#" > "$STUB_LOG/wrapper.args"
 printf '%s\n' "$@" >> "$STUB_LOG/wrapper.args"
 EOF
   chmod 0755 "$log/home/.local/share/Steam/steam.sh"
+  # A Steam config.vdf the home already had (a fixture path), if the case sets one.
+  if [[ -n "${seed_config:-}" ]]; then
+    mkdir -p "$log/home/.local/share/Steam/config"
+    cp "$seed_config" "$log/home/.local/share/Steam/config/config.vdf"
+  fi
+  # A Steam registry.vdf the home already had (a fixture path), if the case sets one.
+  if [[ -n "${seed_registry:-}" ]]; then
+    mkdir -p "$log/home/.steam"
+    cp "$seed_registry" "$log/home/.steam/registry.vdf"
+  fi
+  # A config/ the app user cannot use (the cases run as root, which ignores file
+  # modes, so the wrapper then runs as the app user): a file in its place, or a
+  # directory that is not writable.
+  local as=()
+  if [[ -n "${config_as_file:-}" ]]; then
+    : > "$log/home/.local/share/Steam/config"
+  elif [[ -n "${config_readonly:-}" ]]; then
+    mkdir -p "$log/home/.local/share/Steam/config"
+    chmod 0555 "$log/home/.local/share/Steam/config"
+  fi
+  if [[ -n "${config_as_file:-}${config_readonly:-}" ]]; then
+    chmod 0777 "$log" "$log/home"
+    as=(setpriv --reuid=1000 --regid=1000 --clear-groups)
+  fi
   local rc=0
   env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$log/home" STUB_LOG="$log" \
-    "$@" timeout 30 /usr/local/bin/quasar-steam-client >"$log/wrapper.out" 2>&1 || rc=$?
+    "$@" timeout 30 "${as[@]}" /usr/local/bin/quasar-steam-client >"$log/wrapper.out" 2>&1 || rc=$?
   if [[ "$rc" != 0 ]]; then
     fail "$name: steam-wrapper exited $rc"
     sed 's/^/      /' "$log/wrapper.out" >&2
@@ -499,6 +523,97 @@ else
   fail "wrapper-bigpicture: steam.sh received: $(paste -sd' ' "$log/wrapper.args" 2>/dev/null)"
 fi
 
+# Steam's idle screensaver is off unless the home already carries a choice
+# (accreleus/quasar#819): the wrapper writes IdleScreensaverACSeconds=0 into
+# config.vdf's Steam/system block before Steam starts, and nothing else changes.
+# The config files are golden: the inputs have a decoy "system" block at the
+# wrong path, which must not be the one edited.
+expect_config() { # <case> <expected file>
+  local got="$log/home/.local/share/Steam/config/config.vdf"
+  if [[ "$(cat "$got")" == "$(cat "$2")" ]]; then
+    pass "$1: config.vdf is as expected"
+  else
+    fail "$1: config.vdf differs from $(basename "$2"); it is:"
+    sed 's/^/      /' "$got" >&2
+  fi
+  if compgen -G "$log/home/.local/share/Steam/config/.config.vdf.*" >/dev/null; then
+    fail "$1: a temp file was left in config/"
+  fi
+}
+seed_config="" run_wrapper screensaver-fresh
+expect_config screensaver-fresh "$T/fixtures/config-fresh.out.vdf"
+seed_config="$T/fixtures/config-system.in.vdf" run_wrapper screensaver-system
+expect_config screensaver-system "$T/fixtures/config-system.out.vdf"
+seed_config="$T/fixtures/config-nosystem.in.vdf" run_wrapper screensaver-nosystem
+expect_config screensaver-nosystem "$T/fixtures/config-nosystem.out.vdf"
+# A value already there (the user chose one in Steam) is theirs.
+seed_config="$T/fixtures/config-choice.vdf" run_wrapper screensaver-choice
+expect_config screensaver-choice "$T/fixtures/config-choice.vdf"
+# Not a config Steam wrote: no Steam block to put the key in, so the file is left alone.
+seed_config="$T/fixtures/config-nosteam.vdf" run_wrapper screensaver-nosteam
+expect_config screensaver-nosteam "$T/fixtures/config-nosteam.vdf"
+# A CRLF file is edited too, and keeps its line endings.
+seed_config="$T/fixtures/config-crlf.in.vdf" run_wrapper screensaver-crlf
+expect_config screensaver-crlf "$T/fixtures/config-crlf.out.vdf"
+# A failed edit never fails the launch: with a config/ the app user cannot use
+# (a file in its place; a directory it cannot write) Steam still starts.
+config_as_file=1 run_wrapper screensaver-config-is-file
+if [[ "$(head -1 "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]]; then
+  pass "screensaver-config-is-file: steam.sh still started"
+else
+  fail "screensaver-config-is-file: steam.sh was not started"
+fi
+config_readonly=1 run_wrapper screensaver-config-readonly
+if [[ "$(head -1 "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]]; then
+  pass "screensaver-config-readonly: steam.sh still started"
+else
+  fail "screensaver-config-readonly: steam.sh was not started"
+fi
+if grep -q "starting Steam anyway" "$log/wrapper.out"; then
+  pass "screensaver-config-readonly: one warning, then Steam started"
+else
+  fail "screensaver-config-readonly: no warning in the wrapper's output"
+fi
+# Steam does not follow LANG (accreleus/quasar#848), so a home with no Steam language yet
+# starts with `-language <name>` for the launch's LANG, once. A home that already has one is
+# the user's, an explicit -language wins, and English or an unmapped language gets no flag.
+expect_steam_args() { # <case> <want: the argc line and args, space-joined>
+  local got; got="$(paste -sd' ' "$log/wrapper.args" 2>/dev/null | sed 's/ *$//')"
+  if [[ "$got" == "$2" ]]; then pass "$1: steam.sh received '$2'"; else fail "$1: steam.sh received '$got', want '$2'"; fi
+}
+run_wrapper lang-fresh LANG=de_DE.UTF-8
+expect_steam_args lang-fresh "argc=2 -language german"
+run_wrapper lang-with-ui-flag LANG=de_DE.UTF-8 STEAM_STARTUP_FLAGS=-bigpicture
+expect_steam_args lang-with-ui-flag "argc=3 -bigpicture -language german"
+seed_registry="$T/fixtures/registry-nolanguage.vdf" run_wrapper lang-registry-no-key LANG=ja_JP.UTF-8
+expect_steam_args lang-registry-no-key "argc=2 -language japanese"
+# Only Steam's own language counts: a "language" key under Steam/Apps/<id>, or the word as some
+# key's value, is not a home that has one.
+seed_registry="$T/fixtures/registry-language-elsewhere.vdf" run_wrapper lang-registry-elsewhere LANG=de_DE.UTF-8
+expect_steam_args lang-registry-elsewhere "argc=2 -language german"
+# A glibc modifier does not change the language.
+run_wrapper lang-modifier LANG=de_DE@euro
+expect_steam_args lang-modifier "argc=2 -language german"
+run_wrapper lang-modifier-utf8 LANG=de_DE.UTF-8@euro
+expect_steam_args lang-modifier-utf8 "argc=2 -language german"
+# A home that has a language (Steam wrote it, or the user chose it) keeps it.
+seed_registry="$T/fixtures/registry-english.vdf" run_wrapper lang-existing-english LANG=de_DE.UTF-8
+expect_steam_args lang-existing-english "argc=0"
+run_wrapper lang-explicit LANG=de_DE.UTF-8 STEAM_STARTUP_FLAGS="-language french"
+expect_steam_args lang-explicit "argc=2 -language french"
+for unmapped in en_US.UTF-8 en_GB.UTF-8 cs_CZ.UTF-8 C.UTF-8 POSIX C ""; do
+  run_wrapper "lang-unmapped-${unmapped:-empty}" LANG="$unmapped"
+  expect_steam_args "lang-unmapped-${unmapped:-empty}" "argc=0"
+done
+run_wrapper lang-unset
+expect_steam_args lang-unset "argc=0"
+# The names: Steam's API language codes, for the languages the quasar settings offer.
+for pair in de_DE:german fr_FR:french es_ES:spanish it_IT:italian nl_NL:dutch pl_PL:polish pt_BR:brazilian \
+            sv_SE:swedish ru_RU:russian ja_JP:japanese ko_KR:koreana zh_CN:schinese \
+            es_MX:latam pt_PT:portuguese zh_TW:tchinese de_AT:german; do
+  run_wrapper "lang-map-${pair%%:*}" "LANG=${pair%%:*}.UTF-8"
+  expect_steam_args "lang-map-${pair%%:*}" "argc=2 -language ${pair#*:}"
+done
 # --- init hook cases -----------------------------------------------------------
 
 SEATD_HOOK=/etc/quasar/init.d/25-steam-direct-seatd.sh

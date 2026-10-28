@@ -1,0 +1,23 @@
+"Registry"
+{
+	"HKCU"
+	{
+		"Software"
+		{
+			"Valve"
+			{
+				"Steam"
+				{
+					"UILang2"		"language"
+					"Apps"
+					{
+						"730"
+						{
+							"language"		"english"
+						}
+					}
+				}
+			}
+		}
+	}
+}

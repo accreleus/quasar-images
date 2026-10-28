@@ -23,9 +23,122 @@ else
   printf '%s\n' "quasar-steam: refusing to replace non-empty $legacy_dir" >&2
 fi
 
+# Steam's idle screensaver blanks the stream after ~5 minutes with no input
+# (accreleus/quasar#819). Steam keeps its timeout in config/config.vdf, under
+# InstallConfigStore/Software/Valve/Steam/system; 0 is "Disabled" in its own
+# settings. Set it only when the key is absent, so a choice made in Steam sticks,
+# and edit the file before Steam starts, as Steam rewrites it from memory.
+#
+# A cosmetic setting must never stop Steam from starting: the function runs as an
+# `if` condition (errexit is off inside it, so every step ends in `|| return 1`),
+# and a failure is one warning, then the launch goes on. The file is replaced by a
+# rename of a temp file in the same directory, so a kill never leaves it half-written.
+set_idle_screensaver() {
+  local key=IdleScreensaverACSeconds dir="$steam_dir/config" tmp rc
+  local cfg="$dir/config.vdf"
+  mkdir -p "$dir" || return 1
+  tmp="$(mktemp "$dir/.config.vdf.XXXXXX")" || return 1
+  if [[ ! -s "$cfg" ]]; then
+    chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
+    printf '"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"system"\n\t\t\t\t{\n\t\t\t\t\t"%s"\t\t"0"\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n' \
+      "$key" > "$tmp" || { rm -f "$tmp"; return 1; }
+  elif grep -qi "\"$key\"" "$cfg"; then
+    rm -f "$tmp"
+    return 0
+  else
+    # Insert into the Steam block's "system" block, creating that block if it is
+    # missing; a CRLF file keeps its line endings. No Steam block (not a config
+    # Steam wrote): exit 3, the file is left alone.
+    chmod --reference="$cfg" "$tmp" || { rm -f "$tmp"; return 1; }
+    awk -v key="$key" '
+      { l[NR] = $0 }
+      END {
+        for (i = 1; i <= NR; i++) {
+          s = l[i]; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s)
+          if (s == "{") { d++; p[d] = (d > 1 ? p[d - 1] "/" : "") tolower(name)
+            if (p[d] == "installconfigstore/software/valve/steam") steam = i
+            if (p[d] == "installconfigstore/software/valve/steam/system") sys = i
+          } else if (s == "}") d--
+          else if (s ~ /^"[^"]*"$/) name = substr(s, 2, length(s) - 2)
+        }
+        if (!steam) exit 3
+        for (i = 1; i <= NR; i++) {
+          print l[i]
+          if (sys ? i == sys : i == steam) {
+            c = (l[i] ~ /\r$/) ? "\r" : ""
+            if (!sys) { print "\t\t\t\t\"system\"" c; print "\t\t\t\t{" c }
+            print "\t\t\t\t\t\"" key "\"\t\t\"0\"" c
+            if (!sys) print "\t\t\t\t}" c
+          }
+        }
+      }' "$cfg" > "$tmp"
+    rc=$?
+    if (( rc != 0 )); then
+      rm -f "$tmp"
+      (( rc == 3 )) && return 0
+      return 1
+    fi
+  fi
+  mv -f "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
+}
+if ! set_idle_screensaver 2>/dev/null; then
+  printf '%s\n' "quasar-steam: could not set Steam's screensaver timeout in $steam_dir/config; starting Steam anyway" >&2
+fi
+
+# Steam does not follow LANG (accreleus/quasar#848): a new home starts in English whatever
+# language the launch asked for. Steam keeps its language in ~/.steam/registry.vdf and writes it
+# back itself, so `-language <name>` once, on a home that has none yet, is enough; after that the
+# language is Steam's (the user may change it there) and is never overridden. Steam's names are
+# its API language codes (partner.steamgames.com/doc/store/localization/languages). English is
+# Steam's default, so it gets no flag; a language outside this table gets none either.
+steam_language_for() { # <LANG, e.g. de_DE.UTF-8> -> Steam's language name, or nothing
+  local tag="${1%%.*}" ll rr
+  tag="${tag%%@*}" # a glibc modifier (de_DE@euro, de_DE.UTF-8@euro) does not change the language
+  [[ "$tag" =~ ^([a-z]{2,3})_([A-Z]{2})$ ]] || return 0
+  ll="${BASH_REMATCH[1]}" rr="${BASH_REMATCH[2]}"
+  case "$ll" in
+    de) echo german ;;
+    fr) echo french ;;
+    it) echo italian ;;
+    nl) echo dutch ;;
+    pl) echo polish ;;
+    sv) echo swedish ;;
+    ru) echo russian ;;
+    ja) echo japanese ;;
+    ko) echo koreana ;;
+    es) if [[ "$rr" == ES ]]; then echo spanish; else echo latam; fi ;;
+    pt) if [[ "$rr" == BR ]]; then echo brazilian; else echo portuguese; fi ;;
+    zh) if [[ "$rr" == TW || "$rr" == HK ]]; then echo tchinese; else echo schinese; fi ;;
+  esac
+  return 0
+}
+
+# True when registry.vdf holds Steam's own language: a "language" value directly in
+# Registry/HKCU/Software/Valve/Steam. A "language" key under another branch (Steam/Apps/<id>) or
+# as some key's value is not it. The block walk is the one set_idle_screensaver uses; an absent,
+# empty or unreadable file is "no language", so the launch asks for one.
+steam_has_language() { # <registry.vdf>
+  [[ -s "$1" ]] || return 1
+  awk '
+    { s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s) }
+    s == "{" { d++; p[d] = (d > 1 ? p[d - 1] "/" : "") tolower(name); next }
+    s == "}" { d--; next }
+    s ~ /^"[^"]*"$/ { name = substr(s, 2, length(s) - 2); next }
+    d > 0 && p[d] == "registry/hkcu/software/valve/steam" && tolower(s) ~ /^"language"[ \t]+"[^"]*"$/ { found = 1 }
+    END { exit !found }' "$1" 2>/dev/null
+}
+
 cd "$steam_dir"
 # STEAM_STARTUP_FLAGS is normally computed by quasar-steam (from the catalog's
 # Steam runtime preset or an explicit QUASAR_STEAM_UI_MODE opt-in). There is no
 # fallback here: unset or empty means Steam gets no UI-mode flag.
 read -r -a steam_args <<< "${STEAM_STARTUP_FLAGS:-}"
+steam_registry="$(dirname "$legacy_dir")/registry.vdf"
+if ! steam_has_language "$steam_registry"; then
+  steam_language="$(steam_language_for "${LANG:-}")"
+  # An explicit -language (the preset's flags, or the caller's) wins.
+  if [[ -n "$steam_language" && " ${steam_args[*]:-} $* " != *" -language "* ]]; then
+    steam_args+=(-language "$steam_language")
+  fi
+fi
 exec ./steam.sh "${steam_args[@]}" "$@"

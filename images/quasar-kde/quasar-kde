@@ -349,6 +349,12 @@ if [[ "$direct_display" == "1" ]]; then
   unset PULSE_SERVER PULSE_SINK PULSE_SOURCE PULSE_COOKIE
 fi
 
+# --- Keyboard layout from the Quasar setting (quasar#850) ---------------------
+# The user's Quasar keyboard layout (XKB_DEFAULT_LAYOUT/_VARIANT) is written into
+# Plasma's own kxkbrc at every launch, so it wins over a change made inside the
+# desktop. Unset: Plasma keeps its own config. Soft: never stops the session.
+quasar-desktop-keyboard kde || log "WARNING: could not write the keyboard layout; Plasma keeps its own"
+
 # --- Launch ------------------------------------------------------------------
 # dbus-run-session gives the whole session one session bus (there is no systemd
 # --user to provide one). It EXECS its program rather than forking it, so
