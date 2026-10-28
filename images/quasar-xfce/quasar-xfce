@@ -378,6 +378,13 @@ if [[ -f "$xfwm4_user" ]] && grep -q 'name="use_compositing" type="bool" value="
   log "xfwm4 compositing was on in this home; turned it off (the host compositor composites)"
 fi
 
+# The user's Quasar keyboard layout (XKB_DEFAULT_LAYOUT/_VARIANT) goes into the
+# xfconf keyboard-layout channel at every launch, so it wins over a change made
+# inside the desktop (quasar#850). Written as the channel's XML, before xfconfd
+# reads it, like the xfwm4 correction above. Unset: XFCE keeps its own config.
+# Soft: never stops the session.
+quasar-desktop-keyboard xfce || log "WARNING: could not write the keyboard layout; XFCE keeps its own"
+
 session=(dbus-run-session -- startxfce4)
 
 if [[ "$shutting_down" == "1" ]]; then
