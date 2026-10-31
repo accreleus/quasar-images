@@ -1,0 +1,21 @@
+#!/bin/sh
+# Start the desktop Steam client with no system bus (quasar#807).
+#
+# Steam's login waits in WaitingForNetwork (10 s, 20 s under -silent) until
+# NetworkManager reports a connected device whose active connection is the
+# default route. In a session container NM only observes eth0 ("connected
+# (externally)", no NET_ADMIN), never marks it default, so every start sits out
+# the timeout. With no NM client reachable Steam skips the wait.
+#
+# KDE and XFCE keep a real system bus and NetworkManager for the session's own
+# network applet and Discover, so the bus is hidden from Steam alone, here,
+# not for the whole container (the Steam app image has neither: quasar#741).
+# An explicit DBUS_SYSTEM_BUS_ADDRESS from the caller wins, for A/B debugging.
+# An abstract address, not a path: Steam's sandbox (pressure-vessel) bind-mounts the
+# socket path named here, and a path that does not exist makes bwrap fail, so the
+# web helper never starts and the client never signs in. Nothing listens on it.
+: "${DBUS_SYSTEM_BUS_ADDRESS=unix:abstract=quasar-no-system-bus}"
+export DBUS_SYSTEM_BUS_ADDRESS
+# Through the package's own /usr/bin/steam symlink: bin_steam.sh finds its
+# bootstrap by following that link, so it must not be given another name.
+exec /usr/bin/steam "$@"

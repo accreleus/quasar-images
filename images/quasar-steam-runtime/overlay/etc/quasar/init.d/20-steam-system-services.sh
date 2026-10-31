@@ -3,7 +3,9 @@
 # (their network applet and Discover read NetworkManager). The Steam image turns
 # this off (QUASAR_STEAM_SYSTEM_SERVICES=0, quasar#741): in a container
 # NetworkManager never reports a default route, so current Steam waits out a
-# 10-20 s network timeout with it, and signs in at once without it.
+# 10-20 s network timeout with it, and signs in at once without it. The desktops
+# keep the services for the session but hide the bus from the Steam client alone:
+# /usr/local/bin/steam, which the desktop's Steam entry runs (quasar#807).
 #
 # History (why the hook exists):
 #
