@@ -358,7 +358,8 @@ docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "$QV_GUARD"'
   grep -q "writeConfig(\"icon\", \"quasar\")" "$kickoff"
 
   # Steam desktop client'"'"'s stock .desktop entry (shipped by the RPM) must
-  # appear in Kickoff automatically -- no wrapper script, menu-launched only.
+  # appear in Kickoff automatically; its Exec lines run /usr/local/bin/steam
+  # (quasar#807, checked by qv_steam_without_system_bus).
   test -f /usr/share/applications/steam.desktop
 '
 

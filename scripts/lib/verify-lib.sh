@@ -129,22 +129,25 @@ qv_image_has() {
 # Steam's login then waits out a 10 s / 20 s network timeout on every start. The
 # session keeps its real bus for the network applet; only Steam is given an
 # address nothing listens on. Checks the menu entry points at the wrapper, then
-# runs the wrapper against a stand-in for the package's launcher that prints what
-# it was given.
+# runs the wrapper against a stand-in for the package's launcher that prints the
+# address and the arguments it was given, so a wrapper that drops or reorders
+# them fails. Every desktop image built on quasar-steam-runtime calls this.
 qv_steam_without_system_bus() {
   local image="$1"
   docker run --rm --entrypoint /bin/bash "$image" -lc "$QV_GUARD"'
     test -x /usr/local/bin/steam
+    test "$(command -v steam)" = /usr/local/bin/steam
     desktop=/usr/share/applications/steam.desktop
     if grep -q "^Exec=/usr/bin/steam" "$desktop"; then
       echo "a steam.desktop Exec line bypasses /usr/local/bin/steam" >&2; exit 1
     fi
     grep -q "^Exec=/usr/local/bin/steam %U" "$desktop"
     rm -f /usr/bin/steam
-    printf "#!/bin/sh\necho \"\$DBUS_SYSTEM_BUS_ADDRESS\"\n" > /usr/bin/steam
+    printf "#!/bin/sh\necho \"\$DBUS_SYSTEM_BUS_ADDRESS|\$*\"\n" > /usr/bin/steam
     chmod 0755 /usr/bin/steam
-    test "$(/usr/local/bin/steam)" = "unix:abstract=quasar-no-system-bus"
-    test "$(DBUS_SYSTEM_BUS_ADDRESS=unix:path=/x /usr/local/bin/steam)" = "unix:path=/x"
+    test "$(/usr/local/bin/steam)" = "unix:abstract=quasar-no-system-bus|"
+    test "$(/usr/local/bin/steam -bigpicture "steam://open/games")" = "unix:abstract=quasar-no-system-bus|-bigpicture steam://open/games"
+    test "$(DBUS_SYSTEM_BUS_ADDRESS=unix:path=/x /usr/local/bin/steam -silent)" = "unix:path=/x|-silent"
   '
   printf '  ok    steam runs without the system bus (%s)\n' "$image"
 }

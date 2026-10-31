@@ -8,8 +8,9 @@
 # the timeout. With no NM client reachable Steam skips the wait.
 #
 # KDE and XFCE keep a real system bus and NetworkManager for the session's own
-# network applet and Discover, so the bus is hidden from Steam alone, here,
-# not for the whole container (the Steam app image has neither: quasar#741).
+# network applet and Discover, so the bus is hidden from Steam and everything it
+# starts (games, the web helper, a browser opened from a link), here, not for
+# the whole container (the Steam app image has neither: quasar#741).
 # An explicit DBUS_SYSTEM_BUS_ADDRESS from the caller wins, for A/B debugging.
 # An abstract address, not a path: Steam's sandbox (pressure-vessel) bind-mounts the
 # socket path named here, and a path that does not exist makes bwrap fail, so the
