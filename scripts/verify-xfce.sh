@@ -21,6 +21,7 @@ qv_image_has "$XFCE_IMAGE" \
   startxfce4 xfce4-session xfwm4 xfce4-panel xfdesktop Xwayland xset \
   dbus-run-session flatpak gnome-software firefox steam bwrap quasar-xfce \
   quasar-display-bridge quasar-xfce-modes xdg-user-dirs-update
+qv_steam_without_system_bus "$XFCE_IMAGE"
 
 # The display-mode bridge (quasar #445) is built in the shared spine image
 # (images/quasar-app/display-bridge/, quasar-images#447), not in this

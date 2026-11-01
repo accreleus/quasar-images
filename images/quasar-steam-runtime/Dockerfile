@@ -63,3 +63,11 @@ COPY images/quasar-steam-runtime/overlay/etc/NetworkManager/conf.d/00-quasar.con
 COPY images/quasar-steam-runtime/overlay/etc/quasar/init.d/20-steam-system-services.sh /etc/quasar/init.d/20-steam-system-services.sh
 RUN chmod 0644 /etc/NetworkManager/conf.d/00-quasar.conf \
     && chmod 0755 /etc/quasar/init.d/20-steam-system-services.sh
+
+# The desktop Steam client (KDE, XFCE) runs without the system bus even though the
+# session has one, so it does not wait out its 10-20 s network timeout (quasar#807;
+# the file says why). The desktop entry and its actions point at the wrapper.
+COPY images/quasar-steam-runtime/overlay/usr/local/bin/steam /usr/local/bin/steam
+RUN chmod 0755 /usr/local/bin/steam \
+    && sed -i 's|^Exec=/usr/bin/steam |Exec=/usr/local/bin/steam |' /usr/share/applications/steam.desktop \
+    && ! grep -q '^Exec=/usr/bin/steam' /usr/share/applications/steam.desktop

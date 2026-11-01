@@ -26,6 +26,7 @@ qv_image_has "$KDE_IMAGE" \
 # session is silent. scripts/verify-kde-launcher.sh asserts they are STARTED in
 # direct mode and not in nested mode; this asserts they exist.
 qv_image_has "$KDE_IMAGE" pipewire wireplumber pipewire-pulse pw-cli
+qv_steam_without_system_bus "$KDE_IMAGE"
 # Plasma's volume applet: in a console session it is the only place to pick the
 # output (monitor HDMI/DP or the sound card). Without it the tray has no audio icon.
 if docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc \
@@ -357,7 +358,8 @@ docker run --rm --entrypoint /bin/bash "$KDE_IMAGE" -lc "$QV_GUARD"'
   grep -q "writeConfig(\"icon\", \"quasar\")" "$kickoff"
 
   # Steam desktop client'"'"'s stock .desktop entry (shipped by the RPM) must
-  # appear in Kickoff automatically -- no wrapper script, menu-launched only.
+  # appear in Kickoff automatically; its Exec lines run /usr/local/bin/steam
+  # (quasar#807, checked by qv_steam_without_system_bus).
   test -f /usr/share/applications/steam.desktop
 '
 
