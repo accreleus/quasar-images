@@ -85,6 +85,166 @@ if ! set_idle_screensaver 2>/dev/null; then
   printf '%s\n' "quasar-steam: could not set Steam's screensaver timeout in $steam_dir/config; starting Steam anyway" >&2
 fi
 
+# Compatibility tools (accreleus/quasar#1068): the control plane sends the effective per-game
+# mapping in QUASAR_COMPAT_TOOLS, space-separated `<appid>=<name>` tokens, `!` after the name for a
+# forced one (appid 0 is Steam's "all other titles" slot and is never forced). Each one is written
+# into config.vdf InstallConfigStore/Software/Valve/Steam/CompatToolMapping before Steam starts;
+# Steam never re-reads the file and rewrites it from memory, so no other moment works.
+#
+# A user's own pick in Steam looks exactly like our write (name, config "", priority 250), so the
+# wrapper records what it wrote in ~/.local/share/quasar/compat-tool-fills (`<appid>=<name>` per
+# line). A forced entry replaces whatever is there. An unforced one is written only when the home
+# has no entry for the appid or the entry is exactly what we last wrote; anything else is the
+# user's and is kept. An entry we wrote whose appid is no longer sent is removed, unless the user
+# has changed it. With no record, every entry counts as the user's. A name is checked again here,
+# because it lands in Steam's config: Valve's names, or a directory in the mounted tools path.
+# Unset QUASAR_COMPAT_TOOLS touches nothing. The failure handling is set_idle_screensaver's.
+compat_name_ok() { # <name>
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 1
+  [[ "$1" =~ ^proton_(experimental|hotfix|[0-9]{1,3})$ ]] && return 0
+  local d; local -a dirs=()
+  IFS=: read -r -a dirs <<<"${STEAM_EXTRA_COMPAT_TOOLS_PATHS:-}"
+  for d in "${dirs[@]}"; do
+    [[ -n "$d" && -d "$d/$1" ]] && return 0
+  done
+  return 1
+}
+
+# The names under CompatToolMapping, one `<appid><TAB><name>` line each.
+compat_current_mapping() { # <config.vdf>
+  awk '
+    { s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s) }
+    s == "{" { d++; p[d] = (d > 1 ? p[d - 1] "/" : "") tolower(name); next }
+    s == "}" { d--; next }
+    s ~ /^"[^"]*"$/ { name = substr(s, 2, length(s) - 2); next }
+    d > 0 && tolower(s) ~ /^"name"[ \t]+"[^"]*"$/ {
+      n = split(p[d], a, "/")
+      if (n == 6 && a[1] "/" a[2] "/" a[3] "/" a[4] "/" a[5] == "installconfigstore/software/valve/steam/compattoolmapping") {
+        v = s; sub(/^"[^"]*"[ \t]+"/, "", v); sub(/"$/, "", v); print a[6] "\t" v
+      }
+    }' "$1"
+}
+
+# Apply an ops file (`S<TAB>appid<TAB>name<TAB>priority` | `D<TAB>appid`) to config.vdf. Exit 3: no
+# Steam block, so not a config Steam wrote.
+compat_rewrite() { # <config.vdf> <ops> <out>
+  awk -v ops="$2" '
+    BEGIN {
+      while ((getline line < ops) > 0) {
+        split(line, f, "\t")
+        if (f[1] == "S") { name[f[2]] = f[3]; prio[f[2]] = f[4]; order[++no] = f[2] } else del[f[2]] = 1
+      }
+    }
+    function block(id, ind, c) {
+      printf "%s\"%s\"%s\n%s{%s\n", ind, id, c, ind, c
+      printf "%s\t\"name\"\t\t\"%s\"%s\n%s\t\"config\"\t\t\"\"%s\n%s\t\"priority\"\t\t\"%s\"%s\n", ind, name[id], c, ind, c, ind, prio[id], c
+      printf "%s}%s\n", ind, c
+    }
+    { l[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        s = l[i]; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s)
+        if (s == "{") {
+          d++; start[d] = i; p[d] = (d > 1 ? p[d - 1] "/" : "") tolower(name_)
+          if (p[d] == "installconfigstore/software/valve/steam") steam = i
+          if (p[d] == "installconfigstore/software/valve/steam/compattoolmapping") cm = i
+          if (p[d] ~ /^installconfigstore\/software\/valve\/steam\/compattoolmapping\/[^\/]+$/) {
+            id = p[d]; sub(/.*\//, "", id); bs[id] = i - 1
+          }
+        } else if (s == "}") {
+          if (p[d] == "installconfigstore/software/valve/steam/compattoolmapping") cmend = i
+          if (p[d] ~ /^installconfigstore\/software\/valve\/steam\/compattoolmapping\/[^\/]+$/) {
+            id = p[d]; sub(/.*\//, "", id); be[id] = i
+          }
+          d--
+        } else if (s ~ /^"[^"]*"$/) name_ = substr(s, 2, length(s) - 2)
+      }
+      if (!steam) exit 3
+      for (id in bs) { if ((id in name) || (id in del)) { for (k = bs[id]; k <= be[id]; k++) skip[k] = 1; if (id in name) at[bs[id]] = id; seen[id] = 1 } }
+      c = (l[steam] ~ /\r$/) ? "\r" : ""
+      for (i = 1; i <= NR; i++) {
+        if (i in at) { block(at[i], substr(l[i], 1, match(l[i], /[^ \t]/) - 1), c); continue }
+        if (i in skip) continue
+        if (cm && i == cmend) for (k = 1; k <= no; k++) if (!(order[k] in seen)) block(order[k], "\t\t\t\t\t", c)
+        print l[i]
+        if (!cm && i == steam && no) {
+          print "\t\t\t\t\"CompatToolMapping\"" c; print "\t\t\t\t{" c
+          for (k = 1; k <= no; k++) block(order[k], "\t\t\t\t\t", c)
+          print "\t\t\t\t}" c
+        }
+      }
+    }' "$1" > "$3"
+}
+
+apply_compat_tools() {
+  [[ -n "${QUASAR_COMPAT_TOOLS+x}" ]] || return 0
+  local cfg="$steam_dir/config/config.vdf" rec_dir="$HOME/.local/share/quasar"
+  local rec="$rec_dir/compat-tool-fills" id name forced tok line
+  local -A want_name=() want_forced=() cur=() ours=() keep=()
+  local -a toks=() order=()
+  [[ -s "$cfg" ]] || return 1
+  read -r -a toks <<<"$QUASAR_COMPAT_TOOLS"
+  for tok in "${toks[@]}"; do
+    forced=0
+    [[ "$tok" == *'!' ]] && { forced=1; tok="${tok%!}"; }
+    id="${tok%%=*}" name="${tok#*=}"
+    if [[ "$tok" != *=* || ! "$id" =~ ^(0|[1-9][0-9]{0,9})$ ]] || ! compat_name_ok "$name" \
+       || [[ "$id" == 0 && "$forced" == 1 ]] || [[ -n "${want_name[$id]+x}" ]]; then
+      printf '%s\n' "quasar-steam: refusing compat tool entry '$tok'" >&2
+      continue
+    fi
+    want_name[$id]="$name" want_forced[$id]="$forced"
+    order+=("$id")
+  done
+  if [[ -s "$rec" ]]; then
+    while IFS='=' read -r id name; do
+      [[ "$id" =~ ^(0|[1-9][0-9]{0,9})$ && "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] && ours[$id]="$name"
+    done <"$rec"
+  fi
+  while IFS=$'\t' read -r id name; do cur[$id]="$name"; done < <(compat_current_mapping "$cfg")
+
+  local ops tmp out
+  ops="$(mktemp "$steam_dir/config/.compat-ops.XXXXXX")" || return 1
+  : >"$ops"
+  for id in "${order[@]}"; do
+    name="${want_name[$id]}"
+    if [[ "${want_forced[$id]}" == 1 || -z "${cur[$id]+x}" || "${cur[$id]}" == "${ours[$id]:-}" ]]; then
+      keep[$id]="$name"
+      [[ "${cur[$id]:-}" == "$name" ]] && continue
+      line="S"$'\t'"$id"$'\t'"$name"$'\t'"$([[ "$id" == 0 ]] && echo 75 || echo 250)"
+      printf '%s\n' "$line" >>"$ops"
+    fi
+  done
+  for id in "${!ours[@]}"; do
+    [[ -n "${want_name[$id]+x}" ]] && continue
+    [[ "${cur[$id]:-}" == "${ours[$id]}" ]] && printf 'D\t%s\n' "$id" >>"$ops"
+  done
+  if [[ -s "$ops" ]]; then
+    tmp="$(mktemp "$steam_dir/config/.config.vdf.XXXXXX")" || { rm -f "$ops"; return 1; }
+    chmod --reference="$cfg" "$tmp" || { rm -f "$ops" "$tmp"; return 1; }
+    compat_rewrite "$cfg" "$ops" "$tmp"
+    local rc=$?
+    rm -f "$ops"
+    if (( rc != 0 )); then
+      rm -f "$tmp"
+      (( rc == 3 )) && return 0
+      return 1
+    fi
+    mv -f "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
+  else
+    rm -f "$ops"
+  fi
+
+  mkdir -p "$rec_dir" || return 1
+  out="$(mktemp "$rec_dir/.compat-tool-fills.XXXXXX")" || return 1
+  for id in "${!keep[@]}"; do printf '%s=%s\n' "$id" "${keep[$id]}"; done | sort -n >"$out" \
+    || { rm -f "$out"; return 1; }
+  mv -f "$out" "$rec" || { rm -f "$out"; return 1; }
+}
+if ! apply_compat_tools; then
+  printf '%s\n' "quasar-steam: could not apply the compatibility tool mapping in $steam_dir/config; starting Steam anyway" >&2
+fi
+
 # Steam does not follow LANG (accreleus/quasar#848): a new home starts in English whatever
 # language the launch asked for. Steam keeps its language in ~/.steam/registry.vdf and writes it
 # back itself, so `-language <name>` once, on a new home, is enough; after that the language is

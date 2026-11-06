@@ -483,6 +483,11 @@ EOF
     mkdir -p "$log/home/.local/share/Steam/config"
     cp "$seed_config" "$log/home/.local/share/Steam/config/config.vdf"
   fi
+  # The record of compat tool entries a earlier launch wrote (literal file content).
+  if [[ -n "${seed_compat_record:-}" ]]; then
+    mkdir -p "$log/home/.local/share/quasar"
+    printf '%s\n' "$seed_compat_record" > "$log/home/.local/share/quasar/compat-tool-fills"
+  fi
   # A Steam registry.vdf the home already had (a fixture path), if the case sets one.
   if [[ -n "${seed_registry:-}" ]]; then
     mkdir -p "$log/home/.steam"
@@ -588,6 +593,87 @@ if grep -q "starting Steam anyway" "$log/wrapper.out"; then
 else
   fail "screensaver-config-readonly: no warning in the wrapper's output"
 fi
+# Compatibility tools (accreleus/quasar#1068): QUASAR_COMPAT_TOOLS is written into config.vdf's
+# CompatToolMapping before Steam starts. Fill only where the user has no entry, unless forced; the
+# wrapper's record (compat-tool-fills) tells its own earlier fill from the user's pick.
+compat_record() { cat "$log/home/.local/share/quasar/compat-tool-fills" 2>/dev/null | paste -sd' ' -; }
+# <appid>=<name>/<priority> of every CompatToolMapping block, in file order.
+compat_mapping() {
+  awk '
+    { s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s) }
+    s ~ /^"[0-9]+"$/ && inmap { id = substr(s, 2, length(s) - 2) }
+    s == "\"CompatToolMapping\"" { inmap = 1 }
+    inmap && s ~ /^"name"/ { n = s; sub(/^"name"[ \t]+"/, "", n); sub(/"$/, "", n) }
+    inmap && s ~ /^"config"/ { c = s; sub(/^"config"[ \t]+"/, "", c); sub(/"$/, "", c); if (c != "") n = n "?config" }
+    inmap && s ~ /^"priority"/ { q = s; sub(/^"priority"[ \t]+"/, "", q); sub(/"$/, "", q); printf "%s=%s/%s ", id, n, q }
+  ' "$log/home/.local/share/Steam/config/config.vdf" | sed 's/ $//'
+}
+expect_compat() { # <case> <mapping, as compat_mapping prints it> <record, space-joined>
+  local m r; m="$(compat_mapping)"; r="$(compat_record)"
+  if [[ "$m" == "$2" && "$r" == "$3" ]]; then pass "$1: mapping '$m', record '$r'"
+  else fail "$1: mapping '$m' record '$r', want mapping '$2' record '$3'"; fi
+  if compgen -G "$log/home/.local/share/Steam/config/.*.??????" >/dev/null; then fail "$1: a temp file was left in config/"; fi
+}
+
+# No mapping yet: every entry is written, with Steam's own shape and priorities.
+seed_config="$T/fixtures/config-compat-none.in.vdf" run_wrapper compat-none \
+  QUASAR_COMPAT_TOOLS="0=proton_10 1145360=proton_hotfix"
+expect_config compat-none "$T/fixtures/config-compat-none.out.vdf"
+expect_compat compat-none "0=proton_10/75 1145360=proton_hotfix/250" "0=proton_10 1145360=proton_hotfix"
+# A user's own pick (no record of ours) is kept; the entry nobody chose is filled.
+seed_config="$T/fixtures/config-compat-mapped.in.vdf" run_wrapper compat-user-kept \
+  QUASAR_COMPAT_TOOLS="480=proton_hotfix 1145360=proton_hotfix 7=proton_8"
+expect_compat compat-user-kept "480=proton_7/250 1145360=proton_9/250 7=proton_8/250" "7=proton_8"
+# Forced replaces the user's pick and is recorded.
+seed_config="$T/fixtures/config-compat-mapped.in.vdf" run_wrapper compat-forced \
+  QUASAR_COMPAT_TOOLS="1145360=proton_hotfix!"
+expect_config compat-forced "$T/fixtures/config-compat-forced.out.vdf"
+expect_compat compat-forced "480=proton_7/250 1145360=proton_hotfix/250" "1145360=proton_hotfix"
+# What we wrote last time is ours to update; what the user changed since is not.
+seed_compat_record=$'480=proton_8\n1145360=proton_9' seed_config="$T/fixtures/config-compat-mapped.in.vdf" run_wrapper compat-update-own \
+  QUASAR_COMPAT_TOOLS="480=proton_hotfix 1145360=proton_10"
+expect_compat compat-update-own "480=proton_7/250 1145360=proton_10/250" "1145360=proton_10"
+# An appid no longer sent is removed when still ours, and left alone when the user changed it.
+seed_compat_record=$'480=proton_8\n1145360=proton_9' seed_config="$T/fixtures/config-compat-mapped.in.vdf" run_wrapper compat-unsent \
+  QUASAR_COMPAT_TOOLS=""
+expect_compat compat-unsent "480=proton_7/250" ""
+# The same pick is not re-written: a file with nothing to change keeps its bytes and mtime.
+seed_compat_record=$'1145360=proton_9' seed_config="$T/fixtures/config-compat-mapped.in.vdf" run_wrapper compat-same \
+  QUASAR_COMPAT_TOOLS="1145360=proton_9"
+expect_config compat-same "$T/fixtures/config-compat-mapped.in.vdf"
+expect_compat compat-same "480=proton_7/250 1145360=proton_9/250" "1145360=proton_9"
+# Unset: nothing is read, written or recorded.
+seed_config="$T/fixtures/config-compat-mapped.in.vdf" run_wrapper compat-unset
+expect_config compat-unset "$T/fixtures/config-compat-mapped.in.vdf"
+if [[ -e "$log/home/.local/share/quasar/compat-tool-fills" ]]; then fail "compat-unset: a record was written"; else pass "compat-unset: no record"; fi
+# A value that cannot be written safely is refused (one warning each) and the rest still apply:
+# a name with a separator or a path, an unknown GE name, a forced appid 0, a bad appid, a repeat.
+mkdir -p /tmp/cases-tools/GE-Proton11-12-x86_64
+seed_config="$T/fixtures/config-compat-none.in.vdf" run_wrapper compat-invalid \
+  STEAM_EXTRA_COMPAT_TOOLS_PATHS=/tmp/cases-tools \
+  QUASAR_COMPAT_TOOLS='1=proton_9;rm 2=../x 3=GE-Proton99-9 0=proton_10! 007=proton_9 4=proton_10 4=proton_9 5=GE-Proton11-12-x86_64! 6=proton_ 8'
+expect_compat compat-invalid "4=proton_10/250 5=GE-Proton11-12-x86_64/250" "4=proton_10 5=GE-Proton11-12-x86_64"
+if [[ "$(grep -c "refusing compat tool entry" "$log/wrapper.out")" == 8 ]]; then pass "compat-invalid: eight entries refused"
+else fail "compat-invalid: refusals: $(grep -c 'refusing compat tool entry' "$log/wrapper.out"), want 8"; fi
+# No config at all: the screensaver step makes one and the mapping goes into it.
+seed_config="" run_wrapper compat-fresh QUASAR_COMPAT_TOOLS="0=proton_10"
+expect_compat compat-fresh "0=proton_10/75" "0=proton_10"
+# Not a config Steam wrote (no Steam block): left alone.
+seed_config="$T/fixtures/config-nosteam.vdf" run_wrapper compat-nosteam QUASAR_COMPAT_TOOLS="0=proton_10"
+expect_config compat-nosteam "$T/fixtures/config-nosteam.vdf"
+# A CRLF file keeps its line endings.
+mkdir -p /tmp/cases-crlf
+sed 's/$/\r/' "$T/fixtures/config-compat-none.in.vdf" > /tmp/cases-crlf/in.vdf
+sed 's/$/\r/' "$T/fixtures/config-compat-none.out.vdf" > /tmp/cases-crlf/out.vdf
+seed_config=/tmp/cases-crlf/in.vdf run_wrapper compat-crlf QUASAR_COMPAT_TOOLS="0=proton_10 1145360=proton_hotfix"
+expect_config compat-crlf /tmp/cases-crlf/out.vdf
+# A failed edit never fails the launch.
+config_readonly=1 run_wrapper compat-config-readonly QUASAR_COMPAT_TOOLS="0=proton_10"
+if [[ "$(head -1 "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]]; then pass "compat-config-readonly: steam.sh still started"
+else fail "compat-config-readonly: steam.sh was not started"; fi
+if grep -q "could not apply the compatibility tool mapping" "$log/wrapper.out"; then pass "compat-config-readonly: one warning, then Steam started"
+else fail "compat-config-readonly: no warning in the wrapper's output"; fi
+
 # Steam does not follow LANG (accreleus/quasar#848), so a home with no Steam language yet
 # starts with `-language <name>` for the launch's LANG, once. A home that already has one is
 # the user's, an explicit -language wins, and English or an unmapped language gets no flag.
