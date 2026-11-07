@@ -50,7 +50,7 @@ set_idle_screensaver() {
     # missing; a CRLF file keeps its line endings. No Steam block (not a config
     # Steam wrote): exit 3, the file is left alone.
     chmod --reference="$cfg" "$tmp" || { rm -f "$tmp"; return 1; }
-    awk -v key="$key" '
+    timeout 5 awk -v key="$key" '
       { l[NR] = $0 }
       END {
         for (i = 1; i <= NR; i++) {
@@ -99,6 +99,9 @@ fi
 # has changed it. With no record, every entry counts as the user's. A name is checked again here,
 # because it lands in Steam's config: Valve's names, or a directory in the mounted tools path.
 # Unset QUASAR_COMPAT_TOOLS touches nothing. The failure handling is set_idle_screensaver's.
+# Every awk here is bounded by `timeout 5`: config.vdf is writable by a game, and deep nesting makes
+# the passes quadratic. A timeout is a failure, so Steam still starts. The record is written
+# before config.vdf (as a superset of the old and new entries), so a fill is never left unrecorded.
 compat_name_ok() { # <name>
   [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 1
   [[ "$1" =~ ^proton_(experimental|hotfix|[0-9]{1,3})$ ]] && return 0
@@ -112,7 +115,7 @@ compat_name_ok() { # <name>
 
 # The names under CompatToolMapping, one `<appid><TAB><name>` line each.
 compat_current_mapping() { # <config.vdf>
-  awk '
+  timeout 5 awk '
     { s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s) }
     s == "{" { d++; p[d] = (d > 1 ? p[d - 1] "/" : "") tolower(name); next }
     s == "}" { d--; next }
@@ -128,7 +131,7 @@ compat_current_mapping() { # <config.vdf>
 # Apply an ops file (`S<TAB>appid<TAB>name<TAB>priority` | `D<TAB>appid`) to config.vdf. Exit 3: no
 # Steam block, so not a config Steam wrote.
 compat_rewrite() { # <config.vdf> <ops> <out>
-  awk -v ops="$2" '
+  timeout 5 awk -v ops="$2" '
     BEGIN {
       while ((getline line < ops) > 0) {
         split(line, f, "\t")
@@ -176,13 +179,26 @@ compat_rewrite() { # <config.vdf> <ops> <out>
     }' "$1" > "$3"
 }
 
+# Replace the record with the `<appid>=<name>` lines on stdin (sorted), through a temp file.
+compat_write_record() { # uses rec_dir and rec of the caller
+  local out
+  out="$(mktemp "$rec_dir/.compat-tool-fills.XXXXXX")" || return 1
+  sort -n >"$out" || { rm -f "$out"; return 1; }
+  mv -f "$out" "$rec" || { rm -f "$out"; return 1; }
+}
+
 apply_compat_tools() {
   [[ -n "${QUASAR_COMPAT_TOOLS+x}" ]] || return 0
   local cfg="$steam_dir/config/config.vdf" rec_dir="$HOME/.local/share/quasar"
-  local rec="$rec_dir/compat-tool-fills" id name forced tok line
+  local rec="$rec_dir/compat-tool-fills" id name forced tok line cur_out
   local -A want_name=() want_forced=() cur=() ours=() keep=()
   local -a toks=() order=()
   [[ -s "$cfg" ]] || return 1
+  # The record is a regular file or absent: anything else is refused before a temp file exists.
+  if [[ ( -e "$rec" || -L "$rec" ) && ! -f "$rec" ]]; then
+    printf '%s\n' "quasar-steam: $rec is not a regular file; not touching the compatibility tool mapping" >&2
+    return 1
+  fi
   read -r -a toks <<<"$QUASAR_COMPAT_TOOLS"
   for tok in "${toks[@]}"; do
     forced=0
@@ -201,14 +217,21 @@ apply_compat_tools() {
       [[ "$id" =~ ^(0|[1-9][0-9]{0,9})$ && "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] && ours[$id]="$name"
     done <"$rec"
   fi
-  while IFS=$'\t' read -r id name; do cur[$id]="$name"; done < <(compat_current_mapping "$cfg")
+  # A parse that fails or times out is not "no entries": that would read every pick as absent.
+  cur_out="$(compat_current_mapping "$cfg")" || return 1
+  while IFS=$'\t' read -r id name; do
+    [[ -n "$id" ]] && cur[$id]="$name"
+  done <<<"$cur_out"
 
-  local ops tmp out
+  local ops tmp
+  mkdir -p "$rec_dir" || return 1
   ops="$(mktemp "$steam_dir/config/.compat-ops.XXXXXX")" || return 1
   : >"$ops"
   for id in "${order[@]}"; do
     name="${want_name[$id]}"
-    if [[ "${want_forced[$id]}" == 1 || -z "${cur[$id]+x}" || "${cur[$id]}" == "${ours[$id]:-}" ]]; then
+    # Ours only when the record has the appid: an entry with an empty name is the user's.
+    if [[ "${want_forced[$id]}" == 1 || -z "${cur[$id]+x}" \
+          || ( -n "${ours[$id]+x}" && "${cur[$id]}" == "${ours[$id]}" ) ]]; then
       keep[$id]="$name"
       [[ "${cur[$id]:-}" == "$name" ]] && continue
       line="S"$'\t'"$id"$'\t'"$name"$'\t'"$([[ "$id" == 0 ]] && echo 75 || echo 250)"
@@ -220,6 +243,14 @@ apply_compat_tools() {
     [[ "${cur[$id]:-}" == "${ours[$id]}" ]] && printf 'D\t%s\n' "$id" >>"$ops"
   done
   if [[ -s "$ops" ]]; then
+    # The record goes first, covering the old and the new entries: if config.vdf is then not
+    # replaced the record only says "we may update this", and if the record cannot be written
+    # config.vdf is never touched, so no fill is left that the record does not cover.
+    local -A both=()
+    for id in "${!ours[@]}"; do both[$id]="${ours[$id]}"; done
+    for id in "${!keep[@]}"; do both[$id]="${keep[$id]}"; done
+    for id in "${!both[@]}"; do printf '%s=%s\n' "$id" "${both[$id]}"; done | compat_write_record \
+      || { rm -f "$ops"; return 1; }
     tmp="$(mktemp "$steam_dir/config/.config.vdf.XXXXXX")" || { rm -f "$ops"; return 1; }
     chmod --reference="$cfg" "$tmp" || { rm -f "$ops" "$tmp"; return 1; }
     compat_rewrite "$cfg" "$ops" "$tmp"
@@ -227,19 +258,18 @@ apply_compat_tools() {
     rm -f "$ops"
     if (( rc != 0 )); then
       rm -f "$tmp"
-      (( rc == 3 )) && return 0
+      if (( rc == 3 )); then # not a config Steam wrote: nothing was written, so the record goes back
+        for id in "${!ours[@]}"; do printf '%s=%s\n' "$id" "${ours[$id]}"; done | compat_write_record
+        return 0
+      fi
       return 1
     fi
     mv -f "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
   else
     rm -f "$ops"
   fi
-
-  mkdir -p "$rec_dir" || return 1
-  out="$(mktemp "$rec_dir/.compat-tool-fills.XXXXXX")" || return 1
-  for id in "${!keep[@]}"; do printf '%s=%s\n' "$id" "${keep[$id]}"; done | sort -n >"$out" \
-    || { rm -f "$out"; return 1; }
-  mv -f "$out" "$rec" || { rm -f "$out"; return 1; }
+  # The exact record; if this write fails the superset above stays, which is harmless.
+  for id in "${!keep[@]}"; do printf '%s=%s\n' "$id" "${keep[$id]}"; done | compat_write_record
 }
 if ! apply_compat_tools; then
   printf '%s\n' "quasar-steam: could not apply the compatibility tool mapping in $steam_dir/config; starting Steam anyway" >&2
@@ -279,7 +309,7 @@ steam_language_for() { # <LANG, e.g. de_DE.UTF-8> -> Steam's language name, or n
 # set_idle_screensaver uses; an absent, empty or unreadable file gives nothing.
 steam_language_value() { # <registry.vdf>
   [[ -s "$1" ]] || return 0
-  awk '
+  timeout 5 awk '
     { s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s) }
     s == "{" { d++; p[d] = (d > 1 ? p[d - 1] "/" : "") tolower(name); next }
     s == "}" { d--; next }
@@ -301,7 +331,7 @@ set_steam_language_registry() { # <registry.vdf> <name>
   if [[ -L "$reg" ]]; then reg="$(readlink -f "$reg")" || return 1; fi
   tmp="$(mktemp "$(dirname "$reg")/.registry.vdf.XXXXXX")" || return 1
   chmod --reference="$reg" "$tmp" || { rm -f "$tmp"; return 1; }
-  awk -v lang="$2" '
+  timeout 5 awk -v lang="$2" '
     { line = $0; s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s); sub(/\r$/, "", s) }
     s == "{" { d++; p[d] = (d > 1 ? p[d - 1] "/" : "") tolower(name) }
     s == "}" { d-- }

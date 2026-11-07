@@ -488,6 +488,10 @@ EOF
     mkdir -p "$log/home/.local/share/quasar"
     printf '%s\n' "$seed_compat_record" > "$log/home/.local/share/quasar/compat-tool-fills"
   fi
+  # A directory where the record file belongs.
+  if [[ -n "${seed_compat_record_dir:-}" ]]; then
+    mkdir -p "$log/home/.local/share/quasar/compat-tool-fills"
+  fi
   # A Steam registry.vdf the home already had (a fixture path), if the case sets one.
   if [[ -n "${seed_registry:-}" ]]; then
     mkdir -p "$log/home/.steam"
@@ -514,7 +518,13 @@ EOF
     mkdir -p "$log/home/.local/share/Steam/config"
     chmod 0555 "$log/home/.local/share/Steam/config"
   fi
-  if [[ -n "${config_as_file:-}${config_readonly:-}" ]]; then
+  # The home writable by the app user except the record's directory.
+  if [[ -n "${record_readonly:-}" ]]; then
+    mkdir -p "$log/home/.local/share/quasar"
+    chmod -R a+rwX "$log/home"
+    chmod 0555 "$log/home/.local/share/quasar"
+  fi
+  if [[ -n "${config_as_file:-}${config_readonly:-}${record_readonly:-}" ]]; then
     chmod 0777 "$log" "$log/home"
     as=(setpriv --reuid=1000 --regid=1000 --clear-groups)
   fi
@@ -648,9 +658,11 @@ expect_config compat-unset "$T/fixtures/config-compat-mapped.in.vdf"
 if [[ -e "$log/home/.local/share/quasar/compat-tool-fills" ]]; then fail "compat-unset: a record was written"; else pass "compat-unset: no record"; fi
 # A value that cannot be written safely is refused (one warning each) and the rest still apply:
 # a name with a separator or a path, an unknown GE name, a forced appid 0, a bad appid, a repeat.
-mkdir -p /tmp/cases-tools/GE-Proton11-12-x86_64
+compat_tmp="$(mktemp -d)"
+trap 'rm -rf "$compat_tmp"' EXIT
+mkdir -p "$compat_tmp/tools/GE-Proton11-12-x86_64"
 seed_config="$T/fixtures/config-compat-none.in.vdf" run_wrapper compat-invalid \
-  STEAM_EXTRA_COMPAT_TOOLS_PATHS=/tmp/cases-tools \
+  STEAM_EXTRA_COMPAT_TOOLS_PATHS="$compat_tmp/tools" \
   QUASAR_COMPAT_TOOLS='1=proton_9;rm 2=../x 3=GE-Proton99-9 0=proton_10! 007=proton_9 4=proton_10 4=proton_9 5=GE-Proton11-12-x86_64! 6=proton_ 8'
 expect_compat compat-invalid "4=proton_10/250 5=GE-Proton11-12-x86_64/250" "4=proton_10 5=GE-Proton11-12-x86_64"
 if [[ "$(grep -c "refusing compat tool entry" "$log/wrapper.out")" == 8 ]]; then pass "compat-invalid: eight entries refused"
@@ -662,17 +674,58 @@ expect_compat compat-fresh "0=proton_10/75" "0=proton_10"
 seed_config="$T/fixtures/config-nosteam.vdf" run_wrapper compat-nosteam QUASAR_COMPAT_TOOLS="0=proton_10"
 expect_config compat-nosteam "$T/fixtures/config-nosteam.vdf"
 # A CRLF file keeps its line endings.
-mkdir -p /tmp/cases-crlf
-sed 's/$/\r/' "$T/fixtures/config-compat-none.in.vdf" > /tmp/cases-crlf/in.vdf
-sed 's/$/\r/' "$T/fixtures/config-compat-none.out.vdf" > /tmp/cases-crlf/out.vdf
-seed_config=/tmp/cases-crlf/in.vdf run_wrapper compat-crlf QUASAR_COMPAT_TOOLS="0=proton_10 1145360=proton_hotfix"
-expect_config compat-crlf /tmp/cases-crlf/out.vdf
+mkdir -p "$compat_tmp/crlf"
+sed 's/$/\r/' "$T/fixtures/config-compat-none.in.vdf" > "$compat_tmp/crlf/in.vdf"
+sed 's/$/\r/' "$T/fixtures/config-compat-none.out.vdf" > "$compat_tmp/crlf/out.vdf"
+seed_config="$compat_tmp/crlf/in.vdf" run_wrapper compat-crlf QUASAR_COMPAT_TOOLS="0=proton_10 1145360=proton_hotfix"
+expect_config compat-crlf "$compat_tmp/crlf/out.vdf"
 # A failed edit never fails the launch.
 config_readonly=1 run_wrapper compat-config-readonly QUASAR_COMPAT_TOOLS="0=proton_10"
 if [[ "$(head -1 "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]]; then pass "compat-config-readonly: steam.sh still started"
 else fail "compat-config-readonly: steam.sh was not started"; fi
 if grep -q "could not apply the compatibility tool mapping" "$log/wrapper.out"; then pass "compat-config-readonly: one warning, then Steam started"
 else fail "compat-config-readonly: no warning in the wrapper's output"; fi
+
+# An entry whose name is empty is the user's: with no record of ours for the appid it is kept.
+seed_config="$T/fixtures/config-compat-emptyname.in.vdf" run_wrapper compat-empty-name \
+  QUASAR_COMPAT_TOOLS="1145360=proton_hotfix 7=proton_8"
+expect_compat compat-empty-name "1145360=/250 7=proton_8/250" "7=proton_8"
+# The record is written before config.vdf: when it cannot be, config.vdf is left as it was (so no
+# fill exists that the record does not cover) and Steam still starts.
+record_readonly=1 seed_compat_record='480=proton_7' seed_config="$T/fixtures/config-compat-mapped.in.vdf" \
+  run_wrapper compat-record-unwritable QUASAR_COMPAT_TOOLS="7=proton_8"
+expect_config compat-record-unwritable "$T/fixtures/config-compat-mapped.in.vdf"
+expect_compat compat-record-unwritable "480=proton_7/250 1145360=proton_9/250" "480=proton_7"
+if [[ "$(head -1 "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]] && grep -q "could not apply the compatibility tool mapping" "$log/wrapper.out"; then
+  pass "compat-record-unwritable: one warning, then Steam started"
+else fail "compat-record-unwritable: steam.sh not started or no warning"; fi
+# A directory where the record belongs: refused, nothing written, no temp file left.
+seed_compat_record_dir=1 seed_config="$T/fixtures/config-compat-mapped.in.vdf" run_wrapper compat-record-is-dir \
+  QUASAR_COMPAT_TOOLS="7=proton_8"
+expect_config compat-record-is-dir "$T/fixtures/config-compat-mapped.in.vdf"
+if [[ -d "$log/home/.local/share/quasar/compat-tool-fills" && -z "$(ls -A "$log/home/.local/share/quasar/compat-tool-fills")" ]] \
+   && ! compgen -G "$log/home/.local/share/quasar/.compat-tool-fills.*" >/dev/null \
+   && ! compgen -G "$log/home/.local/share/Steam/config/.*.??????" >/dev/null \
+   && [[ "$(head -1 "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]] && grep -q "is not a regular file" "$log/wrapper.out"; then
+  pass "compat-record-is-dir: refused with a warning, directory untouched, no temp file, Steam started"
+else fail "compat-record-is-dir: wrong outcome"; ls -la "$log/home/.local/share/quasar" >&2; fi
+# Every awk is cut at 5 s: a config.vdf nested deeply enough makes the passes quadratic (a game can
+# write one), and a hung awk must not stop Steam. A stub awk that never returns stands in for it: the
+# mapping and the screensaver key are skipped with a warning, config.vdf is left alone, no record is
+# written, and Steam still starts.
+mkdir -p "$compat_tmp/slowbin"
+printf '#!/bin/sh\nexec sleep 60\n' > "$compat_tmp/slowbin/awk"; chmod 0755 "$compat_tmp/slowbin/awk"
+t0=$SECONDS
+seed_config="$T/fixtures/config-system.in.vdf" run_wrapper compat-awk-timeout \
+  PATH="$compat_tmp/slowbin:/usr/local/bin:/usr/bin:/bin" QUASAR_COMPAT_TOOLS="7=proton_8"
+took=$((SECONDS - t0))
+expect_config compat-awk-timeout "$T/fixtures/config-system.in.vdf"
+if [[ "$(head -1 "$log/wrapper.args" 2>/dev/null)" == "argc=0" ]] \
+   && grep -q "could not apply the compatibility tool mapping" "$log/wrapper.out" \
+   && grep -q "could not set Steam's screensaver timeout" "$log/wrapper.out" && (( took < 25 )); then
+  pass "compat-awk-timeout: both steps skipped with a warning and Steam started in ${took}s"
+else fail "compat-awk-timeout: steam.sh not started, a warning missing, or it took ${took}s"; fi
+if [[ -e "$log/home/.local/share/quasar/compat-tool-fills" ]]; then fail "compat-awk-timeout: a record was written"; else pass "compat-awk-timeout: no record"; fi
 
 # Steam does not follow LANG (accreleus/quasar#848), so a home with no Steam language yet
 # starts with `-language <name>` for the launch's LANG, once. A home that already has one is
