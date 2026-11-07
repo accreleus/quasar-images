@@ -1,0 +1,36 @@
+"InstallConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"CompatToolMapping"
+				{
+					"0"
+					{
+						"name"		"proton_10"
+						"config"		""
+						"priority"		"75"
+					}
+					"1145360"
+					{
+						"name"		"proton_hotfix"
+						"config"		""
+						"priority"		"250"
+					}
+				}
+				"AutoUpdateWindowEnabled"		"0"
+				"system"
+				{
+					"IdleScreensaverACSeconds"		"0"
+				}
+			}
+		}
+	}
+	"system"
+	{
+		"Decoy"		"1"
+	}
+}
