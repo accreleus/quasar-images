@@ -1,0 +1,21 @@
+"InstallConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"AutoUpdateWindowEnabled"		"0"
+				"system"
+				{
+					"IdleScreensaverACSeconds"		"0"
+				}
+			}
+		}
+	}
+	"system"
+	{
+		"Decoy"		"1"
+	}
+}

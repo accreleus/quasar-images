@@ -79,7 +79,7 @@ the full table). What this image decides on top:
 
 | variable | image default | why |
 |---|---|---|
-| `BENCHAPP_SCENE` | `flythrough` | moving 3D geometry — the closest analogue to a game, and the default the app row uses |
+| `BENCHAPP_SCENE` | `flythrough` | moving 3D geometry — the closest analogue to a game, and the default the app row uses. Also accepts `static`, `pan`, `swarm`, `ui` and `racer` (the e2e suite's reference scene) |
 | `BENCHAPP_LOAD` / `BENCHAPP_MOTION` | `5` / `5` | mid-dial, leaves headroom in both directions |
 | `BENCHAPP_FPS` | *unset* → `QUASAR_STREAM_FPS` → 60 | the session's negotiated refresh is the correct pacing target |
 | `BENCHAPP_RENDER` | *unset* | unset means "render at the compositor's configure size", which is what makes the probe follow live resolution changes (quasar#384). A baked value would pin it for every session and defeat the resolution-ladder tests. |

@@ -1,0 +1,25 @@
+"InstallConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"system"
+				{
+					"IdleScreensaverACSeconds"		"0"
+				}
+				"CompatToolMapping"
+				{
+					"1145360"
+					{
+						"name"		""
+						"config"		""
+						"priority"		"250"
+					}
+				}
+			}
+		}
+	}
+}
