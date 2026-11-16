@@ -94,6 +94,13 @@ grep -q -- '--scene swarm' <<<"$dry120"
 grep -q -- '--load 8'      <<<"$dry120"
 pass "launcher: QUASAR_STREAM_FPS + BENCHAPP_* overrides honoured"
 
+# The racer scene (quasar-mark) must get through: the launcher's scene list lagged the app's. (BENCHAPP_RACER_HUD
+# reaches the app through benchapp-run.sh's env mapping, past the launcher's dry run.)
+dryracer="$(docker run --rm -e BENCHAPP_DRY_RUN=1 -e BENCHAPP_SCENE=racer \
+  --entrypoint /bin/bash "$image" -c "$mksock; exec /usr/local/bin/quasar-benchapp")"
+grep -q -- '--scene racer' <<<"$dryracer"
+pass "launcher: BENCHAPP_SCENE=racer accepted"
+
 # Fail closed: a bad scene must abort, not silently fall back to a different
 # workload and produce results labelled with a scene that never rendered.
 # refute_cmd, not `! docker run`: both of these were inert under errexit, so the

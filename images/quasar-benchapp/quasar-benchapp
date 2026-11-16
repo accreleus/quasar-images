@@ -87,7 +87,7 @@ if [[ -z "$surface" && -n "${QUASAR_STREAM_WIDTH:-}" && -n "${QUASAR_STREAM_HEIG
   surface="${QUASAR_STREAM_WIDTH}x${QUASAR_STREAM_HEIGHT}"
 fi
 
-case "$scene" in static|pan|swarm|flythrough|ui) ;; *) fail "BENCHAPP_SCENE must be static|pan|swarm|flythrough|ui (got '$scene')";; esac
+case "$scene" in static|pan|swarm|flythrough|ui|racer) ;; *) fail "BENCHAPP_SCENE must be static|pan|swarm|flythrough|ui|racer (got '$scene')";; esac
 [[ "$load"   =~ ^([0-9]|10)$ ]] || fail "BENCHAPP_LOAD must be 0..10 (got '$load')"
 [[ "$motion" =~ ^([0-9]|10)$ ]] || fail "BENCHAPP_MOTION must be 0..10 (got '$motion')"
 [[ "$fps"    =~ ^[0-9]+$ ]]     || fail "BENCHAPP_FPS must be numeric (got '$fps')"
