@@ -218,11 +218,6 @@ says someone checked:
 | BuildKit (container builder) | `BUILDKIT_IMAGE` in `scripts/build.sh`, tag + digest | a different BuildKit for every cache-writing CI build |
 | GitHub Actions | `.github/workflows/*.yml`, commit SHA + version comment | a different action release |
 
-`renovate.json` watches every row above except UNIGINE and the catalog, and
-opens a PR into `develop` for each bump. It never merges: the PR is the
-proposal, and reading it is the check. Fedora pins move by digest within 43
-only; a Fedora rebase is done by hand.
-
 A floating ref is a defect here even when it builds: it makes two boxes with
 identical inputs produce different images, and it lets an upstream change reach
 production with nothing bumped.

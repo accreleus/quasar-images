@@ -89,7 +89,7 @@ fi
 
 # The BuildKit that runs every container-builder build. Pinned like any other
 # input (AGENTS.md, "Pin policy"); without it buildx pulls the moving
-# moby/buildkit:buildx-stable-1. Renovate proposes bumps. An EXISTING builder of
+# moby/buildkit:buildx-stable-1. An EXISTING builder of
 # this name keeps whatever image it was created with: `docker buildx rm` it to
 # pick up a bump.
 BUILDKIT_IMAGE="moby/buildkit:v0.35.1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c"
