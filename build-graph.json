@@ -34,6 +34,10 @@
     "  verify      scripts run after this image builds (build.sh verify <name>)",
     "  ci          built by GitHub Actions at all",
     "  publish     pushed to ghcr.io/<owner>/<name> on a publishing event",
+    "  consumes    artifacts (tier=artifact) this image's build can take from the",
+    "              registry instead of building inline. CI runs these images in their",
+    "              own job that waits for the artifact job; every other image starts",
+    "              without waiting for it.",
     "  notes       why any of the above is the way it is",
     "",
     "TIERS. `spine` is the shared ancestry every leaf inherits; CI builds the spine",
@@ -123,6 +127,7 @@
         "VERSION": "@version",
         "KWIN_RPMS_IMAGE": "@env:KWIN_RPMS_IMAGE=kwin-rpms"
       },
+      "consumes": ["quasar-kwin-rpms"],
       "verify": ["scripts/verify-kde.sh", "scripts/verify-kde-launcher.sh", "scripts/verify-desktop-keyboard.sh"],
       "ci": true,
       "publish": true,
