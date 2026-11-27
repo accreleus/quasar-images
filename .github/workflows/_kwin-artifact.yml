@@ -39,7 +39,7 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       built: ${{ steps.resolve.outputs.built }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -47,7 +47,7 @@ jobs:
       # is a 401 without it, which would read as a permanent cache miss and buy
       # 27 minutes on every single run.
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

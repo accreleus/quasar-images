@@ -75,7 +75,7 @@ jobs:
       KWIN_RPMS_IMAGE: ${{ inputs.kwin-rpms-image }}
       BENCHAPP_SRC_IMAGE: ${{ inputs.benchapp-src-image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # fetch-depth 0 so a release tag can be checked against stable.
           fetch-depth: ${{ startsWith(github.ref, 'refs/tags/v') && 0 || 1 }}
@@ -90,7 +90,7 @@ jobs:
       # This is a READ login on a pull request: the caller granted packages:read
       # only, so the same step cannot publish anything there.
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

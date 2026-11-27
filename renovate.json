@@ -1,0 +1,100 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Opens PRs for pinned inputs; never merges them. Every bump here is the deliberate act AGENTS.md's Pin policy describes, so a human reads and merges each one.",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "baseBranchPatterns": [
+    "develop"
+  ],
+  "enabledManagers": [
+    "github-actions",
+    "custom.regex"
+  ],
+  "automerge": false,
+  "platformAutomerge": false,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Fedora 43 base digests (quasar-base FROM, KWIN_BUILDER_BASE). Digest bumps within 43 only; a Fedora rebase is done by hand.",
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile$/"
+      ],
+      "matchStrings": [
+        "registry\\.fedoraproject\\.org/fedora@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "depNameTemplate": "registry.fedoraproject.org/fedora",
+      "currentValueTemplate": "43",
+      "datasourceTemplate": "docker",
+      "autoReplaceStringTemplate": "registry.fedoraproject.org/fedora@{{newDigest}}"
+    },
+    {
+      "customType": "regex",
+      "description": "bubblewrap source build; re-check ignore-capabilities.patch applies.",
+      "managerFilePatterns": [
+        "/^images/quasar-steam-runtime/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ARG BWRAP_REF=(?<currentValue>\\S+)"
+      ],
+      "depNameTemplate": "containers/bubblewrap",
+      "datasourceTemplate": "github-tags"
+    },
+    {
+      "customType": "regex",
+      "description": "gamescope source build; re-check the pointer-warp patch.",
+      "managerFilePatterns": [
+        "/^images/quasar-steam/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "git clone --branch (?<currentValue>\\S+) [^\\n]*https://github\\.com/ValveSoftware/gamescope\\.git"
+      ],
+      "depNameTemplate": "ValveSoftware/gamescope",
+      "datasourceTemplate": "github-tags"
+    },
+    {
+      "customType": "regex",
+      "description": "Fedora's kwin NVR that images/quasar-kde/kwin/*.patch is diffed against. A bump needs the re-diff in README.md, 'Patched KWin'.",
+      "managerFilePatterns": [
+        "/^images/quasar-kde/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ARG KWIN_NVR=(?<currentValue>\\S+)"
+      ],
+      "depNameTemplate": "kwin",
+      "datasourceTemplate": "custom.fedora-mdapi",
+      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<build>\\d+)\\.(?<compatibility>fc43)$"
+    },
+    {
+      "customType": "regex",
+      "description": "BuildKit for the docker-container builder.",
+      "managerFilePatterns": [
+        "/^scripts/build\\.sh$/"
+      ],
+      "matchStrings": [
+        "moby/buildkit:(?<currentValue>v[0-9.]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "depNameTemplate": "moby/buildkit",
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "customDatasources": {
+    "fedora-mdapi": {
+      "description": "Fedora 43 package N-V-R from mdapi. Renovate's rpm datasource cannot read Fedora's zstd primary.xml.",
+      "defaultRegistryUrlTemplate": "https://mdapi.fedoraproject.org/f43/pkg/{{packageName}}",
+      "transformTemplates": [
+        "{\"releases\": [{\"version\": version & \"-\" & release}]}"
+      ]
+    }
+  },
+  "packageRules": [
+    {
+      "description": "Fedora base: digest bumps within 43 only. The replace template writes the digest alone, so a tag change (a rebase) would write a 46 digest under a 43 pin. The rebase is done by hand.",
+      "matchDepNames": [
+        "registry.fedoraproject.org/fedora"
+      ],
+      "allowedVersions": "/^43$/"
+    }
+  ]
+}
