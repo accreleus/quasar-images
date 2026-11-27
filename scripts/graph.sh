@@ -16,6 +16,7 @@
 #   graph.sh set publish           images with publish=true, topological order
 #   graph.sh set tier:<t>          images in tier <t>, topological order
 #   graph.sh order <name>...       the named images and their ancestors, in order
+#   graph.sh children <name>       images that list <name> in `needs`
 #   graph.sh field <name> <field>  one scalar field (dockerfile, target, tier, ...)
 #   graph.sh args <name>           resolved build args, one KEY=VALUE per line
 #   graph.sh verify <name>         verify scripts for <name>, one per line
@@ -132,6 +133,12 @@ case "$cmd" in
     _closure "$@"
     ;;
 
+  children)
+    [ $# -eq 1 ] || { echo "usage: graph.sh children <name>" >&2; exit 64; }
+    _exists "$1" || { echo "graph.sh: no such image '$1'" >&2; exit 64; }
+    jq -r --arg n "$1" '.images[] | select((.needs // []) | index($n)) | .name' "$GRAPH"
+    ;;
+
   field)
     [ $# -eq 2 ] || { echo "usage: graph.sh field <name> <field>" >&2; exit 64; }
     _image "$1" >/dev/null || { echo "graph.sh: no such image '$1'" >&2; exit 64; }
@@ -227,7 +234,7 @@ case "$cmd" in
     ;;
 
   *)
-    echo "usage: graph.sh {names|set|order|field|args|verify|matrix|check} ..." >&2
+    echo "usage: graph.sh {names|set|order|children|field|args|verify|matrix|check} ..." >&2
     exit 64
     ;;
 esac

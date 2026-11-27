@@ -52,9 +52,16 @@
 # same ref. Export therefore REQUIRES it, and build.sh refuses the combination
 # without it rather than failing four minutes later inside BuildKit.
 #
-# `--load` is not optional either: the container driver does not populate the
-# local image store, so without it the build would pass and `./scripts/verify.sh`
-# would then fail on `docker image inspect quasar-base:dev`.
+# `--load` is needed whenever something reads the image from the local store:
+# the container driver does not populate it, so without it the build would pass
+# and `./scripts/verify.sh` would then fail on `docker image inspect
+# quasar-base:dev`. But it costs a full export of the image into the daemon, so
+# on this path it is done only for a requested TARGET (not an ancestor built on
+# the way) that has verify scripts or publish=true -- the publish step tags it
+# from the local store. Ancestors are reached through their registry ref
+# instead, and that ref is pushed only for an image that has children in the
+# graph. A buildx build of quasar-test-vulkan therefore leaves no local image;
+# it only proves the build and exports cache.
 
 set -euo pipefail
 
@@ -152,6 +159,13 @@ resolve_benchapp_src() {
   echo "build.sh: benchapp payload -> $BENCHAPP_SRC_IMAGE" >&2
 }
 
+# True when the local image store needs this image (see the header).
+wants_load() {
+  local image="$1"
+  case " $TARGETS " in *" $image "*) ;; *) return 1 ;; esac
+  [ -n "$(graph verify "$image")" ] || [ "$(graph field "$image" publish)" = true ]
+}
+
 build_one() {
   local image="$1" df target
   if [ "$image" = quasar-benchapp ]; then resolve_benchapp_src; fi
@@ -159,7 +173,7 @@ build_one() {
   df="$(graph field "$image" dockerfile)"
   target="$(graph field "$image" target)"
 
-  local flags=(-f "$df" -t "$image:$tag")
+  local flags=(-f "$df")
   if [ -n "$target" ]; then flags+=(--target "$target"); fi
 
   local kv
@@ -176,11 +190,21 @@ build_one() {
   if use_buildx; then
     ensure_builder
     echo "build.sh: buildx $image:$tag ${cf[*]:-(no cache)}" >&2
-    docker buildx build --builder "$builder" --load --progress=plain \
-      ${cf[@]+"${cf[@]}"} "${flags[@]}" .
-    if [ -n "$registry" ]; then push_parent_ref "$image"; fi
+    local load=()
+    if wants_load "$image"; then load=(--load); fi
+    if [ -n "$registry" ] && [ -n "$(graph children "$image")" ] && [ ${#load[@]} = 0 ]; then
+      # Not loaded, so push straight from the builder rather than via the store.
+      docker buildx build --builder "$builder" --progress=plain \
+        -t "$registry/$image:$tag" --push \
+        ${cf[@]+"${cf[@]}"} "${flags[@]}" .
+      echo "build.sh: pushed parent ref $registry/$image:$tag" >&2
+      return 0
+    fi
+    docker buildx build --builder "$builder" ${load[@]+"${load[@]}"} --progress=plain \
+      -t "$image:$tag" ${cf[@]+"${cf[@]}"} "${flags[@]}" .
+    if [ -n "$registry" ] && [ -n "$(graph children "$image")" ]; then push_parent_ref "$image"; fi
   else
-    DOCKER_BUILDKIT=1 docker build --progress=plain ${cf[@]+"${cf[@]}"} "${flags[@]}" .
+    DOCKER_BUILDKIT=1 docker build --progress=plain -t "$image:$tag" ${cf[@]+"${cf[@]}"} "${flags[@]}" .
   fi
 }
 
@@ -215,6 +239,10 @@ usage() {
   } >&2
   exit 64
 }
+
+# TARGETS: what was asked for, as opposed to ancestors built on the way.
+TARGETS="${1:-all}"
+case "$TARGETS" in all|ci) TARGETS="$(graph set "$TARGETS" | tr '\n' ' ')" ;; esac
 
 # graph.sh emits one image name per line and an image name can never contain
 # whitespace, so the unquoted expansions below are the intended word split.

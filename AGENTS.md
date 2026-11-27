@@ -124,9 +124,12 @@ Three facts that constrain the whole design, all learned the hard way:
    locally *and* pushed there, and `graph.sh` resolves `@tag:` parents to the
    same ref. `build.sh` refuses export without it rather than failing inside
    BuildKit four minutes later.
-3. **`--load` is not optional.** The container driver does not populate the local
-   image store, so without it the build passes and the verify scripts then fail
-   on `docker image inspect`.
+3. **`--load` is needed wherever the local store is read.** The container driver
+   does not populate the local image store, so without it the build passes and
+   the verify scripts then fail on `docker image inspect`. Loading is a full
+   export, so `build.sh` does it only for a requested target that has verify
+   scripts or `publish: true`; an ancestor built on the way is reached through
+   its stage ref, which is pushed only when the image has children in the graph.
 
 `mode=max` (not `min`, not `inline`) because every expensive layer in this repo —
 the Steam 32-bit closure, the bwrap and gamescope source builds, the kwin
