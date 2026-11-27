@@ -228,11 +228,14 @@ build/verify/publish rather than the two verbatim copies there used to be.
 
 | event | builds | cache | kwin artefact | publishes | token |
 |---|---|---|---|---|---|
-| `pull_request` → `stable` | the whole `ci` set | **read only** | reuse if present; a miss builds inline in quasar-kde | nothing | `contents: read`, `packages: read` |
+| `pull_request` → `stable` or `develop` | the whole `ci` set | **read only** | reuse if present; a miss builds inline in quasar-kde | nothing | `contents: read`, `packages: read` |
 | `push` → `stable` | the whole `ci` set | read + **write** | builds and publishes on a miss | `:latest` + `sha-<12>` | `packages: write` |
 | `push` tag `vX.Y.Z` | the whole `ci` set | read + write | as above | `:X.Y.Z`, `:X.Y`, `:latest`, `sha-` + a GitHub Release | `packages: write`; release job alone gets `contents: write` |
 | `workflow_dispatch` | the whole `ci` set | read + write | as above | that branch's channel (`develop` → `:develop`) | `packages: write` |
 | `push` → `develop` | *no workflow runs* | — | — | — | — |
+
+A pull request or `stable` push whose changes are all Markdown, `docs/**` or
+`quasar-manifest.json` runs nothing: none of those can change an image.
 
 **The security model.** A `pull_request` run executes `scripts/*.sh` and the
 Dockerfiles **from the PR**, so it must hold nothing it could abuse. Every job

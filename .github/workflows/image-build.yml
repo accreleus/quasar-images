@@ -49,12 +49,30 @@ name: Image build
 #   kwin-leaves   the leaves whose graph entry `consumes` quasar-kwin-rpms
 #                 (quasar-kde), after the spine AND the artefact. A kwin miss
 #                 used to hold the spine and every leaf for its ~27 minutes.
+#
+# ── TRIGGERS ──────────────────────────────────────────────────────────────────
+#
+# Pull requests into develop get the same read-only chain as pull requests into
+# stable, so a broken build is caught before it reaches the integration branch.
+#
+# A change made ONLY of files that cannot alter an image does not run: Markdown,
+# docs/, and quasar-manifest.json (the catalog; it pins already-published
+# digests and is read by the control plane, never by a build). A change that
+# mixes those with anything else still runs. Tag pushes ignore path filters.
 on:
   pull_request:
-    branches: [stable]
+    branches: [stable, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'quasar-manifest.json'
   push:
     branches: [stable]
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'quasar-manifest.json'
   workflow_dispatch:
 
 permissions: {}
