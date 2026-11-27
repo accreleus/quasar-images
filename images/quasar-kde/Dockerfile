@@ -107,19 +107,6 @@ FROM ${KWIN_RPMS_IMAGE} AS kwin-artifact
 
 FROM ${STEAM_RUNTIME_IMAGE}
 
-ARG VERSION=0.1.0-dev
-ARG KWIN_NVR
-LABEL org.opencontainers.image.title="Quasar KDE Plasma desktop" \
-      org.quasar.kde.kwin="${KWIN_NVR}.quasar1" \
-      org.quasar.image.contract="1" \
-      org.quasar.image.family="fedora" \
-      org.quasar.image.base.version="${VERSION}" \
-      org.quasar.image.acceleration="required" \
-      org.quasar.image.graphics-apis="vulkan,egl,opengl" \
-      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint" \
-      org.quasar.image.persist="/home/quasar" \
-      org.quasar.image.session="desktop"
-
 # Session: plasma-desktop plasma-workspace-wayland kwin (dbus-daemon already
 # inherited from quasar-steam-runtime). Portal: xdg-desktop-portal-kde. Apps:
 # kscreen: the Display Configuration KCM (System Settings -> Display) — the
@@ -278,3 +265,18 @@ RUN chmod 0644 /etc/xdg/kscreenlockerrc /etc/xdg/baloofilerc /etc/xdg/kwalletrc 
 RUN setcap -r /usr/bin/kwin_wayland
 
 CMD ["/usr/local/bin/quasar-kde"]
+
+# Metadata LAST, after every RUN: a build arg joins the cache key of each RUN
+# below its ARG line, so VERSION up top made a version bump rebuild every layer.
+ARG VERSION=0.1.0-dev
+ARG KWIN_NVR
+LABEL org.opencontainers.image.title="Quasar KDE Plasma desktop" \
+      org.quasar.kde.kwin="${KWIN_NVR}.quasar1" \
+      org.quasar.image.contract="1" \
+      org.quasar.image.family="fedora" \
+      org.quasar.image.base.version="${VERSION}" \
+      org.quasar.image.acceleration="required" \
+      org.quasar.image.graphics-apis="vulkan,egl,opengl" \
+      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint" \
+      org.quasar.image.persist="/home/quasar" \
+      org.quasar.image.session="desktop"

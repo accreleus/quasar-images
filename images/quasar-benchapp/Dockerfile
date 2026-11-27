@@ -34,20 +34,6 @@ FROM ${BENCHAPP_SRC_IMAGE} AS benchapp-src
 
 FROM ${APP_IMAGE}
 
-ARG VERSION=0.1.0-dev
-ARG BENCHAPP_GIT_SHA=unknown
-
-LABEL org.opencontainers.image.title="Quasar benchapp streaming probe" \
-      org.opencontainers.image.description="Deterministic native-Wayland Vulkan probe that stamps every frame with a machine-readable luma marker and logs per-frame timing against CLOCK_REALTIME, for end-to-end cloud-gaming pipeline measurement." \
-      org.quasar.image.contract="1" \
-      org.quasar.image.family="fedora" \
-      org.quasar.image.base.version="${VERSION}" \
-      org.quasar.image.acceleration="required" \
-      org.quasar.image.graphics-apis="vulkan" \
-      org.quasar.image.persist="/home/quasar" \
-      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint" \
-      org.quasar.benchapp.git-sha="${BENCHAPP_GIT_SHA}"
-
 # quasar-app already carries vulkan-loader, mesa-vulkan-drivers, libwayland-client
 # and libxkbcommon — the probe's entire runtime closure except libwayland-cursor,
 # which winit dlopens for pointer themes. `socat` is what lets an operator (or the
@@ -79,3 +65,18 @@ ENV WGPU_BACKEND=vulkan \
     BENCHAPP_SCENES_DIR=/opt/benchapp/scenes
 
 CMD ["/usr/local/bin/quasar-benchapp"]
+
+# Metadata LAST, after every RUN: a build arg joins the cache key of each RUN
+# below its ARG line, so VERSION up top made a version bump rebuild every layer.
+ARG VERSION=0.1.0-dev
+ARG BENCHAPP_GIT_SHA=unknown
+LABEL org.opencontainers.image.title="Quasar benchapp streaming probe" \
+      org.opencontainers.image.description="Deterministic native-Wayland Vulkan probe that stamps every frame with a machine-readable luma marker and logs per-frame timing against CLOCK_REALTIME, for end-to-end cloud-gaming pipeline measurement." \
+      org.quasar.image.contract="1" \
+      org.quasar.image.family="fedora" \
+      org.quasar.image.base.version="${VERSION}" \
+      org.quasar.image.acceleration="required" \
+      org.quasar.image.graphics-apis="vulkan" \
+      org.quasar.image.persist="/home/quasar" \
+      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint" \
+      org.quasar.benchapp.git-sha="${BENCHAPP_GIT_SHA}"

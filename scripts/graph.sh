@@ -16,13 +16,15 @@
 #   graph.sh set publish           images with publish=true, topological order
 #   graph.sh set tier:<t>          images in tier <t>, topological order
 #   graph.sh order <name>...       the named images and their ancestors, in order
+#   graph.sh children <name>       images that list <name> in `needs`
 #   graph.sh field <name> <field>  one scalar field (dockerfile, target, tier, ...)
 #   graph.sh args <name>           resolved build args, one KEY=VALUE per line
 #   graph.sh verify <name>         verify scripts for <name>, one per line
 #   graph.sh matrix <selector>     a GitHub Actions matrix JSON array
 #   graph.sh check                 validate the graph (unknown deps, cycles, paths)
 #
-# `<selector>` for set/matrix is `ci`, `publish`, `tier:<t>`, or `ci+tier:<t>`.
+# `<selector>` for set/matrix is `ci`, `publish`, `tier:<t>`, `ci+tier:<t>`, or
+# `ci+consumes:<artifact>` (CI images that take <artifact> from the registry).
 
 set -euo pipefail
 
@@ -77,7 +79,8 @@ _select() {
     publish)    jq -r '.images[] | select(.publish) | .name' "$GRAPH" ;;
     tier:*)     jq -r --arg t "${1#tier:}" '.images[] | select(.tier == $t) | .name' "$GRAPH" ;;
     ci+tier:*)  jq -r --arg t "${1#ci+tier:}" '.images[] | select(.ci and .tier == $t) | .name' "$GRAPH" ;;
-    *) echo "graph.sh: unknown selector '$1' (all|every|artifact|ci|publish|tier:<t>|ci+tier:<t>)" >&2; exit 64 ;;
+    ci+consumes:*) jq -r --arg a "${1#ci+consumes:}" '.images[] | select(.ci and ((.consumes // []) | index($a))) | .name' "$GRAPH" ;;
+    *) echo "graph.sh: unknown selector '$1' (all|every|artifact|ci|publish|tier:<t>|ci+tier:<t>|ci+consumes:<a>)" >&2; exit 64 ;;
   esac
 }
 
@@ -128,6 +131,12 @@ case "$cmd" in
     [ $# -ge 1 ] || { echo "usage: graph.sh order <name>..." >&2; exit 64; }
     for n in "$@"; do _exists "$n" || { echo "graph.sh: no such image '$n'" >&2; exit 64; }; done
     _closure "$@"
+    ;;
+
+  children)
+    [ $# -eq 1 ] || { echo "usage: graph.sh children <name>" >&2; exit 64; }
+    _exists "$1" || { echo "graph.sh: no such image '$1'" >&2; exit 64; }
+    jq -r --arg n "$1" '.images[] | select((.needs // []) | index($n)) | .name' "$GRAPH"
     ;;
 
   field)
@@ -208,6 +217,13 @@ case "$cmd" in
             ;;
         esac
       done < <(_image "$n" | jq -r '.args // {} | keys_unsorted[]')
+      # `consumes` decides which CI job waits for an artifact; naming a non-artifact
+      # there would make that job wait on nothing.
+      for a in $(_image "$n" | jq -r '.consumes[]?'); do
+        if ! _exists "$a" || [ "$("$0" field "$a" tier)" != artifact ]; then
+          echo "$n: consumes '$a', which is not a tier=artifact image in this graph" >&2; fail=1
+        fi
+      done
       for v in $(_image "$n" | jq -r '.verify[]?'); do
         [ -x "$REPO_ROOT/$v" ] || { echo "$n: verify script '$v' missing or not executable" >&2; fail=1; }
       done
@@ -218,7 +234,7 @@ case "$cmd" in
     ;;
 
   *)
-    echo "usage: graph.sh {names|set|order|field|args|verify|matrix|check} ..." >&2
+    echo "usage: graph.sh {names|set|order|children|field|args|verify|matrix|check} ..." >&2
     exit 64
     ;;
 esac

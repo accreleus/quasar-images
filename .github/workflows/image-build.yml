@@ -38,21 +38,52 @@ name: Image build
 #
 #   plan          reads build-graph.json -- the ONLY statement of the image set
 #   kwin-artifact resolves (and on a publishing event may build) the patched
-#                 KWin RPMs, so quasar-kde does not spend 27 minutes
+#                 KWin RPMs, so quasar-kde does not spend 27 minutes. Runs
+#                 BESIDE the spine: only the images that consume it wait for it.
 #   spine         quasar-base -> quasar-app -> quasar-steam-runtime, one job, in
 #                 order. FIRST, so the shared ancestry is in the layer cache
 #                 before the leaves start; otherwise every parallel leaf job
 #                 rebuilds it from cold.
-#   leaves        everything else, one job each, in parallel
+#   leaves        every leaf that consumes no artifact, one job each, in
+#                 parallel, as soon as the spine is done
+#   kwin-leaves   the leaves whose graph entry `consumes` quasar-kwin-rpms
+#                 (quasar-kde), after the spine AND the artefact. A kwin miss
+#                 used to hold the spine and every leaf for its ~27 minutes.
+#
+# ── TRIGGERS ──────────────────────────────────────────────────────────────────
+#
+# Pull requests into develop get the same read-only chain as pull requests into
+# stable, so a broken build is caught before it reaches the integration branch.
+#
+# A change made ONLY of files that cannot alter an image does not run: Markdown,
+# docs/, and quasar-manifest.json (the catalog; it pins already-published
+# digests and is read by the control plane, never by a build). A change that
+# mixes those with anything else still runs. Tag pushes ignore path filters.
 on:
   pull_request:
-    branches: [stable]
+    branches: [stable, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'quasar-manifest.json'
   push:
     branches: [stable]
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'quasar-manifest.json'
   workflow_dispatch:
 
 permissions: {}
+
+# One run per ref at a time. A newer push to a PR replaces the old run; a
+# publishing run is never cancelled mid-publish, it queues. Runs on DIFFERENT
+# refs still overlap, which is why each run's stage refs carry its own tag
+# (QUASAR_IMAGE_TAG in _build-images.yml).
+concurrency:
+  group: image-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ── What to build, and the release-tag guard. No docker, no credentials. ────
@@ -64,8 +95,9 @@ jobs:
     outputs:
       spine: ${{ steps.sets.outputs.spine }}
       leaves: ${{ steps.sets.outputs.leaves }}
+      kwin-leaves: ${{ steps.sets.outputs.kwin-leaves }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # fetch-depth 0 so the release-tag guard can ask whether the tagged
           # commit is actually contained in stable.
@@ -93,10 +125,13 @@ jobs:
           set -euo pipefail
           ./scripts/build.sh check
           # The spine is one job's worth of work, in order, so it is a string;
-          # the leaves fan out, so they are a matrix array.
+          # the leaves fan out, so they are matrix arrays. Leaves that consume
+          # the kwin artefact are split out so nothing else waits for it.
+          kwin="$(./scripts/graph.sh set ci+consumes:quasar-kwin-rpms)"
           {
             echo "spine=$(./scripts/graph.sh set ci+tier:spine | tr '\n' ' ' | sed 's/ $//')"
-            echo "leaves=$(./scripts/graph.sh matrix ci+tier:leaf)"
+            echo "leaves=$(./scripts/graph.sh set ci+tier:leaf | grep -vxF -e "$kwin" | jq -R . | jq -sc .)"
+            echo "kwin-leaves=$(printf '%s\n' "$kwin" | grep . | jq -R . | jq -sc .)"
           } >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
 
@@ -115,7 +150,7 @@ jobs:
 
   spine-pr:
     if: github.event_name == 'pull_request'
-    needs: [plan, kwin-artifact-pr]
+    needs: plan
     permissions:
       contents: read
       packages: read
@@ -134,12 +169,28 @@ jobs:
   # fail-fast off: when quasar-kde breaks, the useful information is whether
   # quasar-steam and quasar-benchapp broke too.
   leaves-pr:
-    if: github.event_name == 'pull_request'
-    needs: [plan, kwin-artifact-pr, spine-pr]
+    if: github.event_name == 'pull_request' && needs.plan.outputs.leaves != '[]'
+    needs: [plan, spine-pr]
     strategy:
       fail-fast: false
       matrix:
         image: ${{ fromJSON(needs.plan.outputs.leaves) }}
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/_build-images.yml
+    with:
+      images: ${{ matrix.image }}
+      publish: false
+      cache-write: false
+
+  kwin-leaves-pr:
+    if: github.event_name == 'pull_request' && needs.plan.outputs.kwin-leaves != '[]'
+    needs: [plan, kwin-artifact-pr, spine-pr]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.kwin-leaves) }}
     permissions:
       contents: read
       packages: read
@@ -163,7 +214,7 @@ jobs:
 
   spine-publish:
     if: github.event_name != 'pull_request'
-    needs: [plan, kwin-artifact-publish]
+    needs: plan
     permissions:
       contents: read
       packages: write
@@ -177,8 +228,8 @@ jobs:
       cache-write: true
 
   leaves-publish:
-    if: github.event_name != 'pull_request'
-    needs: [plan, kwin-artifact-publish, spine-publish]
+    if: github.event_name != 'pull_request' && needs.plan.outputs.leaves != '[]'
+    needs: [plan, spine-publish]
     strategy:
       fail-fast: false
       matrix:
@@ -191,11 +242,27 @@ jobs:
       images: ${{ matrix.image }}
       publish: true
       cache-write: true
+
+  kwin-leaves-publish:
+    if: github.event_name != 'pull_request' && needs.plan.outputs.kwin-leaves != '[]'
+    needs: [plan, kwin-artifact-publish, spine-publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.kwin-leaves) }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/_build-images.yml
+    with:
+      images: ${{ matrix.image }}
+      publish: true
+      cache-write: true
       kwin-rpms-image: ${{ needs.kwin-artifact-publish.outputs.image }}
 
   # ── Release: the only job that can write repository contents. ──────────────
   release:
-    needs: [spine-publish, leaves-publish]
+    needs: [spine-publish, leaves-publish, kwin-leaves-publish]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

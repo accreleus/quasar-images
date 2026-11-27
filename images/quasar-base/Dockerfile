@@ -1,15 +1,6 @@
 # Fedora 43 multi-architecture index, selected 2026-07-14.
 FROM registry.fedoraproject.org/fedora@sha256:711261231459f5ebc6694f7eb2b4b427b87fb6272df8b6663cb4bcbdbb220e9f
 
-ARG VERSION=0.1.0-dev
-
-LABEL org.opencontainers.image.title="Quasar common Fedora base" \
-      org.opencontainers.image.vendor="Quasar" \
-      org.quasar.image.contract="1" \
-      org.quasar.image.family="fedora" \
-      org.quasar.image.base.version="${VERSION}" \
-      org.quasar.image.acceleration="optional" \
-      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
 
 # glibc-langpack-<ll>: one per language the quasar settings picker offers (LANGUAGES in the quasar
 # repo's web/src/lib/region/options.ts: en de fr es it nl pl pt sv ru ja ko zh). LANG and LC_*
@@ -98,3 +89,14 @@ ENV HOME=/home/quasar \
 # subreaper orphan-reaping is unaffected by dropping -g.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/quasar-entrypoint"]
 CMD ["/bin/bash"]
+
+# Metadata LAST, after every RUN: a build arg joins the cache key of each RUN
+# below its ARG line, so VERSION up top made a version bump rebuild every layer.
+ARG VERSION=0.1.0-dev
+LABEL org.opencontainers.image.title="Quasar common Fedora base" \
+      org.opencontainers.image.vendor="Quasar" \
+      org.quasar.image.contract="1" \
+      org.quasar.image.family="fedora" \
+      org.quasar.image.base.version="${VERSION}" \
+      org.quasar.image.acceleration="optional" \
+      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"

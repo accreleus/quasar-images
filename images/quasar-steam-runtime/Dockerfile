@@ -29,15 +29,6 @@ RUN git clone --branch "${BWRAP_REF}" --depth 1 https://github.com/containers/bu
 
 FROM ${APP_IMAGE}
 
-ARG VERSION=0.1.0-dev
-LABEL org.opencontainers.image.title="Quasar Steam runtime" \
-      org.quasar.image.contract="1" \
-      org.quasar.image.family="fedora" \
-      org.quasar.image.base.version="${VERSION}" \
-      org.quasar.image.acceleration="required" \
-      org.quasar.image.graphics-apis="vulkan,egl,opengl" \
-      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
-
 RUN dnf --setopt=install_weak_deps=False -y install \
       "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
       "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
@@ -71,3 +62,14 @@ COPY images/quasar-steam-runtime/overlay/usr/local/bin/steam /usr/local/bin/stea
 RUN chmod 0755 /usr/local/bin/steam \
     && sed -i 's|^Exec=/usr/bin/steam |Exec=/usr/local/bin/steam |' /usr/share/applications/steam.desktop \
     && ! grep -q '^Exec=/usr/bin/steam' /usr/share/applications/steam.desktop
+
+# Metadata LAST, after every RUN: a build arg joins the cache key of each RUN
+# below its ARG line, so VERSION up top made a version bump rebuild every layer.
+ARG VERSION=0.1.0-dev
+LABEL org.opencontainers.image.title="Quasar Steam runtime" \
+      org.quasar.image.contract="1" \
+      org.quasar.image.family="fedora" \
+      org.quasar.image.base.version="${VERSION}" \
+      org.quasar.image.acceleration="required" \
+      org.quasar.image.graphics-apis="vulkan,egl,opengl" \
+      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"

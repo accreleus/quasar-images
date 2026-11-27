@@ -1,7 +1,6 @@
 ARG APP_IMAGE=quasar-app:dev
 FROM ${APP_IMAGE}
 
-ARG VERSION=0.1.0-dev
 
 # Both benchmarks are optional so the image can be built small (Heaven only,
 # ~340 MB extracted) on a disk-constrained host. Superposition is ~1.7 GB
@@ -18,16 +17,6 @@ ARG HEAVEN_URL=https://assets.unigine.com/d/Unigine_Heaven-4.0.run
 ARG HEAVEN_SHA256=52db2e5dedd5621d7c2bfa936b482c0a7cc69b30616278ef199513d494d8e397
 ARG SUPERPOSITION_URL=https://assets.unigine.com/d/Unigine_Superposition-1.1.run
 ARG SUPERPOSITION_SHA256=7494e1c73bf59ef2161513d5d5cb9d9bffbd8479929d4976ac53b6955de580f8
-
-LABEL org.opencontainers.image.title="Quasar UNIGINE benchmark workload" \
-      org.opencontainers.image.description="UNIGINE Heaven 4.0 and Superposition 1.1 running as a self-driving, looping GPU benchmark for Quasar streaming tests." \
-      org.quasar.image.contract="1" \
-      org.quasar.image.family="fedora" \
-      org.quasar.image.base.version="${VERSION}" \
-      org.quasar.image.acceleration="required" \
-      org.quasar.image.graphics-apis="opengl,egl,vulkan" \
-      org.quasar.image.persist="/home/quasar" \
-      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
 
 # gamescope is what gives this image an X server: the UNIGINE benchmarks are
 # X11/GLX clients and Quasar hands the session a *Wayland* socket, so something
@@ -97,3 +86,16 @@ ENV UNIGINE_BENCH=heaven \
     UNIGINE_SOUND=null
 
 CMD ["/usr/local/bin/quasar-unigine"]
+
+# Metadata LAST, after every RUN: a build arg joins the cache key of each RUN
+# below its ARG line, so VERSION up top made a version bump rebuild every layer.
+ARG VERSION=0.1.0-dev
+LABEL org.opencontainers.image.title="Quasar UNIGINE benchmark workload" \
+      org.opencontainers.image.description="UNIGINE Heaven 4.0 and Superposition 1.1 running as a self-driving, looping GPU benchmark for Quasar streaming tests." \
+      org.quasar.image.contract="1" \
+      org.quasar.image.family="fedora" \
+      org.quasar.image.base.version="${VERSION}" \
+      org.quasar.image.acceleration="required" \
+      org.quasar.image.graphics-apis="opengl,egl,vulkan" \
+      org.quasar.image.persist="/home/quasar" \
+      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
