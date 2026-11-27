@@ -2,17 +2,6 @@ ARG STEAM_RUNTIME_IMAGE=quasar-steam-runtime:dev
 
 FROM ${STEAM_RUNTIME_IMAGE}
 
-ARG VERSION=0.1.0-dev
-LABEL org.opencontainers.image.title="Quasar XFCE desktop" \
-      org.quasar.image.contract="1" \
-      org.quasar.image.family="fedora" \
-      org.quasar.image.base.version="${VERSION}" \
-      org.quasar.image.acceleration="required" \
-      org.quasar.image.graphics-apis="vulkan,egl,opengl" \
-      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint" \
-      org.quasar.image.persist="/home/quasar" \
-      org.quasar.image.session="desktop"
-
 # Session: xfce4-session xfwm4 xfce4-panel xfdesktop xfce4-settings xfconf,
 # plus xorg-x11-server-Xwayland (NOT inherited -- quasar-steam-runtime has no
 # X server; verified on the dev box) and dbus-x11 for dbus-launch/dbus-run-session
@@ -133,3 +122,16 @@ RUN chmod 0644 /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \
 # strip. scripts/verify-xfce.sh asserts that stays true across package bumps.
 
 CMD ["/usr/local/bin/quasar-xfce"]
+
+# Metadata LAST, after every RUN: a build arg joins the cache key of each RUN
+# below its ARG line, so VERSION up top made a version bump rebuild every layer.
+ARG VERSION=0.1.0-dev
+LABEL org.opencontainers.image.title="Quasar XFCE desktop" \
+      org.quasar.image.contract="1" \
+      org.quasar.image.family="fedora" \
+      org.quasar.image.base.version="${VERSION}" \
+      org.quasar.image.acceleration="required" \
+      org.quasar.image.graphics-apis="vulkan,egl,opengl" \
+      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint" \
+      org.quasar.image.persist="/home/quasar" \
+      org.quasar.image.session="desktop"

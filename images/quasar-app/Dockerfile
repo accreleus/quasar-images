@@ -20,15 +20,6 @@ RUN make -C /src/display-bridge
 
 FROM ${BASE_IMAGE}
 
-ARG VERSION=0.1.0-dev
-LABEL org.opencontainers.image.title="Quasar accelerated application runtime" \
-      org.quasar.image.contract="1" \
-      org.quasar.image.family="fedora" \
-      org.quasar.image.base.version="${VERSION}" \
-      org.quasar.image.acceleration="required" \
-      org.quasar.image.graphics-apis="vulkan,egl,opengl" \
-      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
-
 RUN dnf --setopt=install_weak_deps=False -y install \
       alsa-plugins-pulseaudio alsa-lib \
       egl-wayland libglvnd-egl libglvnd-gles libglvnd-glx \
@@ -59,3 +50,14 @@ RUN chmod 0755 /usr/local/bin/quasar-gpu-init /usr/local/bin/quasar-gpu-probe
 COPY --from=display-bridge-builder /src/display-bridge/quasar-display-bridge /usr/local/bin/quasar-display-bridge
 RUN chmod 0755 /usr/local/bin/quasar-display-bridge \
     && ln -s quasar-display-bridge /usr/local/bin/quasar-xfce-modes
+
+# Metadata LAST, after every RUN: a build arg joins the cache key of each RUN
+# below its ARG line, so VERSION up top made a version bump rebuild every layer.
+ARG VERSION=0.1.0-dev
+LABEL org.opencontainers.image.title="Quasar accelerated application runtime" \
+      org.quasar.image.contract="1" \
+      org.quasar.image.family="fedora" \
+      org.quasar.image.base.version="${VERSION}" \
+      org.quasar.image.acceleration="required" \
+      org.quasar.image.graphics-apis="vulkan,egl,opengl" \
+      org.quasar.image.entrypoint="/usr/local/bin/quasar-entrypoint"
