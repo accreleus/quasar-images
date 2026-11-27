@@ -66,6 +66,12 @@ jobs:
       # consumes them, and they are separate from the published packages
       # precisely so that is obvious. See scripts/build.sh, "the parent problem".
       QUASAR_IMAGE_REGISTRY: ${{ inputs.cache-write && format('ghcr.io/{0}/stage', github.repository_owner) || '' }}
+      # The tag of every local image AND of every stage/* ref this run pushes, so
+      # a parent resolved by `FROM` is always this run's. With the old shared
+      # :dev, an overlapping develop dispatch and stable push (runs 37206839700
+      # and 37207016144, 2026-10-04) could build a stable leaf on a develop
+      # parent. Per run, not per sha: re-runs of one run share it, nothing else.
+      QUASAR_IMAGE_TAG: run-${{ github.run_id }}
       KWIN_RPMS_IMAGE: ${{ inputs.kwin-rpms-image }}
       BENCHAPP_SRC_IMAGE: ${{ inputs.benchapp-src-image }}
     steps:
@@ -166,7 +172,7 @@ jobs:
             # channel re-walks and re-verifies each layer, and that burst across
             # several images tripped GitHub's secondary rate limit (403) on the
             # first real publish. imagetools copies the manifest only.
-            docker tag "$image:dev" "$remote:$sha_tag"
+            docker tag "$image:$QUASAR_IMAGE_TAG" "$remote:$sha_tag"
             docker push "$remote:$sha_tag"
             for channel_tag in "${channels[@]}"; do
               docker buildx imagetools create --tag "$remote:$channel_tag" "$remote:$sha_tag"

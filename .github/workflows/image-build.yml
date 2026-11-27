@@ -59,6 +59,14 @@ on:
 
 permissions: {}
 
+# One run per ref at a time. A newer push to a PR replaces the old run; a
+# publishing run is never cancelled mid-publish, it queues. Runs on DIFFERENT
+# refs still overlap, which is why each run's stage refs carry its own tag
+# (QUASAR_IMAGE_TAG in _build-images.yml).
+concurrency:
+  group: image-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # ── What to build, and the release-tag guard. No docker, no credentials. ────
   plan:
